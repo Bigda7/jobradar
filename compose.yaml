@@ -1,0 +1,113 @@
+name: jobradar
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: jobradar
+      POSTGRES_USER: jobradar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobradar}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobradar -d jobradar"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
+    restart: unless-stopped
+
+  api:
+    image: jobradar-app:latest
+    build:
+      context: .
+      target: runtime
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:-jobradar}@db:5432/jobradar
+    command: ["sh", "-c", "alembic upgrade head && uvicorn jobradar.api.app:app --host 0.0.0.0 --port 8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:8000:8000"
+    logging: *default-logging
+    restart: unless-stopped
+
+  worker:
+    image: jobradar-app:latest
+    build:
+      context: .
+      target: runtime
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:-jobradar}@db:5432/jobradar
+    command: ["python", "-m", "jobradar.worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+    restart: unless-stopped
+
+  bot:
+    image: jobradar-app:latest
+    build:
+      context: .
+      target: runtime
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:-jobradar}@db:5432/jobradar
+    command: ["python", "-m", "jobradar.bot"]
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+    restart: unless-stopped
+
+  db-test:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: jobradar_test
+      POSTGRES_USER: jobradar
+      POSTGRES_PASSWORD: jobradar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobradar -d jobradar_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    logging: *default-logging
+
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://jobradar:jobradar@db-test:5432/jobradar_test
+      TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar@db-test:5432/jobradar_test
+    command: ["sh", "-c", "python tests/reset_test_database.py && alembic upgrade head && pytest -o cache_dir=/tmp/pytest_cache -m integration"]
+    depends_on:
+      db-test:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  postgres_data:

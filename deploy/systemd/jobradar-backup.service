@@ -1,0 +1,18 @@
+[Unit]
+Description=Create a JobRadar PostgreSQL backup
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/jobradar/compose.yaml
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=docker
+WorkingDirectory=/opt/jobradar
+Environment=JOBRADAR_PROJECT_DIR=/opt/jobradar
+Environment=JOBRADAR_BACKUP_RETENTION_DAYS=14
+ExecStart=/usr/bin/bash /opt/jobradar/scripts/backup_postgres.sh
+UMask=0077
+Nice=10
+TimeoutStartSec=30min

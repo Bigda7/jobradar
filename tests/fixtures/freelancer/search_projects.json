@@ -1,0 +1,83 @@
+{
+  "status": "success",
+  "result": {
+    "total_count": 2,
+    "projects": [
+      {
+        "id": 501001,
+        "owner_id": 7001,
+        "title": "Build a Django and React dashboard",
+        "description": "Create a remote dashboard with Django REST Framework, React and PostgreSQL.",
+        "seo_url": "python-react/build-django-react-dashboard",
+        "type": "fixed",
+        "local": false,
+        "submitdate": 1787385600,
+        "budget": {
+          "minimum": 300,
+          "maximum": 600
+        },
+        "currency": {
+          "code": "USD",
+          "sign": "$"
+        },
+        "jobs": [
+          {
+            "id": 13,
+            "name": "Python"
+          },
+          {
+            "id": 335,
+            "name": "Django"
+          },
+          {
+            "id": 305,
+            "name": "React.js"
+          }
+        ],
+        "bid_stats": {
+          "bid_count": 12,
+          "bid_avg": 425
+        }
+      },
+      {
+        "id": 501002,
+        "owner_id": 7002,
+        "title": "On-site network installation",
+        "description": "Install network equipment at our office.",
+        "seo_url": "network-administration/onsite-network-installation",
+        "type": "hourly",
+        "local": true,
+        "submitdate": 1787389200,
+        "budget": {
+          "minimum": 20,
+          "maximum": 35
+        },
+        "currency": {
+          "code": "USD",
+          "sign": "$"
+        }
+      }
+    ],
+    "users": {
+      "7001": {
+        "id": 7001,
+        "username": "verified-employer",
+        "display_name": "Verified Employer",
+        "status": {
+          "payment_verified": true
+        },
+        "employer_reputation": {
+          "entire_history": {
+            "overall": 4.8,
+            "reviews": 24
+          }
+        }
+      },
+      "7002": {
+        "id": 7002,
+        "username": "local-employer"
+      }
+    }
+  },
+  "request_id": "fixture-request-id"
+}
