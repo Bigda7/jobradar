@@ -130,6 +130,23 @@ def format_converted_range(
     return tuple(result)
 
 
+def format_original_range(
+    minimum: Decimal | None,
+    maximum: Decimal | None,
+    source_currency: str | None,
+    period: str | None,
+) -> tuple[str, ...]:
+    if minimum is None and maximum is None:
+        return ()
+    source_minimum = minimum if minimum is not None else maximum
+    source_maximum = maximum if maximum is not None else minimum
+    if source_minimum is None or source_maximum is None:
+        return ()
+    currency = source_currency.upper() if source_currency else "Original currency"
+    period_suffix = f" / {_translate_period(period)}" if period else ""
+    return (f"{currency}: {_format_range(source_minimum, source_maximum)}{period_suffix}",)
+
+
 def _format_range(minimum: Decimal, maximum: Decimal) -> str:
     formatted_minimum = _format_amount(minimum)
     formatted_maximum = _format_amount(maximum)

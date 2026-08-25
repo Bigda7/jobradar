@@ -53,6 +53,7 @@ class TelegramBotService:
         minimum_score: int,
         latest_limit: int,
         poll_timeout_seconds: int,
+        all_message_delay_seconds: float = 1.0,
     ) -> None:
         self._telegram = telegram_client
         self._notifications = notification_service
@@ -64,6 +65,7 @@ class TelegramBotService:
         self._minimum_score = minimum_score
         self._latest_limit = latest_limit
         self._poll_timeout_seconds = poll_timeout_seconds
+        self._all_message_delay_seconds = all_message_delay_seconds
 
     async def run(self, stop_event: asyncio.Event) -> None:
         await self._telegram.set_my_commands(BOT_COMMANDS)
@@ -237,6 +239,7 @@ class TelegramBotService:
             candidates,
             empty_message="Подходящих вакансий и проектов пока нет.",
             heading="Все подходящие вакансии и проекты",
+            message_delay_seconds=self._all_message_delay_seconds,
         )
 
     async def _send_candidates(
@@ -245,16 +248,17 @@ class TelegramBotService:
         *,
         empty_message: str,
         heading: str,
+        message_delay_seconds: float = 0,
     ) -> None:
         if not candidates:
             await self._telegram.send_message(empty_message)
             return
-        rates_available, rates = await self._rates_for(candidates)
-        if not rates_available:
-            return
+        rates = await self._rates_for(candidates)
         favorite_ids = await self._states.favorite_ids()
         await self._telegram.send_message(f"{heading}: {len(candidates)}")
         for candidate in candidates:
+            if message_delay_seconds > 0:
+                await asyncio.sleep(message_delay_seconds)
             message_id = await self._telegram.send_message(
                 format_match_message(candidate, rates),
                 reply_markup=opportunity_keyboard(
@@ -376,19 +380,16 @@ class TelegramBotService:
     async def _rates_for(
         self,
         candidates: list[NotificationCandidate],
-    ) -> tuple[bool, ExchangeRates | None]:
+    ) -> ExchangeRates | None:
         if not any(
             item.salary_min is not None or item.salary_max is not None for item in candidates
         ):
-            return True, None
+            return None
         try:
-            return True, await self._exchange_rates.fetch_rates()
+            return await self._exchange_rates.fetch_rates()
         except CurrencyConversionError as error:
             logger.warning("telegram_command_currency_failed", error=str(error))
-            await self._telegram.send_message(
-                "Не удалось получить курсы валют. Попробуйте команду ещё раз позже."
-            )
-            return False, None
+            return None
 
     async def _send_lines(self, lines: list[str]) -> None:
         chunk: list[str] = []
@@ -469,6 +470,7 @@ async def run_bot() -> None:
         minimum_score=settings.matching_min_score,
         latest_limit=settings.telegram_latest_limit,
         poll_timeout_seconds=settings.telegram_poll_timeout_seconds,
+        all_message_delay_seconds=settings.telegram_all_message_delay_seconds,
     )
     try:
         await service.run(stop_event)

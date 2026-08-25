@@ -264,6 +264,75 @@ async def test_interrupted_crawl_does_not_deactivate_missing_listings(
 
 
 @pytest.mark.asyncio
+async def test_empty_snapshot_is_blocked_before_deactivation(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = IngestionService(sqlite_session_factory)
+    await service.run_source(MockSource())
+
+    result = await service.run_source(MockSource(()))
+
+    assert result.status is RunStatus.FAILED
+    assert result.deactivated == 0
+    async with sqlite_session_factory() as session:
+        listings = list(await session.scalars(select(Listing).order_by(Listing.external_id)))
+        assert [listing.is_active for listing in listings] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_losing_more_than_eighty_percent_is_blocked(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    inventory = []
+    for index in range(10):
+        listing = deepcopy(DEFAULT_LISTINGS[0])
+        listing.update(
+            {
+                "id": f"guard-{index}",
+                "url": f"https://example.com/jobs/guard-{index}",
+                "title": f"Remote Python Developer {index}",
+            }
+        )
+        inventory.append(listing)
+    service = IngestionService(sqlite_session_factory)
+    await service.run_source(MockSource(inventory))
+
+    result = await service.run_source(MockSource((inventory[0],)))
+
+    assert result.status is RunStatus.FAILED
+    assert result.deactivated == 0
+    async with sqlite_session_factory() as session:
+        active_count = await session.scalar(
+            select(func.count()).select_from(Listing).where(Listing.is_active.is_(True))
+        )
+        assert active_count == 10
+
+
+@pytest.mark.asyncio
+async def test_snapshot_losing_exactly_eighty_percent_is_reconciled(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    inventory = []
+    for index in range(5):
+        listing = deepcopy(DEFAULT_LISTINGS[0])
+        listing.update(
+            {
+                "id": f"boundary-{index}",
+                "url": f"https://example.com/jobs/boundary-{index}",
+                "title": f"Remote React Developer {index}",
+            }
+        )
+        inventory.append(listing)
+    service = IngestionService(sqlite_session_factory)
+    await service.run_source(MockSource(inventory))
+
+    result = await service.run_source(MockSource((inventory[0],)))
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.deactivated == 4
+
+
+@pytest.mark.asyncio
 async def test_rolling_feed_does_not_deactivate_items_omitted_from_limited_window(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

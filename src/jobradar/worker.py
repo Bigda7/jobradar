@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import structlog
 
 from jobradar.config import get_settings
+from jobradar.db.locks import try_transaction_advisory_lock
 from jobradar.db.session import engine, session_factory
 from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
 from jobradar.ingestion.service import IngestionService
@@ -19,12 +20,20 @@ from jobradar.opportunities.expiration import StaleExpirationService
 from jobradar.sources.registry import build_source_registry
 
 logger = structlog.get_logger(__name__)
+WORKER_CYCLE_LOCK_KEY = 0x4A4F425241444152
+
+
+class WorkerCycleLockUnavailable(RuntimeError):
+    pass
 
 
 async def run_cycle(*, force_sources: bool = False) -> None:
     settings = get_settings()
     cycle_started_at = datetime.now(UTC)
-    ingestion = IngestionService(session_factory)
+    ingestion = IngestionService(
+        session_factory,
+        reconciliation_max_missing_ratio=settings.source_reconciliation_max_missing_ratio,
+    )
     sources = build_source_registry(settings)
     await ingestion.synchronize_enabled_sources(sources)
     for source in sources:
@@ -110,6 +119,34 @@ async def run_cycle(*, force_sources: bool = False) -> None:
     )
 
 
+async def run_worker_cycle(
+    *,
+    force_sources: bool,
+    failure_retry_seconds: int,
+) -> bool:
+    try:
+        async with try_transaction_advisory_lock(
+            engine,
+            WORKER_CYCLE_LOCK_KEY,
+        ) as lock_acquired:
+            if not lock_acquired:
+                raise WorkerCycleLockUnavailable(
+                    "Another JobRadar worker cycle already holds the advisory lock."
+                )
+            await run_cycle(force_sources=force_sources)
+    except Exception as error:
+        logger.exception(
+            "worker_cycle_failed",
+            error=str(error),
+            retry_seconds=failure_retry_seconds,
+        )
+        if force_sources:
+            raise
+        return False
+    logger.info("worker_cycle_finished")
+    return True
+
+
 async def run_worker(run_once: bool = False) -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -125,14 +162,20 @@ async def run_worker(run_once: bool = False) -> None:
     try:
         while not stop_event.is_set():
             logger.info("worker_cycle_started")
-            await run_cycle(force_sources=run_once)
-            logger.info("worker_cycle_finished")
+            cycle_succeeded = await run_worker_cycle(
+                force_sources=run_once,
+                failure_retry_seconds=settings.worker_failure_retry_seconds,
+            )
             if run_once:
                 break
             try:
                 await asyncio.wait_for(
                     stop_event.wait(),
-                    timeout=settings.worker_interval_seconds,
+                    timeout=(
+                        settings.worker_interval_seconds
+                        if cycle_succeeded
+                        else settings.worker_failure_retry_seconds
+                    ),
                 )
             except TimeoutError:
                 continue

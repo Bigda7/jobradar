@@ -86,9 +86,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 max_items=settings.startupjobs_cz_max_items,
                 remote_only=settings.startupjobs_cz_remote_only,
                 detail_cache_ttl_seconds=settings.startupjobs_cz_detail_cache_ttl_seconds,
-                detail_request_delay_seconds=(
-                    settings.startupjobs_cz_detail_request_delay_seconds
-                ),
+                detail_request_delay_seconds=(settings.startupjobs_cz_detail_request_delay_seconds),
             )
         )
     if settings.prace_cz_source_enabled:

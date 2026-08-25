@@ -27,6 +27,10 @@ from jobradar.sources.base import BaseSource, CachedListing
 logger = structlog.get_logger(__name__)
 
 
+class SuspiciousSourceInventoryError(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class IngestionResult:
     source_name: str
@@ -42,8 +46,16 @@ class IngestionResult:
 
 
 class IngestionService:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        reconciliation_max_missing_ratio: float = 0.8,
+    ) -> None:
+        if not 0 <= reconciliation_max_missing_ratio < 1:
+            raise ValueError("reconciliation_max_missing_ratio must be between 0 and 1.")
         self._session_factory = session_factory
+        self._reconciliation_max_missing_ratio = reconciliation_max_missing_ratio
 
     async def synchronize_enabled_sources(self, adapters: Iterable[BaseSource]) -> None:
         enabled_names = {adapter.name for adapter in adapters}
@@ -270,11 +282,26 @@ class IngestionService:
                 Listing.source_id == source_id,
                 Listing.is_active.is_(True),
             )
-            if seen_external_ids:
-                statement = statement.where(Listing.external_id.not_in(seen_external_ids))
-            listings = list((await session.scalars(statement)).all())
+            active_listings = list((await session.scalars(statement)).all())
+            if not active_listings:
+                return 0
+            listings = [
+                listing
+                for listing in active_listings
+                if listing.external_id not in seen_external_ids
+            ]
             if not listings:
                 return 0
+            missing_count = len(listings)
+            missing_ratio = missing_count / len(active_listings)
+            if missing_count and (
+                not seen_external_ids or missing_ratio > self._reconciliation_max_missing_ratio
+            ):
+                raise SuspiciousSourceInventoryError(
+                    "Source inventory reconciliation was blocked: "
+                    f"{missing_count} of {len(active_listings)} active listings disappeared "
+                    f"({missing_ratio:.1%})."
+                )
             opportunity_ids = {listing.opportunity_id for listing in listings}
             for listing in listings:
                 listing.is_active = False

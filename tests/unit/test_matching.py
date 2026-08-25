@@ -79,6 +79,128 @@ def test_matching_profile_scores_relevant_junior_role_highly() -> None:
     assert result.concerns == ()
 
 
+@pytest.mark.parametrize(
+    "technology",
+    (
+        "PHP",
+        "Laravel",
+        "Symfony",
+        "Java",
+        "Spring",
+        "C#",
+        ".NET",
+        "Ruby",
+        "Ruby on Rails",
+        "Go",
+        "Rust",
+        "C++",
+        "Angular",
+        "Vue",
+        "Nuxt",
+        "WordPress",
+        "Bitrix",
+        "Magento",
+    ),
+)
+def test_matching_profile_applies_one_negative_skill_penalty_to_optional_technology(
+    technology: str,
+) -> None:
+    base_candidate = _candidate(
+        title="Frontend React Developer",
+        description="Build React interfaces.",
+        salary_min=None,
+        salary_max=None,
+        salary_currency=None,
+        salary_period=None,
+        raw_data={},
+    )
+    baseline = score_candidate(base_candidate, BOHDAN_PROFILE)
+    result = score_candidate(
+        _candidate(
+            title=base_candidate.title,
+            description=f"Build React interfaces. {technology} will be a plus.",
+            salary_min=None,
+            salary_max=None,
+            salary_currency=None,
+            salary_period=None,
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score == baseline.score - BOHDAN_PROFILE.negative_skill_penalty
+    assert any("Применён штраф 15 баллов" in concern for concern in result.concerns)
+    assert not any("основная или обязательная" in concern for concern in result.concerns)
+
+
+def test_matching_profile_keeps_strong_match_with_optional_negative_skill_above_threshold() -> None:
+    result = score_candidate(
+        _candidate(
+            description=(
+                "Build React interfaces and Django REST APIs with PostgreSQL. PHP will be a plus."
+            ),
+            raw_data={
+                "experienceRequirements": {"monthsOfExperience": 12},
+                "skills": ["React", "Django", "PHP"],
+            },
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score >= BOHDAN_PROFILE.notification_threshold
+    assert any("PHP" in concern for concern in result.concerns)
+    assert not any("основная или обязательная" in concern for concern in result.concerns)
+
+
+@pytest.mark.parametrize(
+    ("changes", "technology"),
+    (
+        ({"title": "Junior React and PHP Full-Stack Developer"}, "PHP"),
+        (
+            {
+                "description": (
+                    "Build React interfaces and Django REST APIs. PHP is required. "
+                    "React experience is a plus."
+                )
+            },
+            "PHP",
+        ),
+        (
+            {
+                "raw_data": {
+                    "experienceRequirements": {"monthsOfExperience": 12},
+                    "skills": ["Angular"],
+                }
+            },
+            "Angular",
+        ),
+    ),
+)
+def test_matching_profile_keeps_core_negative_skill_below_notification_threshold(
+    changes: dict[str, object],
+    technology: str,
+) -> None:
+    result = score_candidate(_candidate(**changes), BOHDAN_PROFILE)
+
+    assert result.score == BOHDAN_PROFILE.notification_threshold - 1
+    assert any(technology in concern for concern in result.concerns)
+    assert any("основная или обязательная" in concern for concern in result.concerns)
+
+
+def test_matching_profile_does_not_treat_plain_words_as_negative_technologies() -> None:
+    result = score_candidate(
+        _candidate(
+            description=(
+                "Build React interfaces and Django APIs. Go to production during the spring. "
+                "JavaScript experience is required."
+            )
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert not any("технологии вне профиля" in concern for concern in result.concerns)
+
+
 def test_matching_profile_rejects_non_remote_role() -> None:
     result = score_candidate(_candidate(work_mode=WorkMode.ONSITE), BOHDAN_PROFILE)
 

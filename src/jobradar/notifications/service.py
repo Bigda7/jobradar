@@ -24,6 +24,7 @@ from jobradar.notifications.currency import (
     ExchangeRateProvider,
     ExchangeRates,
     format_converted_range,
+    format_original_range,
 )
 from jobradar.notifications.messages import TelegramMessageRegistry
 from jobradar.notifications.preferences import NotificationPreferenceService
@@ -119,15 +120,11 @@ class NotificationService:
             try:
                 rates = await self._exchange_rate_provider.fetch_rates()
             except CurrencyConversionError as error:
-                failed_count = min(len(candidates), max_messages)
-                summary.considered = failed_count
-                summary.failed = failed_count
                 logger.warning(
-                    "currency_conversion_unavailable",
-                    candidates=failed_count,
+                    "currency_conversion_fallback_original",
+                    candidates=min(len(candidates), max_messages),
                     error=str(error),
                 )
-                return summary
         for candidate in candidates:
             if summary.sent >= max_messages:
                 break
@@ -415,19 +412,19 @@ def opportunity_keyboard(
             "inline_keyboard": [
                 [
                     {
-                        "text": "Восстановить \U0001f504",
+                        "text": "Восстановить",
                         "callback_data": f"restore:{opportunity_id}",
                     },
                     link_button,
                 ]
             ]
         }
-    favorite_text = "В избранном \u2b50" if is_favorite else "В избранное \u2b50"
+    favorite_text = "В избранном" if is_favorite else "В избранное"
     return {
         "inline_keyboard": [
             [
                 {"text": favorite_text, "callback_data": f"favorite:{opportunity_id}"},
-                {"text": "Скрыть \u274c", "callback_data": f"hide:{opportunity_id}"},
+                {"text": "Скрыть", "callback_data": f"hide:{opportunity_id}"},
                 link_button,
             ]
         ]
@@ -503,14 +500,27 @@ def _format_salary(
     if candidate.salary_min is None and candidate.salary_max is None:
         return ()
     if rates is None:
-        raise CurrencyConversionError("Exchange rates are required for a published amount.")
-    return format_converted_range(
-        candidate.salary_min,
-        candidate.salary_max,
-        candidate.salary_currency,
-        candidate.salary_period,
-        rates,
-    )
+        return format_original_range(
+            candidate.salary_min,
+            candidate.salary_max,
+            candidate.salary_currency,
+            candidate.salary_period,
+        )
+    try:
+        return format_converted_range(
+            candidate.salary_min,
+            candidate.salary_max,
+            candidate.salary_currency,
+            candidate.salary_period,
+            rates,
+        )
+    except CurrencyConversionError:
+        return format_original_range(
+            candidate.salary_min,
+            candidate.salary_max,
+            candidate.salary_currency,
+            candidate.salary_period,
+        )
 
 
 def _has_published_amount(candidate: NotificationCandidate) -> bool:

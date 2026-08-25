@@ -1,5 +1,9 @@
 .git
 .gitignore
+.env
+.env.*
+*.key
+*.pem
 .venv*
 __pycache__
 *.pyc

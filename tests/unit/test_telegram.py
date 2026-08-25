@@ -12,7 +12,7 @@ from jobradar.domain.enums import DeliveryStatus, OpportunityKind
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
-from jobradar.notifications.currency import ExchangeRates
+from jobradar.notifications.currency import CurrencyConversionError, ExchangeRates
 from jobradar.notifications.preferences import NotificationPreferenceService
 from jobradar.notifications.service import (
     NotificationCandidate,
@@ -53,6 +53,11 @@ TEST_RATES = ExchangeRates(
 class FixedExchangeRateProvider:
     async def fetch_rates(self) -> ExchangeRates:
         return TEST_RATES
+
+
+class FailingExchangeRateProvider:
+    async def fetch_rates(self) -> ExchangeRates:
+        raise CurrencyConversionError("NBU is unavailable")
 
 
 @pytest.mark.asyncio
@@ -118,6 +123,31 @@ async def test_notification_delivery_is_idempotent(
     assert any("- CZK: 24,000-36,000 / месяц" in message for message in client.messages)
     async with sqlite_session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(NotificationDelivery)) == 2
+
+
+@pytest.mark.asyncio
+async def test_notification_delivery_falls_back_to_original_currency(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecordingTelegramClient()
+
+    result = await NotificationService(
+        sqlite_session_factory,
+        client,
+        FailingExchangeRateProvider(),
+    ).dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
+
+    assert result.sent == 2
+    assert result.failed == 0
+    assert any("- USD: 1,200-1,800 / месяц" in message for message in client.messages)
+    assert all("- UAH:" not in message for message in client.messages)
 
 
 @pytest.mark.asyncio

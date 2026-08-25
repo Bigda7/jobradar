@@ -178,12 +178,15 @@ class Settings(BaseSettings):
     telegram_polling_enabled: bool = False
     telegram_poll_timeout_seconds: int = Field(default=15, ge=1, le=50)
     telegram_latest_limit: int = Field(default=5, ge=1, le=20)
+    telegram_all_message_delay_seconds: float = Field(default=1.0, ge=0, le=5)
     nbu_rates_url: str = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
     nbu_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     employment_stale_after_days: int = Field(default=30, ge=1, le=365)
     freelance_stale_after_days: int = Field(default=7, ge=1, le=365)
+    source_reconciliation_max_missing_ratio: float = Field(default=0.8, ge=0, lt=1)
     source_poll_jitter_ratio: float = Field(default=0.15, ge=0, le=0.5)
     worker_interval_seconds: int = Field(default=300, ge=10)
+    worker_failure_retry_seconds: int = Field(default=30, ge=1, le=600)
 
     @model_validator(mode="after")
     def validate_telegram_configuration(self) -> "Settings":
@@ -308,9 +311,7 @@ class Settings(BaseSettings):
                 "THE_MUSE_LEVELS must contain at least one level when the source is enabled."
             )
         if self.the_muse_source_enabled and not self.the_muse_location.strip():
-            raise ValueError(
-                "THE_MUSE_LOCATION is required when THE_MUSE_SOURCE_ENABLED is true."
-            )
+            raise ValueError("THE_MUSE_LOCATION is required when THE_MUSE_SOURCE_ENABLED is true.")
         return self
 
     def source_poll_interval_seconds(self, source_name: str) -> int:

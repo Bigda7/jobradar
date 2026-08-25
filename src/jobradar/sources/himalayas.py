@@ -83,9 +83,7 @@ class HimalayasSource(BaseSource):
             salary_max=salary_max,
             salary_currency=salary_currency,
             salary_period=(
-                _salary_period(payload.get("salaryPeriod"))
-                if salary_currency is not None
-                else None
+                _salary_period(payload.get("salaryPeriod")) if salary_currency is not None else None
             ),
             published_at=_datetime(payload.get("pubDate")),
         )

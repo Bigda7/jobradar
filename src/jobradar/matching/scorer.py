@@ -6,7 +6,7 @@ from jobradar.domain.normalization import normalize_text
 from jobradar.matching.freelance import score_freelance_candidate
 from jobradar.matching.models import MatchCandidate as MatchCandidate
 from jobradar.matching.models import ScoreResult as ScoreResult
-from jobradar.matching.profile import SearchProfile
+from jobradar.matching.profile import NegativeSkillRule, SearchProfile
 from jobradar.matching.rejections import hard_rejection_concern
 from jobradar.matching.sanity import evaluate_sanity, monthly_salary_usd
 
@@ -40,6 +40,45 @@ ROLE_GROUPS = (
     ),
     ("Back-end разработка на Python", ("python developer", "django developer"), 18),
     ("Веб-разработка", ("web developer", "software developer", "software engineer"), 10),
+)
+AMBIGUOUS_NEGATIVE_SKILL_ALIASES = frozenset({"go", "spring", "vue"})
+NEGATIVE_SKILL_CORE_MARKERS = (
+    "backend",
+    "backend stack",
+    "core stack",
+    "main stack",
+    "mandatory",
+    "must",
+    "primary stack",
+    "proficient",
+    "required",
+    "requirements",
+    "solid knowledge",
+    "strong knowledge",
+    "tech stack",
+    "technology stack",
+    "необходимо",
+    "обов'язково",
+    "обязательно",
+    "обязательный",
+    "основний стек",
+    "основной стек",
+    "требуется",
+    "вимога",
+)
+NEGATIVE_SKILL_OPTIONAL_MARKERS = (
+    "advantage",
+    "bonus",
+    "good to have",
+    "nice to have",
+    "optional",
+    "plus",
+    "preferred",
+    "will be a plus",
+    "будет плюсом",
+    "желательно",
+    "необязательно",
+    "перевагою",
 )
 
 
@@ -129,9 +168,26 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
     score += _experience_adjustment(candidate.raw_data, reasons, concerns)
     score += _salary_adjustment(candidate, profile, reasons, concerns)
     score += _language_adjustment(searchable_text, concerns)
+    negative_skills, has_core_negative_skill = _negative_skill_matches(
+        candidate,
+        profile.negative_skills,
+    )
+    if negative_skills:
+        score -= profile.negative_skill_penalty
+        concerns.append(
+            "Вакансия включает технологии вне профиля: "
+            f"{', '.join(negative_skills)}. Применён штраф {profile.negative_skill_penalty} баллов."
+        )
 
+    final_score = max(0, min(score, 100))
+    if has_core_negative_skill:
+        final_score = min(final_score, max(0, profile.notification_threshold - 1))
+        concerns.append(
+            "Технология вне профиля указана как основная или обязательная; "
+            "итоговый балл ограничен ниже порога уведомления."
+        )
     return ScoreResult(
-        score=max(0, min(score, 100)),
+        score=final_score,
         reasons=tuple(reasons),
         concerns=tuple(concerns),
     )
@@ -233,8 +289,112 @@ def _language_adjustment(searchable_text: str, concerns: list[str]) -> int:
     return 0
 
 
-def _contains_any(value: str, terms: tuple[str, ...]) -> bool:
-    return any(
-        re.search(rf"(?<!\w){re.escape(normalize_text(term))}(?!\w)", value) is not None
-        for term in terms
+def _negative_skill_matches(
+    candidate: MatchCandidate,
+    rules: tuple[NegativeSkillRule, ...],
+) -> tuple[tuple[str, ...], bool]:
+    title = normalize_text(candidate.title)
+    description = normalize_text(candidate.description)
+    structured_values = tuple(
+        normalize_text(value)
+        for key in ("categories", "parentCategories", "tags", "skills")
+        for value in _string_values(candidate.raw_data.get(key))
     )
+    matched_names: list[str] = []
+    has_core_match = False
+    for rule in rules:
+        title_match = _contains_any(title, rule.aliases)
+        structured_match = any(_contains_any(value, rule.aliases) for value in structured_values)
+        description_aliases = tuple(
+            alias
+            for alias in rule.aliases
+            if normalize_text(alias) not in AMBIGUOUS_NEGATIVE_SKILL_ALIASES
+        )
+        description_match = _contains_any(description, description_aliases) or any(
+            _ambiguous_alias_has_technology_context(description, alias)
+            for alias in rule.aliases
+            if normalize_text(alias) in AMBIGUOUS_NEGATIVE_SKILL_ALIASES
+        )
+        if not (title_match or structured_match or description_match):
+            continue
+        matched_names.append(rule.name)
+        explicitly_optional = any(
+            _negative_skill_is_explicitly_optional(description, alias)
+            for alias in rule.aliases
+            if _contains_any(description, (alias,))
+        )
+        if (
+            title_match
+            or (structured_match and not explicitly_optional)
+            or _negative_skill_is_core(description, rule.aliases)
+        ):
+            has_core_match = True
+    return tuple(matched_names), has_core_match
+
+
+def _negative_skill_is_core(description: str, aliases: tuple[str, ...]) -> bool:
+    for alias in aliases:
+        if not _contains_any(description, (alias,)):
+            continue
+        core_distance = _alias_marker_distance(description, alias, NEGATIVE_SKILL_CORE_MARKERS)
+        optional_distance = _alias_marker_distance(
+            description,
+            alias,
+            NEGATIVE_SKILL_OPTIONAL_MARKERS,
+        )
+        if core_distance is not None and (
+            optional_distance is None or core_distance < optional_distance
+        ):
+            return True
+    return False
+
+
+def _negative_skill_is_explicitly_optional(description: str, alias: str) -> bool:
+    optional_distance = _alias_marker_distance(
+        description,
+        alias,
+        NEGATIVE_SKILL_OPTIONAL_MARKERS,
+    )
+    if optional_distance is None:
+        return False
+    core_distance = _alias_marker_distance(description, alias, NEGATIVE_SKILL_CORE_MARKERS)
+    return core_distance is None or optional_distance <= core_distance
+
+
+def _alias_marker_distance(text: str, alias: str, markers: tuple[str, ...]) -> int | None:
+    alias_pattern = _term_pattern(alias)
+    marker_pattern = "(?:" + "|".join(re.escape(normalize_text(marker)) for marker in markers) + ")"
+    alias_matches = tuple(re.finditer(alias_pattern, text))
+    marker_matches = tuple(re.finditer(marker_pattern, text))
+    distances = (
+        max(alias_match.start() - marker_match.end(), marker_match.start() - alias_match.end(), 0)
+        for alias_match in alias_matches
+        for marker_match in marker_matches
+    )
+    nearby_distances = tuple(distance for distance in distances if distance <= 60)
+    return min(nearby_distances, default=None)
+
+
+def _ambiguous_alias_has_technology_context(text: str, alias: str) -> bool:
+    alias_pattern = _term_pattern(alias)
+    prefix_pattern = (
+        r"(?:experience|knowledge|proficiency|proficient|required|skills?)"
+        r"(?:\s+(?:in|of|with))?\s+"
+    )
+    suffix_pattern = (
+        r"(?:backend|developer|engineer|experience|framework|knowledge|language|"
+        r"nice to have|optional|preferred|required|skills?|stack|will be a plus|"
+        r"будет плюсом|желательно|перевагою)"
+    )
+    return (
+        re.search(rf"{prefix_pattern}{alias_pattern}", text) is not None
+        or re.search(rf"{alias_pattern}\s+(?:is\s+)?{suffix_pattern}", text) is not None
+    )
+
+
+def _contains_any(value: str, terms: tuple[str, ...]) -> bool:
+    return any(re.search(_term_pattern(term), value) is not None for term in terms)
+
+
+def _term_pattern(term: str) -> str:
+    return rf"(?<!\w){re.escape(normalize_text(term))}(?!\w)"

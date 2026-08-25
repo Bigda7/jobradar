@@ -46,7 +46,7 @@ class MockSource(BaseSource):
     opportunity_kind = OpportunityKind.EMPLOYMENT
 
     def __init__(self, listings: Sequence[dict[str, Any]] | None = None) -> None:
-        self._listings = tuple(listings or DEFAULT_LISTINGS)
+        self._listings = tuple(DEFAULT_LISTINGS if listings is None else listings)
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         for item in self._listings:

@@ -8,6 +8,7 @@ from jobradar.notifications.currency import (
     ExchangeRates,
     NbuExchangeRateClient,
     format_converted_range,
+    format_original_range,
 )
 
 
@@ -60,3 +61,14 @@ def test_unknown_source_currency_is_rejected() -> None:
 
     with pytest.raises(CurrencyConversionError, match="GBP"):
         rates.convert(Decimal("100"), "GBP", "USD")
+
+
+def test_original_range_preserves_amount_currency_and_period() -> None:
+    result = format_original_range(
+        Decimal("1200"),
+        Decimal("1800"),
+        "usd",
+        "month",
+    )
+
+    assert result == ("USD: 1,200-1,800 / месяц",)

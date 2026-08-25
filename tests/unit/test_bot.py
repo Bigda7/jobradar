@@ -23,6 +23,13 @@ class FixedExchangeRateProvider:
         return ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2")})
 
 
+class FailingExchangeRateProvider:
+    async def fetch_rates(self) -> ExchangeRates:
+        from jobradar.notifications.currency import CurrencyConversionError
+
+        raise CurrencyConversionError("NBU is unavailable")
+
+
 class RecordingBotClient(TelegramClient):
     def __init__(self) -> None:
         self.messages: list[tuple[str, InlineKeyboardMarkup | None]] = []
@@ -69,11 +76,14 @@ class RecordingBotClient(TelegramClient):
 async def _bot(
     session_factory: async_sessionmaker[AsyncSession],
     latest_limit: int = 5,
+    *,
+    exchange_rate_provider: Any | None = None,
+    all_message_delay_seconds: float = 0,
 ) -> tuple[TelegramBotService, RecordingBotClient, OpportunityStateService, list[int]]:
     await IngestionService(session_factory).run_source(MockSource())
     await MatchingService(session_factory).evaluate(BOHDAN_PROFILE)
     telegram = RecordingBotClient()
-    rates = FixedExchangeRateProvider()
+    rates = exchange_rate_provider or FixedExchangeRateProvider()
     notifications = NotificationService(session_factory, telegram, rates)
     states = OpportunityStateService(session_factory)
     candidates = await notifications.load_candidates(
@@ -91,6 +101,7 @@ async def _bot(
         minimum_score=BOHDAN_PROFILE.notification_threshold,
         latest_limit=latest_limit,
         poll_timeout_seconds=1,
+        all_message_delay_seconds=all_message_delay_seconds,
     )
     return service, telegram, states, [item.opportunity_id for item in candidates]
 
@@ -112,7 +123,7 @@ async def test_callbacks_persist_favorite_and_hidden_state(
     assert await states.get_disposition(opportunity_id) is OpportunityDisposition.FAVORITE
     assert telegram.callback_answers[-1] == ("callback-1", "Добавлено в избранное.")
     favorite_buttons = telegram.edits[-1][2]["inline_keyboard"][0]
-    assert favorite_buttons[0]["text"] == "В избранном \u2b50"
+    assert favorite_buttons[0]["text"] == "В избранном"
 
     callback["id"] = "callback-2"
     callback["data"] = f"hide:{opportunity_id}"
@@ -122,7 +133,7 @@ async def test_callbacks_persist_favorite_and_hidden_state(
     assert telegram.callback_answers[-1][1].startswith("Скрыто")
     hidden_buttons = telegram.edits[-1][2]["inline_keyboard"][0]
     assert hidden_buttons == [
-        {"text": "Восстановить \U0001f504", "callback_data": f"restore:{opportunity_id}"},
+        {"text": "Восстановить", "callback_data": f"restore:{opportunity_id}"},
         {"text": "Ссылка", "url": await states.source_url(opportunity_id)},
     ]
     visible = await bot._notifications.load_candidates(
@@ -208,6 +219,43 @@ async def test_all_command_has_no_latest_limit_and_excludes_hidden_opportunities
 
 def test_all_command_is_registered_in_telegram_menu() -> None:
     assert ("all", "Показать все подходящие вакансии") in BOT_COMMANDS
+
+
+@pytest.mark.asyncio
+async def test_all_command_throttles_each_opportunity_message(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+
+    async def record_delay(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("jobradar.bot.asyncio.sleep", record_delay)
+    bot, _, _, opportunity_ids = await _bot(
+        sqlite_session_factory,
+        all_message_delay_seconds=0.75,
+    )
+
+    await bot.handle_update({"message": {"chat": {"id": 123}, "text": "/all"}})
+
+    assert delays == [0.75] * len(opportunity_ids)
+
+
+@pytest.mark.asyncio
+async def test_all_command_uses_original_currency_when_nbu_is_unavailable(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot, telegram, _, _ = await _bot(
+        sqlite_session_factory,
+        exchange_rate_provider=FailingExchangeRateProvider(),
+    )
+
+    await bot.handle_update({"message": {"chat": {"id": 123}, "text": "/all"}})
+
+    assert len(telegram.messages) == 3
+    assert any("- USD: 1,200-1,800 / месяц" in message for message, _ in telegram.messages)
+    assert all("- UAH:" not in message for message, _ in telegram.messages)
 
 
 @pytest.mark.asyncio

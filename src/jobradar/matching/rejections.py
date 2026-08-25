@@ -36,16 +36,12 @@ def hard_rejection_concern(candidate: MatchCandidate) -> str | None:
     )
     description = normalize_text(candidate.description or "")
     description_without_benefits = VOLUNTEERING_BENEFIT_PATTERN.sub(" ", description)
-    description_without_equal_opportunity = MILITARY_EQUAL_OPPORTUNITY_PATTERN.sub(
-        " ", description
-    )
+    description_without_equal_opportunity = MILITARY_EQUAL_OPPORTUNITY_PATTERN.sub(" ", description)
     searchable_text = f"{title_and_company} {description}"
     if FREE_WORK_PATTERN.search(searchable_text) or VOLUNTEER_PATTERN.search(
         f"{title_and_company} {description_without_benefits}"
     ):
         return "Отклонено: волонтёрская или неоплачиваемая работа."
-    if MILITARY_PATTERN.search(
-        f"{title_and_company} {description_without_equal_opportunity}"
-    ):
+    if MILITARY_PATTERN.search(f"{title_and_company} {description_without_equal_opportunity}"):
         return "Отклонено: военный рекрутинг, мобилизация или служба в армии."
     return None

@@ -10,6 +10,12 @@ class SkillRule:
 
 
 @dataclass(frozen=True, slots=True)
+class NegativeSkillRule:
+    name: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SearchProfile:
     profile_id: str
     rules_version: str
@@ -25,11 +31,13 @@ class SearchProfile:
     minimum_freelance_fixed_usd: Decimal
     preferred_freelance_fixed_usd: Decimal
     skills: tuple[SkillRule, ...]
+    negative_skill_penalty: int
+    negative_skills: tuple[NegativeSkillRule, ...]
 
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v10-reputation-mode",
+    rules_version="bohdan-multi-source-v11-negative-skills",
     notification_threshold=55,
     minimum_monthly_salary_usd=Decimal("1000"),
     maximum_junior_monthly_salary_usd=Decimal("2000"),
@@ -54,5 +62,38 @@ BOHDAN_PROFILE = SearchProfile(
         SkillRule("HTML/CSS", ("html5", "css3", "html", "css"), 4),
         SkillRule("Shopify/Liquid", ("shopify", "liquid", "online store 2.0"), 10),
         SkillRule("SQLAlchemy", ("sqlalchemy",), 4),
+    ),
+    negative_skill_penalty=15,
+    negative_skills=(
+        NegativeSkillRule("PHP", ("php",)),
+        NegativeSkillRule("Laravel", ("laravel",)),
+        NegativeSkillRule("Symfony", ("symfony",)),
+        NegativeSkillRule("Java", ("java",)),
+        NegativeSkillRule("Spring", ("spring", "spring boot", "spring framework", "java spring")),
+        NegativeSkillRule("C#", ("c#", "c sharp")),
+        NegativeSkillRule(".NET", (".net", "dotnet", "asp.net", "asp net")),
+        NegativeSkillRule("Ruby", ("ruby",)),
+        NegativeSkillRule("Ruby on Rails", ("ruby on rails", "rails developer", "rails framework")),
+        NegativeSkillRule(
+            "Go",
+            (
+                "go",
+                "golang",
+                "go developer",
+                "go engineer",
+                "go programming",
+                "go language",
+                "experience with go",
+                "knowledge of go",
+            ),
+        ),
+        NegativeSkillRule("Rust", ("rust", "rustlang")),
+        NegativeSkillRule("C++", ("c++", "cpp")),
+        NegativeSkillRule("Angular", ("angular", "angular.js", "angularjs")),
+        NegativeSkillRule("Vue", ("vue", "vue.js", "vuejs", "vue 3", "vue developer")),
+        NegativeSkillRule("Nuxt", ("nuxt", "nuxt.js", "nuxtjs")),
+        NegativeSkillRule("WordPress", ("wordpress", "wp developer")),
+        NegativeSkillRule("Bitrix", ("bitrix", "1c-bitrix", "1c bitrix")),
+        NegativeSkillRule("Magento", ("magento", "adobe commerce")),
     ),
 )
