@@ -3,6 +3,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.api.app import create_app
+from jobradar.config import Settings
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
@@ -45,3 +46,46 @@ async def test_health_and_read_only_endpoints(
     assert matches_response.json()["items"][0]["reasons"]
     assert sources_response.status_code == 200
     assert sources_response.json()[0]["name"] == "mock"
+
+
+@pytest.mark.asyncio
+async def test_cors_allows_configured_frontend_and_rejects_other_origins(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    application = create_app(
+        sqlite_session_factory,
+        application_settings=Settings(
+            cors_allowed_origins=("http://localhost:5173;https://jobradar-frontend.vercel.app/")
+        ),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        allowed_response = await client.get(
+            "/health",
+            headers={"Origin": "https://jobradar-frontend.vercel.app"},
+        )
+        denied_response = await client.get(
+            "/health",
+            headers={"Origin": "https://untrusted.example"},
+        )
+        preflight_response = await client.options(
+            "/matches",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+
+    assert allowed_response.status_code == 200
+    assert (
+        allowed_response.headers["access-control-allow-origin"]
+        == "https://jobradar-frontend.vercel.app"
+    )
+    assert "access-control-allow-origin" not in denied_response.headers
+    assert preflight_response.status_code == 200
+    assert preflight_response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert preflight_response.headers["access-control-allow-methods"] == "GET"

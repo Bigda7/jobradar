@@ -60,6 +60,14 @@ docker compose up --build
 
 The API is available at `http://localhost:8000`.
 
+Browser origins are controlled by a strict semicolon-separated CORS allowlist. The
+default permits the Vite development server; add the exact deployed frontend origin
+instead of using a wildcard:
+
+```dotenv
+CORS_ALLOWED_ORIGINS=http://localhost:5173;https://your-project.vercel.app
+```
+
 Useful endpoints:
 
 - `GET /health`

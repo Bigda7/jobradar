@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://jobradar:jobradar@localhost:5432/jobradar"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    cors_allowed_origins: str = "http://localhost:5173"
     mock_source_enabled: bool = False
     djinni_source_enabled: bool = True
     djinni_jobs_url: str = "https://djinni.co/jobs/l-nonhr/remote/"
@@ -187,6 +189,37 @@ class Settings(BaseSettings):
     source_poll_jitter_ratio: float = Field(default=0.15, ge=0, le=0.5)
     worker_interval_seconds: int = Field(default=300, ge=10)
     worker_failure_retry_seconds: int = Field(default=30, ge=1, le=600)
+
+    @property
+    def cors_origins(self) -> tuple[str, ...]:
+        origins: list[str] = []
+        for raw_origin in self.cors_allowed_origins.split(";"):
+            origin = raw_origin.strip().rstrip("/")
+            if not origin:
+                continue
+            parsed = urlsplit(origin)
+            if (
+                origin == "*"
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must contain semicolon-separated HTTP origins "
+                    "without paths, queries, fragments, credentials, or wildcards."
+                )
+            if origin not in origins:
+                origins.append(origin)
+        return tuple(origins)
+
+    @model_validator(mode="after")
+    def validate_cors_configuration(self) -> "Settings":
+        _ = self.cors_origins
+        return self
 
     @model_validator(mode="after")
     def validate_telegram_configuration(self) -> "Settings":

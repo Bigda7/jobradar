@@ -5,6 +5,7 @@ from typing import Annotated
 
 import structlog
 from fastapi import Depends, FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -16,7 +17,7 @@ from jobradar.api.schemas import (
     MatchResponse,
     SourceResponse,
 )
-from jobradar.config import get_settings
+from jobradar.config import Settings, get_settings
 from jobradar.db.models import (
     Listing,
     MatchEvaluation,
@@ -37,12 +38,15 @@ logger = structlog.get_logger(__name__)
 
 def create_app(
     application_session_factory: async_sessionmaker[AsyncSession] | None = None,
+    *,
+    application_settings: Settings | None = None,
 ) -> FastAPI:
     selected_session_factory = application_session_factory or session_factory
+    selected_settings = application_settings or settings
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        logger.info("api_started", environment=settings.app_env)
+        logger.info("api_started", environment=selected_settings.app_env)
         yield
         if application_session_factory is None:
             await engine.dispose()
@@ -54,6 +58,14 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.session_factory = selected_session_factory
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(selected_settings.cors_origins),
+        allow_credentials=False,
+        allow_methods=["GET"],
+        allow_headers=["Accept", "Authorization", "Content-Type"],
+        max_age=600,
+    )
 
     async def request_session(request: Request) -> AsyncIterator[AsyncSession]:
         factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
@@ -148,7 +160,7 @@ def create_app(
     async def list_matches(
         session: Annotated[AsyncSession, Depends(request_session)],
         minimum_score: Annotated[int, Query(alias="min_score", ge=0, le=100)] = (
-            settings.matching_min_score
+            selected_settings.matching_min_score
         ),
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
