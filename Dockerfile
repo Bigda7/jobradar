@@ -9,6 +9,7 @@ WORKDIR /app
 RUN addgroup --system jobradar && adduser --system --ingroup jobradar jobradar
 
 COPY --chown=jobradar:jobradar pyproject.toml README.md ./
+COPY --chown=jobradar:jobradar companies.yaml ./
 COPY --chown=jobradar:jobradar src ./src
 COPY --chown=jobradar:jobradar tests ./tests
 COPY --chown=jobradar:jobradar alembic.ini ./

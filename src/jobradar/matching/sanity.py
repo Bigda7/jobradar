@@ -115,10 +115,11 @@ def _salary_sanity(
     base_salary = minimum if minimum is not None else maximum
     upper_salary = maximum if maximum is not None else minimum
     if base_salary is not None and base_salary > profile.maximum_junior_monthly_salary_usd:
+        formatted_limit = f"{profile.maximum_junior_monthly_salary_usd:,.0f}"
         return (
             -profile.excessive_salary_penalty,
             (
-                "Базовая зарплата выше USD 4,000 в месяц и может указывать "
+                f"Базовая зарплата выше USD {formatted_limit} в месяц и может указывать "
                 "на скрытый уровень Middle или Senior.",
             ),
         )

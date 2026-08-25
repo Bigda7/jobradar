@@ -5,6 +5,8 @@ import json
 from jobradar.config import get_settings
 from jobradar.db.session import engine, session_factory
 from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
+from jobradar.matching.profile import BOHDAN_PROFILE
+from jobradar.matching.service import MatchingService
 from jobradar.opportunities.expiration import StaleExpirationService
 from jobradar.opportunities.service import OpportunityStateService
 
@@ -44,6 +46,20 @@ async def expire_stale() -> None:
     )
 
 
+async def rescore_all() -> None:
+    summary = await MatchingService(session_factory).evaluate(BOHDAN_PROFILE, force=True)
+    print(
+        json.dumps(
+            {
+                "profile_id": BOHDAN_PROFILE.profile_id,
+                "rules_version": BOHDAN_PROFILE.rules_version,
+                "rescored": summary.evaluated,
+                "skipped": summary.unchanged,
+            }
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run JobRadar maintenance commands.")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -56,6 +72,10 @@ def main() -> None:
         "expire-stale",
         help="Deactivate stale non-favorite employment and freelance listings.",
     )
+    subcommands.add_parser(
+        "rescore-all",
+        help="Force active opportunities to be evaluated with the current matching rules.",
+    )
     arguments = parser.parse_args()
 
     try:
@@ -65,6 +85,8 @@ def main() -> None:
             asyncio.run(deduplicate_opportunities())
         elif arguments.command == "expire-stale":
             asyncio.run(expire_stale())
+        elif arguments.command == "rescore-all":
+            asyncio.run(rescore_all())
     finally:
         asyncio.run(engine.dispose())
 

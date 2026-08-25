@@ -17,7 +17,7 @@ from jobradar.db.models import (
     Source,
 )
 from jobradar.domain.enums import DeliveryStatus, OpportunityDisposition, OpportunityKind
-from jobradar.ingestion.canonical import canonical_listing_order
+from jobradar.ingestion.canonical import canonical_source_link_order
 from jobradar.matching.profile import SearchProfile
 from jobradar.notifications.currency import (
     CurrencyConversionError,
@@ -222,7 +222,7 @@ class NotificationService:
                             Listing.is_active.is_(True),
                             Source.enabled.is_(True),
                         )
-                        .order_by(*canonical_listing_order())
+                        .order_by(*canonical_source_link_order())
                         .limit(1)
                     )
                 ).first()

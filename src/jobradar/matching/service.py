@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from jobradar.db.base import utc_now
 from jobradar.db.models import Listing, MatchEvaluation, Opportunity, Source
 from jobradar.domain.enums import OpportunityKind, OpportunityStatus, WorkMode
 from jobradar.ingestion.canonical import canonical_listing_order
@@ -20,7 +21,12 @@ class MatchingService:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def evaluate(self, profile: SearchProfile) -> MatchingSummary:
+    async def evaluate(
+        self,
+        profile: SearchProfile,
+        *,
+        force: bool = False,
+    ) -> MatchingSummary:
         summary = MatchingSummary()
         async with self._session_factory() as session:
             opportunity_ids = (
@@ -38,7 +44,7 @@ class MatchingService:
             ).all()
 
         for opportunity_id in opportunity_ids:
-            changed = await self._evaluate_opportunity(opportunity_id, profile)
+            changed = await self._evaluate_opportunity(opportunity_id, profile, force=force)
             if changed:
                 summary.evaluated += 1
             else:
@@ -49,6 +55,8 @@ class MatchingService:
         self,
         opportunity_id: int,
         profile: SearchProfile,
+        *,
+        force: bool = False,
     ) -> bool:
         async with self._session_factory() as session, session.begin():
             opportunity = await session.get(Opportunity, opportunity_id)
@@ -71,7 +79,11 @@ class MatchingService:
                     MatchEvaluation.rules_version == profile.rules_version,
                 )
             )
-            if evaluation is not None and evaluation.listing_content_hash == listing.content_hash:
+            if (
+                not force
+                and evaluation is not None
+                and evaluation.listing_content_hash == listing.content_hash
+            ):
                 return False
 
             result = score_candidate(
@@ -108,4 +120,5 @@ class MatchingService:
                 evaluation.score = result.score
                 evaluation.reasons = list(result.reasons)
                 evaluation.concerns = list(result.concerns)
+                evaluation.evaluated_at = utc_now()
             return True

@@ -28,7 +28,7 @@ Iteration 12 adds global cross-source employment deduplication plus Jobicy and W
 
 Iteration 13 adds Arbeitnow and Remotive through their public JSON APIs. Arbeitnow keeps only records whose API payload explicitly declares `remote=true` and follows at most three pagination links per six-hour cycle. Remotive requests the Software Development category once every six hours, preserving the complete description, required candidate location, job type, and source URL. Published Remotive salary strings are parsed deterministically only when their currency is explicit; the existing notification layer then renders USD, UAH, and CZK. Both sources enter the same global cross-platform deduplication pipeline as every other employment source.
 
-Iteration 14 adds a shared deterministic sanity check before employment and freelance scoring. It rejects US-only remote work, equity-only or profit-share work without a base salary, and explicit account-rental or proxy-bidding freelance scams. Employment salaries are normalized to a monthly USD reference before applying a 20-point hidden-seniority penalty above USD 4,000 and an additional 15-point full-time poverty-pay penalty below USD 400. Rockstar, ninja, and 10x language receives one five-point penalty. Plain uses of `agency` remain valid.
+Iteration 14 adds a shared deterministic sanity check before employment and freelance scoring. It rejects US-only remote work, equity-only or profit-share work without a base salary, and explicit account-rental or proxy-bidding freelance scams. Employment salaries are normalized to a monthly USD reference before applying a 20-point hidden-seniority penalty above USD 2,000 and an additional 15-point full-time poverty-pay penalty below USD 400. Hourly salaries use 160 hours per month, so the hidden-seniority boundary is USD 12.50 per hour. Rockstar, ninja, and 10x language receives one five-point penalty. Plain uses of `agency` remain valid.
 
 Iteration 15 adds source-inventory lifecycle reconciliation and quality-based canonical selection. After a source crawl reaches its natural end, active listings omitted from that crawl are marked inactive; interrupted crawls never deactivate data. Matching, Telegram `/latest` and `/all`, and API results require an active listing. Every listing stores its normalized snapshot and a deterministic quality score based on description length, salary availability, and metadata completeness. Cross-source merges promote the richest active record and automatically fall back to the next best active record when the canonical listing disappears. Jobs.cz and Prace.cz now accept only explicit full-remote evidence and reject every mostly-from-home, occasional-home-office, hybrid, and `PARTIALLY_REMOTE` record.
 
@@ -37,6 +37,10 @@ Phase 2 starts with DOU Jobs through its official remote RSS feed. The adapter k
 Global stale expiration runs automatically in every worker cycle after cross-source deduplication and before matching. Employment listings expire at 30 days and freelance projects at 7 days, measured from the source publication time or the JobRadar first-seen time when publication time is unavailable. Expired listings remain stored but become inactive. Favorite opportunities are fully protected from age-based expiration.
 
 The Muse integration uses the official public Jobs API and requests only `Flexible / Remote` Software Engineering positions at Entry or Mid level. The adapter verifies the remote marker again in every response, preserves the complete description, maps structured categories, tags, and levels into shared matching, and parses only explicit salary amounts that include a currency and period. The configured five-page window is a partial inventory and runs every six hours. The source stays disabled by default until an application is registered with The Muse for production use.
+
+Reputation mode removes every negative score adjustment caused only by a small freelance budget. A fixed-price project between USD 5 and USD 100 receives a 15-point bonus when the source confirms that the employer has verified payment. Scam, incompatible-scope, unsupported-language, seniority, and competition rules remain unchanged. Every automatic source interval receives a stable deterministic jitter of plus or minus 15 percent derived from the source name and its previous run time; manual one-shot runs remain immediate.
+
+The direct ATS integration reads `companies.yaml` and creates independent Greenhouse, Lever, and Ashby sources through their public JSON job-board APIs. Greenhouse requests complete post content, Lever uses structured workplace and salary fields, and Ashby requests structured compensation. Only explicit remote records are accepted; hybrid, onsite, office-based, and unlisted records are excluded before ingestion. The five initial boards are GitLab, Canonical, JumpCloud, Linear, and Supabase. ATS inventories run once per day with the global jitter. A successful complete provider crawl deactivates postings removed from that provider, while any interrupted request prevents reconciliation for the entire affected provider. Cross-source duplicates retain the richest description for matching, but API and Telegram source links prefer the direct ATS posting over DOU, The Muse, or another aggregator.
 
 ## Local container startup
 
@@ -205,6 +209,11 @@ THE_MUSE_REQUEST_TIMEOUT_SECONDS=30
 THE_MUSE_MAX_PAGES=5
 THE_MUSE_MAX_ITEMS=100
 THE_MUSE_POLL_INTERVAL_SECONDS=21600
+ATS_SOURCE_ENABLED=true
+ATS_COMPANIES_FILE=companies.yaml
+ATS_REQUEST_TIMEOUT_SECONDS=30
+ATS_MAX_ITEMS_PER_COMPANY=500
+ATS_POLL_INTERVAL_SECONDS=86400
 ARBEITNOW_SOURCE_ENABLED=true
 ARBEITNOW_API_URL=https://www.arbeitnow.com/api/job-board-api
 ARBEITNOW_REQUEST_TIMEOUT_SECONDS=30
@@ -235,7 +244,7 @@ StartupJobs.cz, Prace.cz, and Freelance.cz are enabled by default. StartupJobs.c
 
 Startup.jobs is disabled until its free API key is configured. Create a key at `https://startup.jobs/account/api_keys`, then set `STARTUP_JOBS_API_KEY` and `STARTUP_JOBS_SOURCE_ENABLED=true`. The adapter requests only `workplace_type=remote` jobs in the Engineering role, follows official cursor pagination, preserves the full public description, and uses the original Startup.jobs URL in every Telegram message.
 
-The background worker wakes every `WORKER_INTERVAL_SECONDS`, but runs a source only when that source's own `*_POLL_INTERVAL_SECONDS` has elapsed. Djinni, Freelancer.com, and the two RSS feeds keep source-appropriate shorter intervals. Work.ua, Jobs.cz, Prace.cz, StartupJobs.cz, Freelance.cz, and Startup.jobs run every six hours. Himalayas runs daily. A manual one-shot command ignores these intervals and must be used only for explicit verification.
+The background worker wakes every `WORKER_INTERVAL_SECONDS`, but runs a source only when that source's own `*_POLL_INTERVAL_SECONDS` plus its stable `SOURCE_POLL_JITTER_RATIO` adjustment has elapsed. The default jitter is plus or minus 15 percent and changes only after the source runs, preventing synchronized requests without moving the deadline on every worker wake-up. Djinni, Freelancer.com, and the two RSS feeds keep source-appropriate shorter base intervals. Work.ua, Jobs.cz, Prace.cz, StartupJobs.cz, Freelance.cz, and Startup.jobs use six-hour base intervals. Himalayas and the three direct ATS sources use daily base intervals. A manual one-shot command ignores these intervals and must be used only for explicit verification.
 
 Sources with separate search cards and detail pages persist a detail-fetch timestamp on each listing. A full description is requested only for a new card, a changed card, or after the 24-hour cache TTL. Requests for new details are serialized with a source-specific delay. Work.ua, Jobs.cz, and Prace.cz also retry one rate-limited request while respecting a bounded `Retry-After` value. A failed source walk remains ineligible for missing-listing reconciliation, so a temporary rate limit cannot deactivate stored jobs.
 
@@ -247,6 +256,8 @@ Himalayas is enabled by default and requires no credentials. It uses the public 
 
 The Muse is disabled by default. Its public API permits keyless testing, but the API terms require application registration for ongoing use. Register the personal application at `https://www.themuse.com/developers/api/v2/apps`, set `THE_MUSE_API_KEY`, and enable `THE_MUSE_SOURCE_ENABLED`. JobRadar sends at most five paginated requests every six hours, uses the official remote, category, and seniority filters, and still rejects any returned item without the exact remote location marker. Because this is a bounded rolling window, missing jobs are handled by global 30-day expiration rather than source reconciliation.
 
+Direct ATS collection is disabled by the built-in settings default and enabled by `.env.example`. Set `ATS_SOURCE_ENABLED=true` and maintain the company catalog in `companies.yaml`. Every enabled item needs `name`, one of the providers `greenhouse`, `lever`, or `ashby`, and the provider-specific public board `identifier`. The runtime image copies this file to `/app/companies.yaml`. No API key, browser session, or HTML scraping is used.
+
 Arbeitnow and Remotive are also enabled by default without credentials. Arbeitnow makes up to three paginated API requests every six hours and accepts only the API's explicit remote records. Remotive makes one Software Development API request every six hours, matching its published maximum of four requests per day. Remotive salaries are converted only when the source string contains a recognized currency; missing or ambiguous amounts remain empty instead of being inferred.
 
 Cross-source deduplication requires both a non-empty title and company and applies only to employment vacancies, not freelance projects. Comparison ignores case and repeated whitespace. Existing duplicate rows can also be merged explicitly without waiting for the next worker cycle:
@@ -255,11 +266,19 @@ Cross-source deduplication requires both a non-empty title and company and appli
 docker compose run --rm worker python -m jobradar.maintenance deduplicate-opportunities
 ```
 
+Force every active opportunity to be evaluated with the current profile and rules version:
+
+```powershell
+docker compose run --rm worker python -m jobradar.maintenance rescore-all
+```
+
+The command updates or creates the current-version evaluation without deleting historical rule-version rows. `/latest`, `/all`, API matches, and statistics query the current rules version, so an opportunity that falls below `MATCHING_MIN_SCORE` disappears from matching results immediately after the command completes.
+
 ## Matching and Telegram
 
-The built-in profile targets remote junior full-stack and front-end roles based on React, JavaScript, Python, Django, PostgreSQL, REST APIs, and Shopify/Liquid experience. Employment and freelance projects use separate deterministic strategies under rules version `bohdan-multi-source-v9-the-muse`; the default notification threshold is 55. Before platform-specific scoring, shared rejection and sanity layers assign score zero to volunteer or unpaid work, military recruitment, mobilisation, armed-forces and defence-sector work, army service, US-only remote work, work without base pay, and explicit account-rental scams. Equal-opportunity boilerplate that merely protects military or veteran status is ignored and does not weaken rejection of actual military work. Telegram headings, field labels, scoring explanations, concerns, employment and contract types, monetary periods, employer status, and test messages are rendered in Russian.
+The built-in profile targets remote junior full-stack and front-end roles based on React, JavaScript, Python, Django, PostgreSQL, REST APIs, and Shopify/Liquid experience. Employment and freelance projects use separate deterministic strategies under rules version `bohdan-multi-source-v10-reputation-mode`; the default notification threshold is 55. Before platform-specific scoring, shared rejection and sanity layers assign score zero to volunteer or unpaid work, military recruitment, mobilisation, armed-forces and defence-sector work, army service, US-only remote work, work without base pay, and explicit account-rental scams. Equal-opportunity boilerplate that merely protects military or veteran status is ignored and does not weaken rejection of actual military work. Telegram headings, field labels, scoring explanations, concerns, employment and contract types, monetary periods, employer status, and test messages are rendered in Russian.
 
-Freelance scoring converts published budgets to USD using the exchange rate supplied by Freelancer.com, evaluates fixed and hourly budgets separately, accounts for bid competition and available employer reputation, penalizes broad or incompatible scope, and rejects explicit scam patterns such as deposits, account sharing, credential requests, off-platform payment, and unpaid trials.
+Freelance scoring converts published budgets to USD using the exchange rate supplied by Freelancer.com, evaluates fixed and hourly budgets separately, accounts for bid competition and available employer reputation, penalizes broad or incompatible scope, and rejects explicit scam patterns such as deposits, account sharing, credential requests, off-platform payment, and unpaid trials. Small budgets are neutral instead of negative; verified fixed-price projects in the USD 5-100 reputation-building range receive an additional 15 points.
 
 Configure Telegram in `.env`:
 
@@ -279,6 +298,7 @@ NBU_RATES_URL=https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json
 NBU_REQUEST_TIMEOUT_SECONDS=20
 EMPLOYMENT_STALE_AFTER_DAYS=30
 FREELANCE_STALE_AFTER_DAYS=7
+SOURCE_POLL_JITTER_RATIO=0.15
 ```
 
 When an opportunity publishes an amount, the notification service loads one official NBU rate snapshot per dispatch and renders the same range in USD, UAH, and CZK. A rate failure prevents delivery of an incomplete monetary notification; the opportunity remains available for retry on the next worker cycle. Opportunities without a published amount are still delivered without an invented salary or budget.

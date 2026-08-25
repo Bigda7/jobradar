@@ -15,15 +15,26 @@ from jobradar.db.models import (
 )
 from jobradar.domain.enums import OpportunityDisposition, OpportunityKind, RunStatus
 from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
-from jobradar.ingestion.service import IngestionService
+from jobradar.ingestion.service import IngestionService, jittered_poll_interval_seconds
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
+from jobradar.opportunities.service import OpportunityStateService
 from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
 
 
 class AlternateMockSource(MockSource):
     name = "alternate_mock"
     display_name = "Alternate Mock Source"
+
+
+class DouJobsMockSource(MockSource):
+    name = "dou_jobs"
+    display_name = "DOU Jobs"
+
+
+class GreenhouseMockSource(MockSource):
+    name = "greenhouse"
+    display_name = "Greenhouse"
 
 
 class FailingMockSource(MockSource):
@@ -153,12 +164,59 @@ async def test_source_polling_interval_uses_last_run_time(
     await service.run_source(source)
     now = datetime.now(UTC)
 
-    assert await service.is_source_due(source.name, 3600, now=now) is False
+    assert await service.is_source_due(source.name, 3600, jitter_ratio=0, now=now) is False
     assert (
         await service.is_source_due(
             source.name,
             3600,
+            jitter_ratio=0,
             now=now + timedelta(hours=1, seconds=1),
+        )
+        is True
+    )
+
+
+def test_source_polling_jitter_is_stable_bounded_and_source_specific() -> None:
+    last_run_at = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+
+    djinni_interval = jittered_poll_interval_seconds("djinni", 3600, last_run_at)
+    repeated_interval = jittered_poll_interval_seconds("djinni", 3600, last_run_at)
+    freelancer_interval = jittered_poll_interval_seconds("freelancer", 3600, last_run_at)
+
+    assert 3060 <= djinni_interval <= 4140
+    assert repeated_interval == djinni_interval
+    assert freelancer_interval != djinni_interval
+
+
+@pytest.mark.asyncio
+async def test_source_polling_uses_stable_jittered_due_time(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = IngestionService(sqlite_session_factory)
+    source = MockSource()
+    await service.run_source(source)
+    async with sqlite_session_factory() as session:
+        last_run_at = await session.scalar(
+            select(Source.last_run_at).where(Source.name == source.name)
+        )
+    assert last_run_at is not None
+    if last_run_at.tzinfo is None:
+        last_run_at = last_run_at.replace(tzinfo=UTC)
+    interval = jittered_poll_interval_seconds(source.name, 3600, last_run_at)
+
+    assert (
+        await service.is_source_due(
+            source.name,
+            3600,
+            now=last_run_at + timedelta(seconds=interval - 1),
+        )
+        is False
+    )
+    assert (
+        await service.is_source_due(
+            source.name,
+            3600,
+            now=last_run_at + timedelta(seconds=interval),
         )
         is True
     )
@@ -311,6 +369,67 @@ async def test_cross_source_duplicate_promotes_richer_listing_to_canonical(
         evaluation = await session.scalar(select(MatchEvaluation))
         assert evaluation is not None
         assert evaluation.listing_content_hash == listings[0].content_hash
+
+
+@pytest.mark.asyncio
+async def test_direct_ats_listing_has_canonical_priority_over_richer_aggregator(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    aggregator_listing = deepcopy(DEFAULT_LISTINGS[0])
+    aggregator_listing.update(
+        {
+            "description": "A very rich DOU description. " * 100,
+            "url": "https://jobs.dou.ua/companies/example/vacancies/101",
+        }
+    )
+    ats_listing = deepcopy(aggregator_listing)
+    ats_listing.update(
+        {
+            "id": "greenhouse-101",
+            "description": "Direct ATS description.",
+            "url": "https://job-boards.greenhouse.io/example/jobs/101",
+        }
+    )
+    ingestion = IngestionService(sqlite_session_factory)
+
+    await ingestion.run_source(DouJobsMockSource((aggregator_listing,)))
+    result = await ingestion.run_source(GreenhouseMockSource((ats_listing,)))
+
+    assert result.duplicates == 1
+    async with sqlite_session_factory() as session:
+        opportunity = await session.scalar(select(Opportunity))
+        assert opportunity is not None
+        opportunity_id = opportunity.id
+        assert opportunity.description == aggregator_listing["description"]
+    source_url = await OpportunityStateService(sqlite_session_factory).source_url(opportunity_id)
+    assert source_url == "https://job-boards.greenhouse.io/example/jobs/101"
+
+
+@pytest.mark.asyncio
+async def test_force_matching_recalculates_current_version_evaluation(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ingestion = IngestionService(sqlite_session_factory)
+    await ingestion.run_source(MockSource((DEFAULT_LISTINGS[0],)))
+    matching = MatchingService(sqlite_session_factory)
+    first = await matching.evaluate(BOHDAN_PROFILE)
+    assert first.evaluated == 1
+
+    async with sqlite_session_factory() as session, session.begin():
+        evaluation = await session.scalar(select(MatchEvaluation))
+        assert evaluation is not None
+        evaluation.score = -1
+
+    unchanged = await matching.evaluate(BOHDAN_PROFILE)
+    rescored = await matching.evaluate(BOHDAN_PROFILE, force=True)
+
+    assert unchanged.unchanged == 1
+    assert rescored.evaluated == 1
+    assert rescored.unchanged == 0
+    async with sqlite_session_factory() as session:
+        evaluation = await session.scalar(select(MatchEvaluation))
+        assert evaluation is not None
+        assert evaluation.score >= 0
 
 
 @pytest.mark.asyncio

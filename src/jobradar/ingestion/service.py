@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -58,6 +59,7 @@ class IngestionService:
         source_name: str,
         poll_interval_seconds: int,
         *,
+        jitter_ratio: float = 0.15,
         now: datetime | None = None,
     ) -> bool:
         async with self._session_factory() as session:
@@ -69,8 +71,14 @@ class IngestionService:
         current_time = now or datetime.now(UTC)
         if last_run_at.tzinfo is None:
             last_run_at = last_run_at.replace(tzinfo=UTC)
+        effective_interval_seconds = jittered_poll_interval_seconds(
+            source_name,
+            poll_interval_seconds,
+            last_run_at,
+            jitter_ratio=jitter_ratio,
+        )
         return current_time >= last_run_at.astimezone(UTC) + timedelta(
-            seconds=poll_interval_seconds
+            seconds=effective_interval_seconds
         )
 
     async def run_source(self, adapter: BaseSource) -> IngestionResult:
@@ -448,3 +456,28 @@ class IngestionService:
                 source.last_error = (
                     str(terminal_error)[:2000] if terminal_error else "Unknown error"
                 )
+
+
+def jittered_poll_interval_seconds(
+    source_name: str,
+    poll_interval_seconds: int,
+    last_run_at: datetime,
+    *,
+    jitter_ratio: float = 0.15,
+) -> int:
+    if poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be positive.")
+    if not 0 <= jitter_ratio <= 0.5:
+        raise ValueError("jitter_ratio must be between 0 and 0.5.")
+    if jitter_ratio == 0:
+        return poll_interval_seconds
+
+    normalized_time = last_run_at
+    if normalized_time.tzinfo is None:
+        normalized_time = normalized_time.replace(tzinfo=UTC)
+    normalized_time = normalized_time.astimezone(UTC)
+    seed = f"{source_name}:{normalized_time.isoformat(timespec='microseconds')}".encode()
+    digest = hashlib.sha256(seed).digest()
+    unit_interval = int.from_bytes(digest[:8], byteorder="big") / ((1 << 64) - 1)
+    factor = (1 - jitter_ratio) + (2 * jitter_ratio * unit_interval)
+    return max(1, round(poll_interval_seconds * factor))

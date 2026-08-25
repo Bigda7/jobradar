@@ -1,13 +1,17 @@
 from jobradar.config import Settings
 from jobradar.sources.arbeitnow import ArbeitnowSource
+from jobradar.sources.ashby import AshbySource
+from jobradar.sources.ats_config import companies_for_provider, load_companies_config
 from jobradar.sources.base import BaseSource
 from jobradar.sources.djinni import DjinniSource
 from jobradar.sources.dou_jobs import DouJobsSource
 from jobradar.sources.freelance_cz import FreelanceCzSource
 from jobradar.sources.freelancer import FreelancerApiClient, FreelancerSource
+from jobradar.sources.greenhouse import GreenhouseSource
 from jobradar.sources.himalayas import HimalayasSource
 from jobradar.sources.jobicy import JobicySource
 from jobradar.sources.jobs_cz import JobsCzSource
+from jobradar.sources.lever import LeverSource
 from jobradar.sources.mock import MockSource
 from jobradar.sources.prace_cz import PraceCzSource
 from jobradar.sources.remotive import RemotiveSource
@@ -180,6 +184,35 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 max_items=settings.the_muse_max_items,
             )
         )
+    if settings.ats_source_enabled:
+        ats_companies = load_companies_config(settings.ats_companies_file)
+        greenhouse_companies = companies_for_provider(ats_companies, "greenhouse")
+        lever_companies = companies_for_provider(ats_companies, "lever")
+        ashby_companies = companies_for_provider(ats_companies, "ashby")
+        if greenhouse_companies:
+            sources.append(
+                GreenhouseSource(
+                    companies=greenhouse_companies,
+                    request_timeout_seconds=settings.ats_request_timeout_seconds,
+                    max_items_per_company=settings.ats_max_items_per_company,
+                )
+            )
+        if lever_companies:
+            sources.append(
+                LeverSource(
+                    companies=lever_companies,
+                    request_timeout_seconds=settings.ats_request_timeout_seconds,
+                    max_items_per_company=settings.ats_max_items_per_company,
+                )
+            )
+        if ashby_companies:
+            sources.append(
+                AshbySource(
+                    companies=ashby_companies,
+                    request_timeout_seconds=settings.ats_request_timeout_seconds,
+                    max_items_per_company=settings.ats_max_items_per_company,
+                )
+            )
     if settings.arbeitnow_source_enabled:
         sources.append(
             ArbeitnowSource(

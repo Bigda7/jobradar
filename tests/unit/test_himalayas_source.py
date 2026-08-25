@@ -131,14 +131,17 @@ def test_himalayas_structured_seniority_and_tags_contribute_to_scoring() -> None
 
 def test_himalayas_high_salary_uses_shared_monthly_sanity_penalty() -> None:
     source = HimalayasSource()
-    normal = score_candidate(_candidate(source, _job()), BOHDAN_PROFILE)
+    normal = score_candidate(
+        _candidate(source, _job(minSalary=18000, maxSalary=24000)),
+        BOHDAN_PROFILE,
+    )
     high_salary = score_candidate(
-        _candidate(source, _job(minSalary=60000, maxSalary=72000)),
+        _candidate(source, _job(minSalary=24012, maxSalary=36000)),
         BOHDAN_PROFILE,
     )
 
     assert high_salary.score == normal.score - 20
-    assert any("выше USD 4,000" in concern for concern in high_salary.concerns)
+    assert any("выше USD 2,000" in concern for concern in high_salary.concerns)
 
 
 @pytest.mark.parametrize(

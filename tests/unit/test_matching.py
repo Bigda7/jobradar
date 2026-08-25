@@ -240,9 +240,10 @@ def test_sanity_check_allows_profit_share_with_base_salary() -> None:
 @pytest.mark.parametrize(
     ("minimum", "maximum", "currency", "period"),
     (
-        ("4001", "5000", "USD", "month"),
-        ("48012", "60000", "USD", "year"),
-        ("85001", "100000", "CZK", "month"),
+        ("2001", "3000", "USD", "month"),
+        ("24012", "36000", "USD", "year"),
+        ("42001", "60000", "CZK", "month"),
+        ("12.51", "20", "USD", "hour"),
     ),
 )
 def test_sanity_check_penalizes_excessive_base_salary(
@@ -268,8 +269,16 @@ def test_sanity_check_penalizes_excessive_base_salary(
 def test_sanity_check_keeps_exact_salary_boundaries_unpenalized() -> None:
     ceiling = evaluate_sanity(
         _candidate(
-            salary_min=Decimal("4000"),
-            salary_max=Decimal("5000"),
+            salary_min=Decimal("2000"),
+            salary_max=Decimal("3000"),
+        ),
+        BOHDAN_PROFILE,
+    )
+    hourly_ceiling = evaluate_sanity(
+        _candidate(
+            salary_min=Decimal("12.5"),
+            salary_max=Decimal("20"),
+            salary_period="hour",
         ),
         BOHDAN_PROFILE,
     )
@@ -282,6 +291,7 @@ def test_sanity_check_keeps_exact_salary_boundaries_unpenalized() -> None:
     )
 
     assert ceiling.score_adjustment == 0
+    assert hourly_ceiling.score_adjustment == 0
     assert floor.score_adjustment == 0
 
 
@@ -344,6 +354,20 @@ def test_monthly_salary_normalization_uses_period_and_currency() -> None:
     assert maximum == Decimal("5000")
 
 
+def test_monthly_salary_normalization_multiplies_hourly_rate_by_160() -> None:
+    minimum, maximum = monthly_salary_usd(
+        _candidate(
+            salary_min=Decimal("12.5"),
+            salary_max=Decimal("20"),
+            salary_currency="USD",
+            salary_period="hour",
+        )
+    )
+
+    assert minimum == Decimal("2000.0")
+    assert maximum == Decimal("3200")
+
+
 def test_freelance_profile_scores_relevant_project_highly() -> None:
     result = score_candidate(_freelance_candidate(), BOHDAN_PROFILE)
 
@@ -399,11 +423,11 @@ def test_freelance_profile_rejects_scam_patterns(description: str) -> None:
     assert result.concerns[0].startswith("Отклонено:")
 
 
-def test_freelance_profile_penalizes_low_budget_and_extreme_competition() -> None:
+def test_freelance_profile_does_not_penalize_low_budget() -> None:
     raw_data = {
         "currency": {"code": "USD", "exchange_rate": 1.0},
         "jobs": [{"name": "React.js"}],
-        "bid_stats": {"bid_count": 250},
+        "bid_stats": {"bid_count": 10},
     }
     result = score_candidate(
         _freelance_candidate(
@@ -416,9 +440,47 @@ def test_freelance_profile_penalizes_low_budget_and_extreme_competition() -> Non
         BOHDAN_PROFILE,
     )
 
-    assert result.score < BOHDAN_PROFILE.notification_threshold
-    assert any("очень низкий" in concern for concern in result.concerns)
-    assert any("Экстремально" in concern for concern in result.concerns)
+    assert result.score == 40
+    assert any("набора репутации" in reason for reason in result.reasons)
+    assert not any("бюджет" in concern.casefold() for concern in result.concerns)
+
+
+def test_freelance_profile_rewards_small_verified_fixed_project() -> None:
+    candidate = _freelance_candidate(
+        title="Small React bug fix",
+        description="Fix a small React component bug.",
+        salary_min=Decimal("5"),
+        salary_max=Decimal("100"),
+    )
+
+    result = score_candidate(candidate, BOHDAN_PROFILE)
+
+    assert result.score >= BOHDAN_PROFILE.notification_threshold
+    assert any(
+        "подходит для набора репутации" in reason and "платёж заказчика подтверждён" in reason
+        for reason in result.reasons
+    )
+
+
+def test_freelance_profile_does_not_reward_unverified_small_fixed_project() -> None:
+    raw_data = {
+        "currency": {"code": "USD", "exchange_rate": 1.0},
+        "language": "en",
+        "jobs": [{"name": "React.js"}],
+        "bid_stats": {"bid_count": 12},
+        "_owner": {"status": {"payment_verified": False}},
+    }
+    result = score_candidate(
+        _freelance_candidate(
+            salary_min=Decimal("5"),
+            salary_max=Decimal("100"),
+            raw_data=raw_data,
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert not any("подходит для набора репутации" in reason for reason in result.reasons)
+    assert not any("очень низкий" in concern for concern in result.concerns)
 
 
 def test_freelance_profile_converts_api_currency_rate_to_usd() -> None:
@@ -437,7 +499,7 @@ def test_freelance_profile_converts_api_currency_rate_to_usd() -> None:
         BOHDAN_PROFILE,
     )
 
-    assert any("USD 15.67-130.61" in concern for concern in result.concerns)
+    assert any("USD 15.67-130.61" in reason for reason in result.reasons)
 
 
 def test_freelance_profile_rejects_unsupported_project_language() -> None:

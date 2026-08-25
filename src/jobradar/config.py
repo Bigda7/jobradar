@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     the_muse_max_pages: int = Field(default=5, ge=1, le=25)
     the_muse_max_items: int = Field(default=100, ge=1, le=500)
     the_muse_poll_interval_seconds: int = Field(default=21600, ge=21600)
+    ats_source_enabled: bool = False
+    ats_companies_file: str = "companies.yaml"
+    ats_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    ats_max_items_per_company: int = Field(default=500, ge=1, le=2000)
+    ats_poll_interval_seconds: int = Field(default=86400, ge=21600)
     arbeitnow_source_enabled: bool = True
     arbeitnow_api_url: str = "https://www.arbeitnow.com/api/job-board-api"
     arbeitnow_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
@@ -177,6 +182,7 @@ class Settings(BaseSettings):
     nbu_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     employment_stale_after_days: int = Field(default=30, ge=1, le=365)
     freelance_stale_after_days: int = Field(default=7, ge=1, le=365)
+    source_poll_jitter_ratio: float = Field(default=0.15, ge=0, le=0.5)
     worker_interval_seconds: int = Field(default=300, ge=10)
 
     @model_validator(mode="after")
@@ -322,6 +328,9 @@ class Settings(BaseSettings):
             "dou_jobs": self.dou_jobs_poll_interval_seconds,
             "himalayas": self.himalayas_poll_interval_seconds,
             "the_muse": self.the_muse_poll_interval_seconds,
+            "greenhouse": self.ats_poll_interval_seconds,
+            "lever": self.ats_poll_interval_seconds,
+            "ashby": self.ats_poll_interval_seconds,
             "arbeitnow": self.arbeitnow_poll_interval_seconds,
             "remotive": self.remotive_poll_interval_seconds,
             "mock": self.worker_interval_seconds,

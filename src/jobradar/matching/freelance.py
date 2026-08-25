@@ -263,37 +263,49 @@ def _budget_adjustment(
     contract_type = normalize_text(candidate.contract_type)
     formatted_budget = _format_usd_range(minimum_usd, maximum_usd)
     if contract_type == "hourly":
-        if upper_bound < Decimal("5"):
-            concerns.append(f"Почасовой бюджет очень низкий: {formatted_budget}.")
-            return -25
-        if upper_bound < profile.minimum_freelance_hourly_usd:
-            concerns.append(f"Почасовой бюджет ниже минимальной цели: {formatted_budget}.")
-            return -15
-        if upper_bound < profile.preferred_freelance_hourly_usd:
-            concerns.append(f"Почасовой бюджет ниже предпочтительной цели: {formatted_budget}.")
-            return -5
-        reasons.append(
-            f"Почасовой бюджет достигает предпочтительного диапазона: {formatted_budget}."
-        )
         if minimum_usd is not None and minimum_usd >= profile.preferred_freelance_hourly_usd:
+            reasons.append(
+                f"Почасовой бюджет достигает предпочтительного диапазона: {formatted_budget}."
+            )
             return 12
-        return 10
+        if upper_bound >= profile.preferred_freelance_hourly_usd:
+            reasons.append(
+                f"Почасовой бюджет достигает предпочтительного диапазона: {formatted_budget}."
+            )
+            return 10
+        if upper_bound >= profile.minimum_freelance_hourly_usd:
+            reasons.append(f"Почасовой бюджет находится в рабочем диапазоне: {formatted_budget}.")
+            return 5
+        reasons.append(f"Малый почасовой бюджет принят для набора репутации: {formatted_budget}.")
+        return 0
 
-    if upper_bound < Decimal("30"):
-        concerns.append(f"Фиксированный бюджет очень низкий: {formatted_budget}.")
-        return -25
-    if upper_bound < profile.minimum_freelance_fixed_usd:
-        concerns.append(f"Фиксированный бюджет ниже минимальной цели: {formatted_budget}.")
-        return -15
-    if upper_bound < profile.preferred_freelance_fixed_usd:
-        concerns.append(f"Фиксированный бюджет ниже предпочтительной цели: {formatted_budget}.")
-        return -5
-    reasons.append(
-        f"Фиксированный бюджет достигает предпочтительного диапазона: {formatted_budget}."
-    )
+    lower_bound = minimum_usd or maximum_usd
+    if (
+        lower_bound is not None
+        and Decimal("5") <= lower_bound
+        and upper_bound <= Decimal("100")
+        and _payment_verified(candidate.raw_data)
+    ):
+        reasons.append(
+            "Малый фиксированный проект подходит для набора репутации: "
+            f"{formatted_budget}, платёж заказчика подтверждён."
+        )
+        return 15
     if minimum_usd is not None and minimum_usd >= profile.preferred_freelance_fixed_usd:
+        reasons.append(
+            f"Фиксированный бюджет достигает предпочтительного диапазона: {formatted_budget}."
+        )
         return 10
-    return 8
+    if upper_bound >= profile.preferred_freelance_fixed_usd:
+        reasons.append(
+            f"Фиксированный бюджет достигает предпочтительного диапазона: {formatted_budget}."
+        )
+        return 8
+    if upper_bound >= profile.minimum_freelance_fixed_usd:
+        reasons.append(f"Фиксированный бюджет находится в рабочем диапазоне: {formatted_budget}.")
+        return 5
+    reasons.append(f"Малый фиксированный бюджет принят для набора репутации: {formatted_budget}.")
+    return 0
 
 
 def _budget_usd(candidate: MatchCandidate) -> tuple[Decimal | None, Decimal | None]:
@@ -382,6 +394,14 @@ def _owner_data(raw_data: Mapping[str, Any]) -> Mapping[str, Any] | None:
         if isinstance(owner, Mapping):
             return owner
     return None
+
+
+def _payment_verified(raw_data: Mapping[str, Any]) -> bool:
+    owner = _owner_data(raw_data)
+    if owner is None:
+        return False
+    status = owner.get("status")
+    return isinstance(status, Mapping) and status.get("payment_verified") is True
 
 
 def _language_adjustment(project_text: str, concerns: list[str]) -> int:

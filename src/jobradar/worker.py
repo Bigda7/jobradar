@@ -32,6 +32,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         if force_sources or await ingestion.is_source_due(
             source.name,
             poll_interval_seconds,
+            jitter_ratio=settings.source_poll_jitter_ratio,
             now=cycle_started_at,
         ):
             await ingestion.run_source(source)
@@ -40,6 +41,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
                 "source_run_skipped_not_due",
                 source=source.name,
                 poll_interval_seconds=poll_interval_seconds,
+                jitter_ratio=settings.source_poll_jitter_ratio,
             )
 
     deduplication_summary = await CrossSourceDeduplicationService(session_factory).merge_existing()

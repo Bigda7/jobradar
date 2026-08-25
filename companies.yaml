@@ -1,0 +1,21 @@
+companies:
+  - name: GitLab
+    provider: greenhouse
+    identifier: gitlab
+    enabled: true
+  - name: Canonical
+    provider: greenhouse
+    identifier: canonical
+    enabled: true
+  - name: JumpCloud
+    provider: lever
+    identifier: jumpcloud
+    enabled: true
+  - name: Linear
+    provider: ashby
+    identifier: linear
+    enabled: true
+  - name: Supabase
+    provider: ashby
+    identifier: supabase
+    enabled: true

@@ -26,7 +26,7 @@ from jobradar.db.models import (
 )
 from jobradar.db.session import engine, session_factory
 from jobradar.domain.enums import OpportunityDisposition, WorkMode
-from jobradar.ingestion.canonical import canonical_listing_order
+from jobradar.ingestion.canonical import canonical_source_link_order
 from jobradar.logging_config import configure_logging
 from jobradar.matching.profile import BOHDAN_PROFILE
 
@@ -184,7 +184,7 @@ def create_app(
                 Listing.is_active.is_(True),
                 Source.enabled.is_(True),
             )
-            .order_by(*canonical_listing_order())
+            .order_by(*canonical_source_link_order())
             .limit(1)
             .scalar_subquery()
         )

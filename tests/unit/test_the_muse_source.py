@@ -174,7 +174,7 @@ def test_the_muse_salary_uses_shared_monthly_sanity_penalty() -> None:
     result = score_candidate(candidate, BOHDAN_PROFILE)
 
     assert sanity.score_adjustment == -20
-    assert any("выше USD 4,000" in concern for concern in result.concerns)
+    assert any("выше USD 2,000" in concern for concern in result.concerns)
 
 
 @pytest.mark.parametrize(

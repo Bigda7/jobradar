@@ -29,10 +29,10 @@ class SearchProfile:
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v9-the-muse",
+    rules_version="bohdan-multi-source-v10-reputation-mode",
     notification_threshold=55,
     minimum_monthly_salary_usd=Decimal("1000"),
-    maximum_junior_monthly_salary_usd=Decimal("4000"),
+    maximum_junior_monthly_salary_usd=Decimal("2000"),
     minimum_full_time_monthly_salary_usd=Decimal("400"),
     excessive_salary_penalty=20,
     very_low_salary_penalty=15,
