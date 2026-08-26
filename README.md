@@ -1,32 +1,50 @@
-# JobRadar
+# JobRadar Backend
 
-JobRadar is a single-user, self-hosted backend that collects remote employment and freelance
-opportunities, normalizes source-specific data, applies deterministic matching rules, and sends
-selected results to Telegram. It is a modular monolith: the API, worker, bot, and maintenance
+Production backend for JobRadar, a self-hosted job intelligence platform that collects remote
+employment and freelance opportunities, normalizes heterogeneous source data, reconciles and
+deduplicates listings, applies deterministic matching rules, and exposes ranked results to a web
+client and Telegram.
+
+It is a modular monolith: the FastAPI API, scheduled worker, Telegram bot, and maintenance
 commands share one Python package and one PostgreSQL database while running as separate
-processes.
+processes. The project does not use a language model, browser automation, or unapproved private
+APIs.
 
-The project does not use a language model, browser automation, or unapproved private APIs.
+| Resource | Link |
+| --- | --- |
+| Live application | [Open JobRadar](https://jobradar-frontend-pink.vercel.app) |
+| Service status | [View live uptime](https://stats.uptimerobot.com/pbYg91DSyR) |
+| Frontend repository | [Bigda7/jobradar-frontend](https://github.com/Bigda7/jobradar-frontend) |
+
+## Portfolio Highlights
+
+- Integrates 18 employment, freelance, RSS, structured-data, and public ATS sources behind a common adapter contract.
+- Uses idempotent ingestion, content hashes, canonical records, conservative inventory reconciliation, and cross-source deduplication.
+- Produces explainable match scores with persisted reasons, concerns, rule versions, and content-aware notification idempotency.
+- Runs FastAPI, PostgreSQL 17, the worker, and Telegram bot as hardened Docker Compose services on an ARM64 AWS EC2 instance.
+- Terminates TLS at Caddy, keeps PostgreSQL private, protects data endpoints with bearer authentication, and exposes only health probes publicly.
+- Creates validated daily PostgreSQL dumps, uploads them to a private encrypted S3 bucket through an EC2 IAM role, and applies independent local and off-site retention.
+- Verifies formatting, linting, typing, security checks, migrations, tests, container builds, dependency vulnerabilities, and Git history in CI.
 
 ## Architecture
 
-```text
-Public APIs, RSS, JSON-LD, HTML sources, ATS APIs
-                         |
-                    BaseSource adapters
-                         |
-                 ingestion and reconciliation
-                         |
-                     PostgreSQL
-                  /       |       \
-          FastAPI API   matcher   Telegram bot
-                             \
-                         notifications
+```mermaid
+flowchart LR
+    Sources[Public APIs, RSS, JSON-LD, HTML and ATS APIs] --> Adapters[BaseSource adapters]
+    Adapters --> Ingestion[Normalization, ingestion and reconciliation]
+    Ingestion --> DB[(PostgreSQL 17)]
+    DB --> Matcher[Deterministic matcher]
+    Matcher --> Telegram[Telegram notifications]
+    DB --> API[FastAPI read API]
+    Web[Vercel server-side proxy] -->|TLS and bearer token| Caddy[Caddy]
+    Caddy --> API
+    Backup[Daily verified backup] --> S3[(Private encrypted S3)]
+    DB --> Backup
 ```
 
-Production deployments are designed to place Caddy or another TLS reverse proxy in front of the
-FastAPI container. PostgreSQL is not published to the host network. A PostgreSQL advisory lock
-prevents a scheduled worker and a manual one-shot worker from mutating the database concurrently.
+The production deployment places Caddy in front of the FastAPI container. PostgreSQL is not
+published to the host network. A PostgreSQL advisory lock prevents a scheduled worker and a
+manual one-shot worker from mutating the database concurrently.
 
 ## Technology stack
 
