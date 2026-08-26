@@ -8,13 +8,20 @@ project_dir="${JOBRADAR_PROJECT_DIR:-/opt/jobradar}"
 backup_dir="${JOBRADAR_BACKUP_DIR:-${project_dir}/backups}"
 retention_days="${JOBRADAR_BACKUP_RETENTION_DAYS:-14}"
 lock_file="${JOBRADAR_BACKUP_LOCK_FILE:-/tmp/jobradar-postgres-backup.lock}"
+s3_bucket="${JOBRADAR_BACKUP_S3_BUCKET:-}"
+s3_prefix="${JOBRADAR_BACKUP_S3_PREFIX:-postgres}"
 
 if [[ ! "${retention_days}" =~ ^[0-9]+$ ]]; then
   printf 'JOBRADAR_BACKUP_RETENTION_DAYS must be a non-negative integer.\n' >&2
   exit 1
 fi
 
-for required_command in docker flock; do
+required_commands=(docker flock)
+if [[ -n "${s3_bucket}" ]]; then
+  required_commands+=(aws stat)
+fi
+
+for required_command in "${required_commands[@]}"; do
   if ! command -v "${required_command}" >/dev/null 2>&1; then
     printf 'Required command is not available: %s\n' "${required_command}" >&2
     exit 1
@@ -60,6 +67,40 @@ fi
 docker compose exec -T db pg_restore --list <"${temporary_path}" >/dev/null
 mv "${temporary_path}" "${final_path}"
 trap - EXIT
+
+if [[ -n "${s3_bucket}" ]]; then
+  normalized_s3_prefix="${s3_prefix#/}"
+  normalized_s3_prefix="${normalized_s3_prefix%/}"
+  s3_key="$(basename "${final_path}")"
+  if [[ -n "${normalized_s3_prefix}" ]]; then
+    s3_key="${normalized_s3_prefix}/${s3_key}"
+  fi
+
+  aws s3 cp \
+    --only-show-errors \
+    "${final_path}" \
+    "s3://${s3_bucket}/${s3_key}"
+
+  local_size="$(stat --format='%s' "${final_path}")"
+  remote_size="$(
+    aws s3api head-object \
+      --bucket "${s3_bucket}" \
+      --key "${s3_key}" \
+      --query 'ContentLength' \
+      --output text
+  )"
+
+  if [[ "${remote_size}" != "${local_size}" ]]; then
+    printf 'S3 backup size mismatch: local=%s remote=%s.\n' \
+      "${local_size}" \
+      "${remote_size}" >&2
+    exit 1
+  fi
+
+  printf 'PostgreSQL backup uploaded: s3://%s/%s\n' \
+    "${s3_bucket}" \
+    "${s3_key}"
+fi
 
 find "${backup_dir}" \
   -type f \

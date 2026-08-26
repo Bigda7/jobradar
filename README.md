@@ -192,6 +192,24 @@ Employment listings expire after 30 days and freelance listings after 7 days unl
 opportunity is a favorite. Successful complete snapshots reconcile removed source records. Empty
 or unexpectedly reduced snapshots do not deactivate the existing inventory.
 
+## Database backups
+
+`scripts/backup_postgres.sh` creates a compressed PostgreSQL dump, validates it with
+`pg_restore --list`, and retains local backups for 14 days by default. The systemd timer in
+`deploy/systemd/` runs the script daily at `03:15 UTC`.
+
+For off-site S3 backups, install AWS CLI v2, attach a least-privilege IAM role to the instance, and
+create `/etc/jobradar/backup.env`:
+
+```dotenv
+JOBRADAR_BACKUP_S3_BUCKET=your-private-backup-bucket
+JOBRADAR_BACKUP_S3_PREFIX=postgres
+```
+
+When the bucket is configured, the script uploads each validated dump and verifies its remote
+size before applying local retention. Keep S3 Block Public Access enabled and configure bucket
+retention independently with an S3 lifecycle rule.
+
 ## HTTP API
 
 | Method | Path | Purpose |

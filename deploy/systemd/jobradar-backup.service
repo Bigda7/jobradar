@@ -12,6 +12,7 @@ SupplementaryGroups=docker
 WorkingDirectory=/opt/jobradar
 Environment=JOBRADAR_PROJECT_DIR=/opt/jobradar
 Environment=JOBRADAR_BACKUP_RETENTION_DAYS=14
+EnvironmentFile=-/etc/jobradar/backup.env
 ExecStart=/usr/bin/bash /opt/jobradar/scripts/backup_postgres.sh
 UMask=0077
 Nice=10
