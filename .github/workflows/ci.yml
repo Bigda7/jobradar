@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Install uv
         uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
