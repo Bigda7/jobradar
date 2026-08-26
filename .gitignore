@@ -16,7 +16,6 @@ backups/
 .deploy/
 .idea/
 .vscode/
-*HANDOFF*.md
 *.pem
 *.key
 *.crt
