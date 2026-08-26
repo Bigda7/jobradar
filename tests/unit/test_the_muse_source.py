@@ -256,6 +256,21 @@ async def test_the_muse_rejects_malformed_api_response() -> None:
             _ = [listing async for listing in source.fetch()]
 
 
+@pytest.mark.asyncio
+async def test_the_muse_http_error_does_not_expose_api_key() -> None:
+    api_key = "sensitive-test-api-key"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(429))
+    ) as client:
+        source = TheMuseSource(api_key=api_key, client=client)
+
+        with pytest.raises(TheMuseSourceError) as captured:
+            _ = [listing async for listing in source.fetch()]
+
+    assert "HTTP 429" in str(captured.value)
+    assert api_key not in str(captured.value)
+
+
 def test_the_muse_normalizer_rejects_non_remote_listing() -> None:
     source = TheMuseSource()
     job = _job(locations=[{"name": "Prague, Czechia"}])

@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from urllib.parse import urlsplit
 
@@ -14,9 +15,17 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     log_level: str = "INFO"
-    database_url: str = "postgresql+psycopg://jobradar:jobradar@localhost:5432/jobradar"
-    api_host: str = "0.0.0.0"
+    database_url: str = "postgresql+psycopg://jobradar:your_secure_password@localhost:5432/jobradar"
+    db_pool_size: int = Field(default=5, ge=1, le=50)
+    db_max_overflow: int = Field(default=5, ge=0, le=100)
+    db_pool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    db_pool_recycle_seconds: int = Field(default=1800, ge=60, le=86400)
+    db_connect_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    db_statement_timeout_milliseconds: int = Field(default=30000, ge=1000, le=300000)
+    api_host: str = "127.0.0.1"
     api_port: int = 8000
+    api_allowed_hosts: str = "localhost;127.0.0.1;test"
+    readiness_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     cors_allowed_origins: str = "http://localhost:5173"
     mock_source_enabled: bool = False
     djinni_source_enabled: bool = True
@@ -216,9 +225,37 @@ class Settings(BaseSettings):
                 origins.append(origin)
         return tuple(origins)
 
+    @property
+    def allowed_hosts(self) -> tuple[str, ...]:
+        hosts: list[str] = []
+        for raw_host in self.api_allowed_hosts.split(";"):
+            host = raw_host.strip().casefold().rstrip(".")
+            if not host:
+                continue
+            if (
+                host == "*"
+                or not re.fullmatch(r"[a-z0-9.-]+", host)
+                or host.startswith(".")
+                or ".." in host
+            ):
+                raise ValueError(
+                    "API_ALLOWED_HOSTS must contain semicolon-separated exact hostnames "
+                    "or IPv4 addresses without schemes, ports, paths, or wildcards."
+                )
+            if host not in hosts:
+                hosts.append(host)
+        if not hosts:
+            raise ValueError("API_ALLOWED_HOSTS must contain at least one host.")
+        return tuple(hosts)
+
     @model_validator(mode="after")
     def validate_cors_configuration(self) -> "Settings":
         _ = self.cors_origins
+        return self
+
+    @model_validator(mode="after")
+    def validate_allowed_hosts_configuration(self) -> "Settings":
+        _ = self.allowed_hosts
         return self
 
     @model_validator(mode="after")

@@ -123,7 +123,7 @@ class JobsCzSource(BaseSource):
             fingerprint = discovery_fingerprint(discovery_payload)
             cached = self.cached_listing(card.external_id)
             now = datetime.now(UTC)
-            if can_reuse_detail(
+            if cached is not None and can_reuse_detail(
                 cached,
                 fingerprint=fingerprint,
                 cached_fingerprint=(
@@ -135,7 +135,6 @@ class JobsCzSource(BaseSource):
                 ttl_seconds=self._detail_cache_ttl_seconds,
                 now=now,
             ):
-                assert cached is not None
                 description = _optional_string(cached.payload.get("description"))
                 detail_fetched_at = cached.detail_fetched_at
             else:

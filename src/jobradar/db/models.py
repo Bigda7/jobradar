@@ -81,6 +81,7 @@ class SourceRun(Base):
 
 class Opportunity(TimestampMixin, Base):
     __tablename__ = "opportunities"
+    __table_args__ = (Index("ix_opportunities_work_mode_published", "work_mode", "published_at"),)
 
     id: Mapped[int] = mapped_column(PRIMARY_KEY_TYPE, primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(
@@ -144,6 +145,8 @@ class Listing(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="uq_listings_source_external_id"),
         Index("ix_listings_source_canonical_url", "source_id", "canonical_url"),
+        Index("ix_listings_source_active", "source_id", "is_active"),
+        Index("ix_listings_opportunity_active", "opportunity_id", "is_active"),
     )
 
     id: Mapped[int] = mapped_column(PRIMARY_KEY_TYPE, primary_key=True, autoincrement=True)
@@ -191,6 +194,12 @@ class MatchEvaluation(Base):
             "profile_id",
             "rules_version",
             name="uq_match_evaluations_opportunity_profile_rules",
+        ),
+        Index(
+            "ix_match_evaluations_profile_rules_score",
+            "profile_id",
+            "rules_version",
+            "score",
         ),
     )
 

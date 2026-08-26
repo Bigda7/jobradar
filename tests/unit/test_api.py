@@ -1,5 +1,8 @@
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.api.app import create_app
@@ -46,6 +49,10 @@ async def test_health_and_read_only_endpoints(
     assert matches_response.json()["items"][0]["reasons"]
     assert sources_response.status_code == 200
     assert sources_response.json()[0]["name"] == "mock"
+    assert health_response.headers["x-content-type-options"] == "nosniff"
+    assert health_response.headers["x-frame-options"] == "DENY"
+    assert health_response.headers["content-security-policy"] == "frame-ancestors 'none'"
+    assert health_response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.asyncio
@@ -89,3 +96,105 @@ async def test_cors_allows_configured_frontend_and_rejects_other_origins(
     assert preflight_response.status_code == 200
     assert preflight_response.headers["access-control-allow-origin"] == "http://localhost:5173"
     assert preflight_response.headers["access-control-allow-methods"] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_api_rejects_untrusted_host(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    application = create_app(sqlite_session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/health", headers={"Host": "untrusted.example"})
+
+    assert response.status_code == 400
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_production_api_enables_hsts(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    application = create_app(
+        sqlite_session_factory,
+        application_settings=Settings(app_env="production"),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/health")
+
+    assert response.headers["strict-transport-security"] == ("max-age=31536000; includeSubDomains")
+
+
+@pytest.mark.asyncio
+async def test_ready_returns_503_when_database_is_unavailable(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failed_execute(*args: object, **kwargs: object) -> None:
+        raise SQLAlchemyError("database unavailable")
+
+    monkeypatch.setattr(AsyncSession, "execute", failed_execute)
+    application = create_app(sqlite_session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database is unavailable."}
+
+
+@pytest.mark.asyncio
+async def test_ready_returns_503_when_database_check_times_out(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def slow_execute(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(0.1)
+
+    monkeypatch.setattr(AsyncSession, "execute", slow_execute)
+    application = create_app(
+        sqlite_session_factory,
+        application_settings=Settings(readiness_timeout_seconds=0.01),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database is unavailable."}
+
+
+@pytest.mark.asyncio
+async def test_query_parameters_have_bounded_pagination_and_values(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    application = create_app(sqlite_session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        responses = [
+            await client.get("/jobs", params={"limit": 201}),
+            await client.get("/jobs", params={"offset": -1}),
+            await client.get("/jobs", params={"offset": 100_001}),
+            await client.get("/jobs", params={"q": "  "}),
+            await client.get("/jobs", params={"min_salary": "1000000001"}),
+            await client.get("/matches", params={"min_score": 101}),
+            await client.get("/matches", params={"offset": 100_001}),
+        ]
+
+    assert all(response.status_code == 422 for response in responses)

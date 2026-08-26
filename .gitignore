@@ -1,5 +1,4 @@
-.env
-.env.*
+.env*
 !.env.example
 .venv*/
 __pycache__/
@@ -17,3 +16,16 @@ backups/
 .deploy/
 .idea/
 .vscode/
+*HANDOFF*.md
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.dump
+*.sql
+*.tar
+*.tar.gz
+*.tgz
+*.log

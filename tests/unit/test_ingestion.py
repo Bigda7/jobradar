@@ -57,6 +57,13 @@ class RollingFeedMockSource(MockSource):
     deactivate_missing_listings = False
 
 
+class SecretFailingMockSource(MockSource):
+    async def fetch(self):  # type: ignore[no-untyped-def]
+        if False:
+            yield
+        raise RuntimeError("Request failed: https://api.example.test/jobs?api_key=secret-api-key")
+
+
 class CacheAwareMockSource(MockSource):
     cached_before_fetch = False
 
@@ -261,6 +268,25 @@ async def test_interrupted_crawl_does_not_deactivate_missing_listings(
     async with sqlite_session_factory() as session:
         listings = list(await session.scalars(select(Listing).order_by(Listing.external_id)))
         assert [listing.is_active for listing in listings] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_source_errors_are_redacted_before_database_storage(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    result = await IngestionService(sqlite_session_factory).run_source(SecretFailingMockSource())
+
+    assert result.status is RunStatus.FAILED
+    async with sqlite_session_factory() as session:
+        source = await session.scalar(select(Source).where(Source.name == "mock"))
+        run = await session.scalar(select(SourceRun))
+        assert source is not None
+        assert run is not None
+        assert source.last_error is not None
+        assert run.error_message is not None
+        assert "secret-api-key" not in source.last_error
+        assert "secret-api-key" not in run.error_message
+        assert "[REDACTED]" in source.last_error
 
 
 @pytest.mark.asyncio

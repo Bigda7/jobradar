@@ -7,9 +7,10 @@ from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
-from xml.etree import ElementTree
 
 import httpx
+from defusedxml import ElementTree
+from defusedxml.common import DefusedXmlException
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
@@ -19,6 +20,7 @@ from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_FEED_URL = "https://jobs.dou.ua/vacancies/feeds/?remote"
 USER_AGENT = "JobRadar/1.4 (personal job aggregator)"
+MAX_FEED_BYTES = 5_000_000
 
 REMOTE_HEADLINE_PATTERN = re.compile(r"(?<!\w)(?:віддалено|remote)(?!\w)", re.IGNORECASE)
 HYBRID_WORK_PATTERN = re.compile(
@@ -114,8 +116,10 @@ class DouJobsSource(BaseSource):
         try:
             response = await client.get(self._feed_url)
             response.raise_for_status()
+            if len(response.content) > MAX_FEED_BYTES:
+                raise DouJobsSourceError("DOU Jobs RSS response exceeded the size limit.")
             root = ElementTree.fromstring(response.content)
-        except (httpx.HTTPError, ElementTree.ParseError) as error:
+        except (httpx.HTTPError, ElementTree.ParseError, DefusedXmlException) as error:
             raise DouJobsSourceError(f"DOU Jobs RSS request failed: {error}") from error
 
         seen: set[str] = set()

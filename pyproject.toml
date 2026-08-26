@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic>=1.19.1,<2.0",
+    "defusedxml>=0.7.1,<0.8",
     "fastapi>=0.141.1,<0.142",
     "httpx>=0.28.1,<0.29",
     "psycopg[binary]>=3.3.4,<4.0",
@@ -27,6 +28,7 @@ dev = [
     "pytest>=9.1.1,<10.0",
     "pytest-asyncio>=1.4.0,<2.0",
     "ruff>=0.16.4,<0.17",
+    "types-defusedxml>=0.7.0.20250822,<0.8",
     "types-pyyaml>=6.0.12.20250915,<7.0",
 ]
 

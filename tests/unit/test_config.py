@@ -29,3 +29,25 @@ def test_cors_origins_are_normalized_and_deduplicated() -> None:
 def test_cors_origins_reject_unsafe_values(origin: str) -> None:
     with pytest.raises(ValidationError, match="CORS_ALLOWED_ORIGINS"):
         Settings(cors_allowed_origins=origin)
+
+
+def test_allowed_hosts_are_normalized_and_deduplicated() -> None:
+    settings = Settings(api_allowed_hosts=" LOCALHOST.;api.example.com;api.example.com ")
+
+    assert settings.allowed_hosts == ("localhost", "api.example.com")
+
+
+@pytest.mark.parametrize(
+    "host",
+    (
+        "*",
+        "*.example.com",
+        "https://api.example.com",
+        "api.example.com:8000",
+        "api.example.com/path",
+        "",
+    ),
+)
+def test_allowed_hosts_reject_unsafe_values(host: str) -> None:
+    with pytest.raises(ValidationError, match="API_ALLOWED_HOSTS"):
+        Settings(api_allowed_hosts=host)

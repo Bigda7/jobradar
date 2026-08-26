@@ -22,6 +22,7 @@ from jobradar.ingestion.canonical import (
     normalized_snapshot,
     refresh_opportunity_from_best_listing,
 )
+from jobradar.security import redact_sensitive_text
 from jobradar.sources.base import BaseSource, CachedListing
 
 logger = structlog.get_logger(__name__)
@@ -125,12 +126,16 @@ class IngestionService:
                         "listing_ingestion_failed",
                         source=adapter.name,
                         external_id=raw_listing.external_id,
-                        error=str(error),
+                        error=redact_sensitive_text(str(error)),
                     )
         except Exception as error:
             terminal_error = error
             result.errors += 1
-            logger.exception("source_fetch_failed", source=adapter.name, error=str(error))
+            logger.exception(
+                "source_fetch_failed",
+                source=adapter.name,
+                error=redact_sensitive_text(str(error)),
+            )
 
         if terminal_error is None and adapter.deactivate_missing_listings:
             try:
@@ -144,7 +149,7 @@ class IngestionService:
                 logger.exception(
                     "source_deactivation_failed",
                     source=adapter.name,
-                    error=str(error),
+                    error=redact_sensitive_text(str(error)),
                 )
 
         if terminal_error is not None:
@@ -473,16 +478,17 @@ class IngestionService:
             run.unchanged_count = result.unchanged
             run.deactivated_count = result.deactivated
             run.error_count = result.errors
-            run.error_message = str(terminal_error)[:2000] if terminal_error else None
+            safe_error = (
+                redact_sensitive_text(str(terminal_error))[:2000] if terminal_error else None
+            )
+            run.error_message = safe_error
 
             source.last_run_at = now
             if result.status in {RunStatus.SUCCEEDED, RunStatus.PARTIAL}:
                 source.last_success_at = now
                 source.last_error = None
             else:
-                source.last_error = (
-                    str(terminal_error)[:2000] if terminal_error else "Unknown error"
-                )
+                source.last_error = safe_error or "Unknown error"
 
 
 def jittered_poll_interval_seconds(

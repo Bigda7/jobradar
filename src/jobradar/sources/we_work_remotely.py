@@ -4,9 +4,10 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
-from xml.etree import ElementTree
 
 import httpx
+from defusedxml import ElementTree
+from defusedxml.common import DefusedXmlException
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
@@ -15,6 +16,7 @@ from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_FEED_URL = "https://weworkremotely.com/categories/remote-programming-jobs.rss"
 USER_AGENT = "JobRadar/1.1 (personal job aggregator)"
+MAX_FEED_BYTES = 5_000_000
 
 
 class WeWorkRemotelySourceError(RuntimeError):
@@ -70,8 +72,12 @@ class WeWorkRemotelySource(BaseSource):
         try:
             response = await client.get(self._feed_url)
             response.raise_for_status()
+            if len(response.content) > MAX_FEED_BYTES:
+                raise WeWorkRemotelySourceError(
+                    "We Work Remotely RSS response exceeded the size limit."
+                )
             root = ElementTree.fromstring(response.content)
-        except (httpx.HTTPError, ElementTree.ParseError) as error:
+        except (httpx.HTTPError, ElementTree.ParseError, DefusedXmlException) as error:
             raise WeWorkRemotelySourceError(
                 f"We Work Remotely RSS request failed: {error}"
             ) from error

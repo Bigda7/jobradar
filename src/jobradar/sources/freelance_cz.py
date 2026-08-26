@@ -125,7 +125,7 @@ class FreelanceCzSource(BaseSource):
                     else None
                 )
                 now = datetime.now(UTC)
-                if can_reuse_detail(
+                if cached is not None and can_reuse_detail(
                     cached,
                     fingerprint=fingerprint,
                     cached_fingerprint=cached_fingerprint,
@@ -133,7 +133,6 @@ class FreelanceCzSource(BaseSource):
                     ttl_seconds=self._detail_cache_ttl_seconds,
                     now=now,
                 ):
-                    assert cached is not None
                     detail = dict(cached.payload)
                     detail_fetched_at = cached.detail_fetched_at
                 else:

@@ -1,14 +1,18 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Annotated
 
 import structlog
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import exists, func, or_, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from jobradar.api.middleware import SecurityHeadersMiddleware
 from jobradar.api.schemas import (
     HealthResponse,
     JobListResponse,
@@ -30,6 +34,11 @@ from jobradar.domain.enums import OpportunityDisposition, WorkMode
 from jobradar.ingestion.canonical import canonical_source_link_order
 from jobradar.logging_config import configure_logging
 from jobradar.matching.profile import BOHDAN_PROFILE
+from jobradar.security import redact_sensitive_text
+
+MAX_PAGE_SIZE = 200
+MAX_OFFSET = 100_000
+MAX_SALARY_FILTER = Decimal("1000000000")
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -54,7 +63,7 @@ def create_app(
 
     application = FastAPI(
         title="JobRadar API",
-        version="0.6.0",
+        version="1.3.0",
         lifespan=lifespan,
     )
     application.state.session_factory = selected_session_factory
@@ -65,6 +74,14 @@ def create_app(
         allow_methods=["GET"],
         allow_headers=["Accept", "Authorization", "Content-Type"],
         max_age=600,
+    )
+    application.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=list(selected_settings.allowed_hosts),
+    )
+    application.add_middleware(
+        SecurityHeadersMiddleware,
+        enable_hsts=selected_settings.app_env.casefold() == "production",
     )
 
     async def request_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -80,14 +97,22 @@ def create_app(
     async def ready(
         session: Annotated[AsyncSession, Depends(request_session)],
     ) -> HealthResponse:
-        await session.execute(text("SELECT 1"))
+        try:
+            async with asyncio.timeout(selected_settings.readiness_timeout_seconds):
+                await session.execute(text("SELECT 1"))
+        except (TimeoutError, SQLAlchemyError) as error:
+            logger.warning("readiness_check_failed", error_type=type(error).__name__)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database is unavailable.",
+            ) from None
         return HealthResponse(status="ready")
 
     @application.get("/jobs", response_model=JobListResponse, tags=["jobs"])
     async def list_jobs(
         session: Annotated[AsyncSession, Depends(request_session)],
-        limit: int = Query(default=50, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
         work_mode: Annotated[WorkMode | None, Query()] = WorkMode.REMOTE,
         query: Annotated[
             str | None,
@@ -97,8 +122,13 @@ def create_app(
             str | None,
             Query(min_length=2, max_length=100),
         ] = None,
-        minimum_salary: Annotated[Decimal | None, Query(alias="min_salary", ge=0)] = None,
+        minimum_salary: Annotated[
+            Decimal | None,
+            Query(alias="min_salary", ge=0, le=MAX_SALARY_FILTER),
+        ] = None,
     ) -> JobListResponse:
+        query = _normalize_optional_filter(query, "q")
+        employment_type = _normalize_optional_filter(employment_type, "employment_type")
         filters = [
             exists(
                 select(Listing.id)
@@ -119,7 +149,7 @@ def create_app(
         if work_mode is not None:
             filters.append(Opportunity.work_mode == work_mode.value)
         if query is not None:
-            pattern = f"%{_escape_like(query.strip())}%"
+            pattern = f"%{_escape_like(query)}%"
             filters.append(
                 or_(
                     Opportunity.title.ilike(pattern, escape="\\"),
@@ -154,7 +184,13 @@ def create_app(
         session: Annotated[AsyncSession, Depends(request_session)],
     ) -> list[SourceResponse]:
         sources = (await session.scalars(select(Source).order_by(Source.name))).all()
-        return [SourceResponse.model_validate(item) for item in sources]
+        responses: list[SourceResponse] = []
+        for item in sources:
+            response = SourceResponse.model_validate(item)
+            if response.last_error:
+                response.last_error = redact_sensitive_text(response.last_error)
+            responses.append(response)
+        return responses
 
     @application.get("/matches", response_model=MatchListResponse, tags=["matches"])
     async def list_matches(
@@ -162,8 +198,8 @@ def create_app(
         minimum_score: Annotated[int, Query(alias="min_score", ge=0, le=100)] = (
             selected_settings.matching_min_score
         ),
-        limit: int = Query(default=50, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
+        offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     ) -> MatchListResponse:
         filters = (
             MatchEvaluation.profile_id == BOHDAN_PROFILE.profile_id,
@@ -248,3 +284,15 @@ app = create_app()
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _normalize_optional_filter(value: str | None, parameter_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if len(normalized) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Query parameter '{parameter_name}' must contain at least two characters.",
+        )
+    return normalized

@@ -1,0 +1,37 @@
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+
+class SecurityHeadersMiddleware:
+    def __init__(self, app: ASGIApp, *, enable_hsts: bool = False) -> None:
+        self._app = app
+        self._enable_hsts = enable_hsts
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.extend(
+                    [
+                        (b"x-content-type-options", b"nosniff"),
+                        (b"x-frame-options", b"DENY"),
+                        (b"referrer-policy", b"no-referrer"),
+                        (
+                            b"permissions-policy",
+                            b"camera=(), microphone=(), geolocation=()",
+                        ),
+                        (b"content-security-policy", b"frame-ancestors 'none'"),
+                        (b"cache-control", b"no-store"),
+                    ]
+                )
+                if self._enable_hsts:
+                    headers.append(
+                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                    )
+                message["headers"] = headers
+            await send(message)
+
+        await self._app(scope, receive, send_with_security_headers)

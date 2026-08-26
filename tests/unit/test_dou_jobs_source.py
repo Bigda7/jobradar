@@ -8,7 +8,12 @@ from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.matching.models import MatchCandidate
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.scorer import score_candidate
-from jobradar.sources.dou_jobs import DouJobsSource, parse_dou_headline, parse_salary
+from jobradar.sources.dou_jobs import (
+    DouJobsSource,
+    DouJobsSourceError,
+    parse_dou_headline,
+    parse_salary,
+)
 from jobradar.sources.registry import build_source_registry
 
 RSS = """<?xml version="1.0" encoding="utf-8"?>
@@ -81,6 +86,21 @@ async def test_dou_jobs_source_keeps_strict_remote_jobs_and_normalizes_full_rss(
     assert normalized.salary_period == "month"
     assert normalized.published_at is not None
     assert normalized.published_at.isoformat() == "2026-08-23T09:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_dou_jobs_source_rejects_xml_entities() -> None:
+    malicious_xml = (
+        '<!DOCTYPE rss [<!ENTITY payload SYSTEM "file:///etc/passwd">]>'
+        "<rss><channel><item><title>&payload;</title></item></channel></rss>"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=malicious_xml))
+    ) as client:
+        source = DouJobsSource(client=client)
+
+        with pytest.raises(DouJobsSourceError):
+            _ = [listing async for listing in source.fetch()]
 
 
 @pytest.mark.asyncio

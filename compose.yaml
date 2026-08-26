@@ -6,6 +6,16 @@ x-default-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+x-app-security: &app-security
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  init: true
+
 services:
   db:
     image: postgres:17-alpine
@@ -24,6 +34,7 @@ services:
     restart: unless-stopped
 
   api:
+    <<: *app-security
     image: jobradar-app:latest
     build:
       context: .
@@ -33,7 +44,7 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/jobradar
-    command: ["sh", "-c", "alembic upgrade head && uvicorn jobradar.api.app:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "alembic upgrade head && uvicorn jobradar.api.app:app --host 0.0.0.0 --port 8000 --no-server-header"]
     depends_on:
       db:
         condition: service_healthy
@@ -48,6 +59,7 @@ services:
     restart: unless-stopped
 
   worker:
+    <<: *app-security
     image: jobradar-app:latest
     build:
       context: .
@@ -65,6 +77,7 @@ services:
     restart: unless-stopped
 
   bot:
+    <<: *app-security
     image: jobradar-app:latest
     build:
       context: .
@@ -96,6 +109,7 @@ services:
     logging: *default-logging
 
   test:
+    <<: *app-security
     build:
       context: .
       target: test

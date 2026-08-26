@@ -2,7 +2,10 @@ import httpx
 import pytest
 
 from jobradar.domain.enums import WorkMode
-from jobradar.sources.we_work_remotely import WeWorkRemotelySource
+from jobradar.sources.we_work_remotely import (
+    WeWorkRemotelySource,
+    WeWorkRemotelySourceError,
+)
 
 RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -53,3 +56,18 @@ async def test_we_work_remotely_source_parses_public_programming_rss() -> None:
     assert normalized.work_mode is WorkMode.REMOTE
     assert normalized.published_at is not None
     assert normalized.published_at.isoformat() == "2026-08-22T12:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_we_work_remotely_source_rejects_xml_entities() -> None:
+    malicious_xml = (
+        '<!DOCTYPE rss [<!ENTITY payload SYSTEM "file:///etc/passwd">]>'
+        "<rss><channel><item><title>&payload;</title></item></channel></rss>"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=malicious_xml))
+    ) as client:
+        source = WeWorkRemotelySource(client=client)
+
+        with pytest.raises(WeWorkRemotelySourceError):
+            _ = [listing async for listing in source.fetch()]

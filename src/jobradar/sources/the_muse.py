@@ -159,8 +159,14 @@ class TheMuseSource(BaseSource):
             response = await client.get(self._api_url, params=query_params)
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as error:
-            raise TheMuseSourceError(f"The Muse request failed: {error}") from error
+        except httpx.HTTPStatusError as error:
+            raise TheMuseSourceError(
+                f"The Muse returned HTTP {error.response.status_code}."
+            ) from None
+        except httpx.HTTPError:
+            raise TheMuseSourceError("The Muse request failed due to a network error.") from None
+        except ValueError:
+            raise TheMuseSourceError("The Muse returned invalid JSON.") from None
         if not isinstance(payload, Mapping):
             raise TheMuseSourceError("The Muse returned a non-object JSON response.")
         return payload
