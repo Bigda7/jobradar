@@ -40,6 +40,7 @@ async def test_health_and_read_only_endpoints(
     assert jobs_response.status_code == 200
     assert jobs_response.json()["total"] == 2
     assert len(jobs_response.json()["items"]) == 2
+    assert jobs_response.json()["items"][0]["source_url"].startswith("https://")
     assert query_response.json()["total"] == 1
     assert salary_response.json()["total"] == 1
     assert onsite_response.json()["total"] == 0
@@ -120,7 +121,12 @@ async def test_production_api_enables_hsts(
 ) -> None:
     application = create_app(
         sqlite_session_factory,
-        application_settings=Settings(app_env="production"),
+        application_settings=Settings(
+            app_env="production",
+            api_allowed_hosts="test;api.example.com",
+            api_bearer_token="a" * 32,
+            database_url="sqlite+aiosqlite:///:memory:",
+        ),
     )
 
     async with AsyncClient(
@@ -130,6 +136,62 @@ async def test_production_api_enables_hsts(
         response = await client.get("/health")
 
     assert response.headers["strict-transport-security"] == ("max-age=31536000; includeSubDomains")
+
+
+@pytest.mark.asyncio
+async def test_data_endpoints_require_configured_bearer_token(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    application = create_app(
+        sqlite_session_factory,
+        application_settings=Settings(api_bearer_token="a" * 32),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        health_response = await client.get("/health")
+        unauthorized_response = await client.get("/jobs")
+        invalid_response = await client.get(
+            "/jobs",
+            headers={"Authorization": "Bearer invalid"},
+        )
+        authorized_response = await client.get(
+            "/jobs",
+            headers={"Authorization": f"Bearer {'a' * 32}"},
+        )
+
+    assert health_response.status_code == 200
+    assert unauthorized_response.status_code == 401
+    assert unauthorized_response.headers["www-authenticate"] == "Bearer"
+    assert invalid_response.status_code == 401
+    assert authorized_response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_production_disables_api_documentation(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    application = create_app(
+        sqlite_session_factory,
+        application_settings=Settings(
+            app_env="production",
+            api_allowed_hosts="test;api.example.com",
+            api_bearer_token="a" * 32,
+            database_url="sqlite+aiosqlite:///:memory:",
+        ),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        docs_response = await client.get("/docs")
+        schema_response = await client.get("/openapi.json")
+
+    assert docs_response.status_code == 404
+    assert schema_response.status_code == 404
 
 
 @pytest.mark.asyncio

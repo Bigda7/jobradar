@@ -1,5 +1,6 @@
 import re
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
@@ -13,7 +14,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_env: str = "development"
+    app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     database_url: str = "postgresql+psycopg://jobradar:your_secure_password@localhost:5432/jobradar"
     db_pool_size: int = Field(default=5, ge=1, le=50)
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_allowed_hosts: str = "localhost;127.0.0.1;test"
+    api_bearer_token: SecretStr | None = None
     readiness_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     cors_allowed_origins: str = "http://localhost:5173"
     mock_source_enabled: bool = False
@@ -256,6 +258,28 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_allowed_hosts_configuration(self) -> "Settings":
         _ = self.allowed_hosts
+        return self
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.app_env != "production":
+            return self
+
+        token = (
+            self.api_bearer_token.get_secret_value().strip()
+            if self.api_bearer_token is not None
+            else ""
+        )
+        if len(token) < 32:
+            raise ValueError("API_BEARER_TOKEN must contain at least 32 characters in production.")
+        if "your_secure_password" in self.database_url:
+            raise ValueError("DATABASE_URL must not use the placeholder production password.")
+
+        local_hosts = {"localhost", "127.0.0.1", "test"}
+        if set(self.allowed_hosts).issubset(local_hosts):
+            raise ValueError(
+                "API_ALLOWED_HOSTS must include the public API hostname in production."
+            )
         return self
 
     @model_validator(mode="after")

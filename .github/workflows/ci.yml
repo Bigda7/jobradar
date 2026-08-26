@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+        env:
+          POSTGRES_DB: jobradar_test
+          POSTGRES_USER: jobradar
+          POSTGRES_PASSWORD: ci_only_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jobradar -d jobradar_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://jobradar:ci_only_password@localhost:5432/jobradar_test
+      TEST_DATABASE_URL: postgresql+psycopg://jobradar:ci_only_password@localhost:5432/jobradar_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          version: "0.12.5"
+          enable-cache: true
+
+      - name: Install Python and locked dependencies
+        run: |
+          uv python install 3.13
+          uv sync --frozen --extra dev
+
+      - name: Run static checks
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run mypy src/jobradar
+          uv run bandit -q -r src/jobradar
+
+      - name: Audit Python dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --output-file requirements-audit.txt
+          uv run pip-audit --strict --requirement requirements-audit.txt
+
+      - name: Verify migrations
+        run: uv run alembic upgrade head
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build runtime image
+        run: docker build --target runtime --tag jobradar:${{ github.sha }} .
+
+      - name: Scan Git history for secrets
+        run: >-
+          docker run --rm
+          --volume "${PWD}:/repo"
+          zricethezav/gitleaks:v8.30.0@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --redact --no-banner

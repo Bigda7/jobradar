@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, HttpUrl
 
 
 class HealthResponse(BaseModel):
@@ -28,6 +28,7 @@ class JobResponse(BaseModel):
     published_at: datetime | None
     first_seen_at: datetime
     last_seen_at: datetime
+    source_url: HttpUrl
 
 
 class JobListResponse(BaseModel):
@@ -38,7 +39,6 @@ class JobListResponse(BaseModel):
 
 
 class MatchResponse(JobResponse):
-    source_url: str
     score: int
     reasons: list[str]
     concerns: list[str]

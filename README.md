@@ -77,15 +77,18 @@ project does not replace them with scraping or browser automation.
 - API pagination and numeric filters have explicit upper and lower bounds.
 - SQL statements use SQLAlchemy expressions or parameterized static SQL.
 - CORS and trusted hosts are exact allowlists; wildcards are rejected.
+- Data endpoints use bearer authentication when `API_BEARER_TOKEN` is configured; production
+  startup rejects missing or short tokens.
 - API responses include defensive browser headers. HSTS is enabled when `APP_ENV=production`.
+- OpenAPI and interactive documentation endpoints are disabled in production.
 - Database connections have connect, pool, statement, and readiness timeouts.
 - Source failures are isolated, recorded, and redacted before logging or database storage.
 - Containers run as an unprivileged user with a read-only filesystem, no Linux capabilities, and
   `no-new-privileges`.
 
-The current HTTP API is read-only and does not implement authentication. Deploy it behind a TLS
-reverse proxy and add authentication before introducing mutation endpoints or multi-user access.
-CORS is a browser policy and must not be treated as authentication.
+The current HTTP API is read-only. Keep it behind a TLS reverse proxy and use a server-side proxy
+for browser clients so the bearer token never enters client-side JavaScript. CORS is a browser
+policy and is not authentication.
 
 ## Prerequisites
 
@@ -107,9 +110,15 @@ production API, configure exact host and browser-origin allowlists:
 ```dotenv
 APP_ENV=production
 POSTGRES_PASSWORD=your_secure_password
+API_BEARER_TOKEN=replace_with_at_least_32_random_characters
 API_ALLOWED_HOSTS=api.yourdomain.com
 CORS_ALLOWED_ORIGINS=https://app.yourdomain.com
 ```
+
+`DATABASE_URL` must contain the same PostgreSQL password. Generate the API token with a
+cryptographically secure password manager or, locally, with
+`python -c "import secrets; print(secrets.token_urlsafe(48))"`. Store it only in the backend secret
+store and the frontend hosting provider's server-side environment variables.
 
 Do not commit `.env`, database dumps, private keys, certificates, or handoff documents.
 
@@ -118,9 +127,14 @@ Do not commit `.env`, database dumps, private keys, certificates, or handoff doc
 Build and start PostgreSQL, the API, worker, and Telegram bot:
 
 ```powershell
-docker compose up --build -d
-docker compose ps
+.\scripts\compose.ps1 up --build -d
+.\scripts\compose.ps1 ps
 ```
+
+The PowerShell wrapper reads `POSTGRES_PASSWORD` from `.env`, or derives it in process memory from
+`DATABASE_URL` for an existing local setup. It never prints or persists the derived password.
+Production deployments should still provide `POSTGRES_PASSWORD` explicitly through their secret
+store. On Linux, export `POSTGRES_PASSWORD` before using `docker compose` directly.
 
 The API binds to `127.0.0.1:8000` by default:
 
@@ -131,13 +145,13 @@ http://localhost:8000/docs
 Inspect service logs:
 
 ```powershell
-docker compose logs --tail=100 api worker bot
+.\scripts\compose.ps1 logs --tail=100 api worker bot
 ```
 
 Stop the stack without deleting PostgreSQL data:
 
 ```powershell
-docker compose down
+.\scripts\compose.ps1 down
 ```
 
 ## Database migrations
@@ -145,7 +159,7 @@ docker compose down
 The API container applies committed migrations before Uvicorn starts. Apply them manually with:
 
 ```powershell
-docker compose run --rm api alembic upgrade head
+.\scripts\compose.ps1 run --rm api alembic upgrade head
 ```
 
 Create and review a migration after changing ORM models:
@@ -162,16 +176,16 @@ Never use `Base.metadata.create_all()` as a production migration mechanism.
 Run one forced source cycle:
 
 ```powershell
-docker compose run --rm worker python -m jobradar.worker --once
+.\scripts\compose.ps1 run --rm worker python -m jobradar.worker --once
 ```
 
 Run maintenance operations:
 
 ```powershell
-docker compose run --rm worker python -m jobradar.maintenance rescore-all
-docker compose run --rm worker python -m jobradar.maintenance expire-stale
-docker compose run --rm worker python -m jobradar.maintenance deduplicate-opportunities
-docker compose run --rm worker python -m jobradar.maintenance reset-hidden
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance rescore-all
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance expire-stale
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance deduplicate-opportunities
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance reset-hidden
 ```
 
 Employment listings expire after 30 days and freelance listings after 7 days unless the
@@ -184,13 +198,28 @@ or unexpectedly reduced snapshots do not deactivate the existing inventory.
 | --- | --- | --- |
 | `GET` | `/health` | process liveness |
 | `GET` | `/ready` | PostgreSQL readiness |
-| `GET` | `/jobs` | active opportunities with filters and pagination |
+| `GET` | `/jobs` | active opportunities with filters, pagination, and canonical links |
 | `GET` | `/matches` | active deterministic matches with scores and canonical links |
 | `GET` | `/sources` | source health and collection timestamps |
 
 `GET /jobs` supports `q`, `work_mode`, `employment_type`, `min_salary`, `limit`, and `offset`.
 `GET /matches` supports `min_score`, `limit`, and `offset`. OpenAPI documentation is available at
-`/docs` and `/openapi.json`.
+`/docs` and `/openapi.json` outside production. `/health` and `/ready` are public for platform
+health checks; the three data endpoints require `Authorization: Bearer <token>` when a token is
+configured.
+
+## Safe production rollout
+
+1. Back up PostgreSQL and verify that the dump can be read before applying migrations.
+2. Set `APP_ENV=production`, unique database credentials, a random API bearer token, and exact
+   public host allowlists in the deployment secret store.
+3. Terminate TLS at a maintained reverse proxy and expose only that proxy to the internet.
+4. Deploy an immutable image tag or digest, run `alembic upgrade head`, then verify `/health`,
+   `/ready`, authenticated `/jobs`, and authenticated `/matches`.
+5. Protect `main`, require the CI workflow, and review Dependabot pull requests before merging.
+
+Never copy `.env` into an image, repository, workflow, issue, or build log. Rotate a credential
+immediately if it may have been exposed.
 
 ## Telegram bot
 
@@ -201,7 +230,7 @@ operations. User state and sent message identifiers are persisted in PostgreSQL.
 Validate configured Telegram credentials with one test message:
 
 ```powershell
-docker compose run --rm worker python -m jobradar.worker --test-telegram
+.\scripts\compose.ps1 run --rm worker python -m jobradar.worker --test-telegram
 ```
 
 ## Development and quality checks
@@ -224,7 +253,7 @@ uv run mypy src
 Run PostgreSQL integration tests in containers:
 
 ```powershell
-docker compose --profile test run --rm test
+.\scripts\compose.ps1 --profile test run --rm test
 ```
 
 ## Project layout

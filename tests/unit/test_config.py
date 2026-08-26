@@ -51,3 +51,34 @@ def test_allowed_hosts_are_normalized_and_deduplicated() -> None:
 def test_allowed_hosts_reject_unsafe_values(host: str) -> None:
     with pytest.raises(ValidationError, match="API_ALLOWED_HOSTS"):
         Settings(api_allowed_hosts=host)
+
+
+def test_production_requires_secure_api_configuration() -> None:
+    with pytest.raises(ValidationError, match="API_BEARER_TOKEN"):
+        Settings(app_env="production")
+
+    with pytest.raises(ValidationError, match="placeholder production password"):
+        Settings(
+            app_env="production",
+            api_allowed_hosts="api.example.com",
+            api_bearer_token="a" * 32,
+            database_url=("postgresql+psycopg://jobradar:your_secure_password@db:5432/jobradar"),
+        )
+
+    with pytest.raises(ValidationError, match="public API hostname"):
+        Settings(
+            app_env="production",
+            api_bearer_token="a" * 32,
+            database_url="postgresql+psycopg://jobradar:secret@db:5432/jobradar",
+        )
+
+
+def test_production_accepts_complete_secure_configuration() -> None:
+    settings = Settings(
+        app_env="production",
+        api_allowed_hosts="api.example.com",
+        api_bearer_token="a" * 32,
+        database_url="postgresql+psycopg://jobradar:secret@db:5432/jobradar",
+    )
+
+    assert settings.app_env == "production"

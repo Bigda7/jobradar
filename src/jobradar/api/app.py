@@ -1,16 +1,18 @@
 import asyncio
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Annotated
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.selectable import ScalarSelect
 
 from jobradar.api.middleware import SecurityHeadersMiddleware
 from jobradar.api.schemas import (
@@ -63,8 +65,11 @@ def create_app(
 
     application = FastAPI(
         title="JobRadar API",
-        version="1.3.0",
+        version="1.4.0",
         lifespan=lifespan,
+        docs_url=None if selected_settings.app_env == "production" else "/docs",
+        redoc_url=None if selected_settings.app_env == "production" else "/redoc",
+        openapi_url=None if selected_settings.app_env == "production" else "/openapi.json",
     )
     application.state.session_factory = selected_session_factory
     application.add_middleware(
@@ -89,6 +94,29 @@ def create_app(
         async with factory() as session:
             yield session
 
+    async def require_api_access(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> None:
+        configured_token = (
+            selected_settings.api_bearer_token.get_secret_value().strip()
+            if selected_settings.api_bearer_token is not None
+            else ""
+        )
+        if not configured_token:
+            return
+
+        scheme, separator, supplied_token = (authorization or "").partition(" ")
+        if (
+            not separator
+            or scheme.casefold() != "bearer"
+            or not secrets.compare_digest(supplied_token, configured_token)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication is required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     @application.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
@@ -111,6 +139,7 @@ def create_app(
     @application.get("/jobs", response_model=JobListResponse, tags=["jobs"])
     async def list_jobs(
         session: Annotated[AsyncSession, Depends(request_session)],
+        _: Annotated[None, Depends(require_api_access)],
         limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
         work_mode: Annotated[WorkMode | None, Query()] = WorkMode.REMOTE,
@@ -163,9 +192,10 @@ def create_app(
             filters.append(Opportunity.salary_max >= minimum_salary)
 
         total = await session.scalar(select(func.count()).select_from(Opportunity).where(*filters))
-        opportunities = (
-            await session.scalars(
-                select(Opportunity)
+        listing_url = _canonical_listing_url()
+        rows = (
+            await session.execute(
+                select(Opportunity, listing_url.label("source_url"))
                 .where(*filters)
                 .order_by(Opportunity.published_at.desc().nullslast(), Opportunity.id.desc())
                 .limit(limit)
@@ -173,7 +203,11 @@ def create_app(
             )
         ).all()
         return JobListResponse(
-            items=[JobResponse.model_validate(item) for item in opportunities],
+            items=[
+                _build_job_response(opportunity, source_url)
+                for opportunity, source_url in rows
+                if source_url is not None
+            ],
             total=total or 0,
             limit=limit,
             offset=offset,
@@ -182,6 +216,7 @@ def create_app(
     @application.get("/sources", response_model=list[SourceResponse], tags=["sources"])
     async def list_sources(
         session: Annotated[AsyncSession, Depends(request_session)],
+        _: Annotated[None, Depends(require_api_access)],
     ) -> list[SourceResponse]:
         sources = (await session.scalars(select(Source).order_by(Source.name))).all()
         responses: list[SourceResponse] = []
@@ -195,6 +230,7 @@ def create_app(
     @application.get("/matches", response_model=MatchListResponse, tags=["matches"])
     async def list_matches(
         session: Annotated[AsyncSession, Depends(request_session)],
+        _: Annotated[None, Depends(require_api_access)],
         minimum_score: Annotated[int, Query(alias="min_score", ge=0, le=100)] = (
             selected_settings.matching_min_score
         ),
@@ -224,18 +260,7 @@ def create_app(
         total = await session.scalar(
             select(func.count()).select_from(MatchEvaluation).where(*filters)
         )
-        listing_url = (
-            select(Listing.source_url)
-            .join(Source, Source.id == Listing.source_id)
-            .where(
-                Listing.opportunity_id == Opportunity.id,
-                Listing.is_active.is_(True),
-                Source.enabled.is_(True),
-            )
-            .order_by(*canonical_source_link_order())
-            .limit(1)
-            .scalar_subquery()
-        )
+        listing_url = _canonical_listing_url()
         rows = (
             await session.execute(
                 select(Opportunity, MatchEvaluation, listing_url.label("source_url"))
@@ -257,11 +282,10 @@ def create_app(
         for opportunity, evaluation, source_url in rows:
             if source_url is None:
                 continue
-            job_data = JobResponse.model_validate(opportunity).model_dump()
+            job_data = _build_job_response(opportunity, source_url).model_dump()
             items.append(
                 MatchResponse(
                     **job_data,
-                    source_url=source_url,
                     score=evaluation.score,
                     reasons=evaluation.reasons,
                     concerns=evaluation.concerns,
@@ -296,3 +320,28 @@ def _normalize_optional_filter(value: str | None, parameter_name: str) -> str | 
             detail=f"Query parameter '{parameter_name}' must contain at least two characters.",
         )
     return normalized
+
+
+def _canonical_listing_url() -> ScalarSelect[str]:
+    return (
+        select(Listing.source_url)
+        .join(Source, Source.id == Listing.source_id)
+        .where(
+            Listing.opportunity_id == Opportunity.id,
+            Listing.is_active.is_(True),
+            Source.enabled.is_(True),
+        )
+        .order_by(*canonical_source_link_order())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _build_job_response(opportunity: Opportunity, source_url: str) -> JobResponse:
+    fields = {
+        field_name: getattr(opportunity, field_name)
+        for field_name in JobResponse.model_fields
+        if field_name != "source_url"
+    }
+    fields["source_url"] = source_url
+    return JobResponse.model_validate(fields)
