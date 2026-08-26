@@ -317,3 +317,10 @@ tests/                   unit and PostgreSQL integration tests
 6. Add deterministic fixture-based tests for valid, malformed, partial, and rate-limited data.
 
 Keep source-specific network and mapping logic out of the API, matching, and notification layers.
+
+## License
+
+The JobRadar source code is available under the [MIT License](LICENSE).
+
+Job listings, company names, trademarks, logos, and data obtained from external services remain
+the property of their respective owners and are not relicensed by this project.
