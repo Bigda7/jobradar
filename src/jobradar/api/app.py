@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.selectable import ScalarSelect
 
+from jobradar import __version__
 from jobradar.api.middleware import SecurityHeadersMiddleware
 from jobradar.api.schemas import (
     HealthResponse,
@@ -65,7 +66,7 @@ def create_app(
 
     application = FastAPI(
         title="JobRadar API",
-        version="1.4.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url=None if selected_settings.app_env == "production" else "/docs",
         redoc_url=None if selected_settings.app_env == "production" else "/redoc",
