@@ -76,6 +76,7 @@ def test_matching_profile_scores_relevant_junior_role_highly() -> None:
 
     assert result.score == 100
     assert any("Совпавшие навыки" in reason for reason in result.reasons)
+    assert result.matched_skills == ("React", "Django", "PostgreSQL", "REST APIs")
     assert result.concerns == ()
 
 
@@ -495,6 +496,7 @@ def test_freelance_profile_scores_relevant_project_highly() -> None:
 
     assert result.score >= 80
     assert any("Совпавшие навыки" in reason for reason in result.reasons)
+    assert result.matched_skills == ("React", "Django", "PostgreSQL", "REST APIs")
     assert any("Фиксированный бюджет" in reason for reason in result.reasons)
     assert any("Приемлемая конкуренция" in reason for reason in result.reasons)
     assert any("платёжные данные" in reason for reason in result.reasons)

@@ -217,6 +217,7 @@ def score_freelance_candidate(
         score=max(0, min(score, 100)),
         reasons=tuple(reasons),
         concerns=tuple(concerns),
+        matched_skills=tuple(matched_skills),
     )
 
 

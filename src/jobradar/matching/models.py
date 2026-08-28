@@ -27,3 +27,4 @@ class ScoreResult:
     score: int
     reasons: tuple[str, ...]
     concerns: tuple[str, ...]
+    matched_skills: tuple[str, ...] = ()

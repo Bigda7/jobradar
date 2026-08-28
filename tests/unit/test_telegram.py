@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from jobradar.db.models import NotificationDelivery
+from jobradar.db.models import Listing, NotificationDelivery
 from jobradar.domain.enums import DeliveryStatus, OpportunityKind
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
@@ -157,7 +157,11 @@ async def test_manual_candidate_lists_exclude_inactive_opportunities(
     ingestion = IngestionService(sqlite_session_factory)
     await ingestion.run_source(MockSource())
     await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
-    await ingestion.run_source(MockSource((DEFAULT_LISTINGS[0],)))
+    async with sqlite_session_factory() as session, session.begin():
+        listing = await session.scalar(select(Listing).where(Listing.external_id == "mock-002"))
+        assert listing is not None
+        listing.is_active = False
+        listing.archive_reason = "expired"
     service = NotificationService(
         sqlite_session_factory,
         RecordingTelegramClient(),

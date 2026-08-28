@@ -40,7 +40,8 @@ async def expire_stale() -> None:
                 "expired_total": summary.expired_total,
                 "expired_employment": summary.expired_employment,
                 "expired_freelance": summary.expired_freelance,
-                "protected_favorites": summary.protected_favorites,
+                "archived_favorites": summary.archived_favorites,
+                "restored_recent": summary.restored_recent,
             }
         )
     )

@@ -58,7 +58,7 @@ def _listing(
 
 
 @pytest.mark.asyncio
-async def test_expiration_uses_kind_specific_age_and_protects_favorites(
+async def test_expiration_archives_all_opportunities_at_the_configured_age(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     now = datetime(2026, 8, 23, 12, tzinfo=UTC)
@@ -79,12 +79,12 @@ async def test_expiration_uses_kind_specific_age_and_protects_favorites(
         _listing("employment-fallback", "Fallback Employment", "Fallback Corp", None),
     )
     freelance = (
-        _listing("freelance-old", "Old Freelance", "Old Client", now - timedelta(days=7)),
+        _listing("freelance-old", "Old Freelance", "Old Client", now - timedelta(days=30)),
         _listing(
             "freelance-fresh",
             "Fresh Freelance",
             "Fresh Client",
-            now - timedelta(days=6, hours=23),
+            now - timedelta(days=29, hours=23),
         ),
     )
     ingestion = IngestionService(sqlite_session_factory)
@@ -110,14 +110,15 @@ async def test_expiration_uses_kind_specific_age_and_protects_favorites(
 
     summary = await StaleExpirationService(sqlite_session_factory).expire_stale(
         employment_days=30,
-        freelance_days=7,
+        freelance_days=30,
         now=now,
     )
 
-    assert summary.expired_employment == 2
+    assert summary.expired_employment == 3
     assert summary.expired_freelance == 1
-    assert summary.expired_total == 3
-    assert summary.protected_favorites == 1
+    assert summary.expired_total == 4
+    assert summary.archived_favorites == 1
+    assert summary.restored_recent == 0
     async with sqlite_session_factory() as session:
         listings = {
             listing.external_id: listing
@@ -126,7 +127,7 @@ async def test_expiration_uses_kind_specific_age_and_protects_favorites(
         assert listings["employment-old"].is_active is False
         assert listings["employment-fallback"].is_active is False
         assert listings["employment-fresh"].is_active is True
-        assert listings["employment-favorite"].is_active is True
+        assert listings["employment-favorite"].is_active is False
         assert listings["freelance-old"].is_active is False
         assert listings["freelance-fresh"].is_active is True
         expired = await session.scalar(
@@ -163,7 +164,7 @@ async def test_expiration_promotes_fresh_cross_source_duplicate(
 
     summary = await StaleExpirationService(sqlite_session_factory).expire_stale(
         employment_days=30,
-        freelance_days=7,
+        freelance_days=30,
         now=now,
     )
 
@@ -178,3 +179,43 @@ async def test_expiration_promotes_fresh_cross_source_duplicate(
         assert opportunity.status == OpportunityStatus.ACTIVE.value
         assert listings["old-rich"].is_active is False
         assert listings["fresh-sparse"].is_active is True
+
+
+@pytest.mark.asyncio
+async def test_expiration_restores_recent_listings_archived_as_missing_only(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 8, 23, 12, tzinfo=UTC)
+    source = EmploymentExpirationSource(
+        (
+            _listing("missing-recent", "Recent Missing", "Example", now - timedelta(days=5)),
+            _listing("closed-recent", "Recent Closed", "Example", now - timedelta(days=5)),
+        )
+    )
+    await IngestionService(sqlite_session_factory).run_source(source)
+
+    async with sqlite_session_factory() as session, session.begin():
+        listings = {
+            listing.external_id: listing for listing in await session.scalars(select(Listing))
+        }
+        listings["missing-recent"].is_active = False
+        listings["missing-recent"].archive_reason = "missing"
+        listings["missing-recent"].archived_at = now - timedelta(days=1)
+        listings["closed-recent"].is_active = False
+        listings["closed-recent"].archive_reason = "source_closed"
+        listings["closed-recent"].archived_at = now - timedelta(days=1)
+
+    summary = await StaleExpirationService(sqlite_session_factory).expire_stale(
+        employment_days=30,
+        freelance_days=30,
+        now=now,
+    )
+
+    assert summary.restored_recent == 1
+    async with sqlite_session_factory() as session:
+        listings = {
+            listing.external_id: listing for listing in await session.scalars(select(Listing))
+        }
+        assert listings["missing-recent"].is_active is True
+        assert listings["missing-recent"].archive_reason is None
+        assert listings["closed-recent"].is_active is False

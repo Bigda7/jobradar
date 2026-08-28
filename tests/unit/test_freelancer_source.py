@@ -132,6 +132,24 @@ async def test_source_filters_local_projects_deduplicates_and_normalizes() -> No
 
 
 @pytest.mark.asyncio
+async def test_source_marks_explicitly_closed_projects_unavailable() -> None:
+    payload = _fixture()
+    result = payload["result"]
+    assert isinstance(result, dict)
+    projects = result["projects"]
+    assert isinstance(projects, list)
+    projects[0]["status"] = "closed"
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    ) as client:
+        listings = [listing async for listing in _source(client).fetch()]
+
+    assert len(listings) == 1
+    assert listings[0].is_available is False
+
+
+@pytest.mark.asyncio
 async def test_freelancer_ingestion_is_idempotent(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

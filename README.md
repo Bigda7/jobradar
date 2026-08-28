@@ -19,7 +19,7 @@ APIs.
 ## Portfolio Highlights
 
 - Integrates 18 employment, freelance, RSS, structured-data, and public ATS sources behind a common adapter contract.
-- Uses idempotent ingestion, content hashes, canonical records, conservative inventory reconciliation, and cross-source deduplication.
+- Uses idempotent ingestion, content hashes, canonical records, a 30-day archive lifecycle, and cross-source deduplication.
 - Produces explainable match scores with persisted reasons, concerns, rule versions, and content-aware notification idempotency.
 - Runs FastAPI, PostgreSQL 17, the worker, and Telegram bot as hardened Docker Compose services on an ARM64 AWS EC2 instance.
 - Terminates TLS at Caddy, keeps PostgreSQL private, protects data endpoints with bearer authentication, and exposes only health probes publicly.
@@ -206,9 +206,12 @@ Run maintenance operations:
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance reset-hidden
 ```
 
-Employment listings expire after 30 days and freelance listings after 7 days unless the
-opportunity is a favorite. Successful complete snapshots reconcile removed source records. Empty
-or unexpectedly reduced snapshots do not deactivate the existing inventory.
+Employment and freelance listings leave the active inventory after 30 days. They remain stored as
+archived records so favorites, match history, deduplication, and notification history are retained.
+A listing is not archived merely because it is absent from a later paginated or limited source
+response. Explicit source closure can archive it earlier, and a source-confirmed reopening clears
+that archive state. Listings previously hidden by partial snapshots are restored while they are
+still within the 30-day window.
 
 ## Database backups
 
@@ -311,7 +314,8 @@ tests/                   unit and PostgreSQL integration tests
 
 1. Implement `BaseSource.fetch()` and `BaseSource.normalize()` in `src/jobradar/sources`.
 2. Enforce remote-only evidence before ingestion.
-3. Set complete-snapshot reconciliation behavior explicitly.
+3. Keep missing-listing deactivation disabled for paginated, capped, and rolling source feeds;
+   map an explicit closed status to `RawListing.is_available` when the source provides one.
 4. Add bounded timeouts, pagination, rate-limit behavior, and a conservative poll interval.
 5. Register the adapter in `sources/registry.py` and add validated settings.
 6. Add deterministic fixture-based tests for valid, malformed, partial, and rate-limited data.

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     djinni_remote_only: bool = True
     djinni_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     djinni_max_items: int = Field(default=50, ge=1, le=100)
+    djinni_max_pages: int = Field(default=10, ge=1, le=20)
     djinni_poll_interval_seconds: int = Field(default=3600, ge=1800)
     freelancer_source_enabled: bool = False
     freelancer_api_base_url: str = "https://www.freelancer.com/api/projects/0.1"
@@ -195,7 +196,7 @@ class Settings(BaseSettings):
     nbu_rates_url: str = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
     nbu_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     employment_stale_after_days: int = Field(default=30, ge=1, le=365)
-    freelance_stale_after_days: int = Field(default=7, ge=1, le=365)
+    freelance_stale_after_days: int = Field(default=30, ge=1, le=365)
     source_reconciliation_max_missing_ratio: float = Field(default=0.8, ge=0, lt=1)
     source_poll_jitter_ratio: float = Field(default=0.15, ge=0, le=0.5)
     worker_interval_seconds: int = Field(default=300, ge=10)

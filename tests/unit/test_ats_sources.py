@@ -248,5 +248,5 @@ companies:
     sources = build_source_registry(settings)
 
     assert [source.name for source in sources] == ["greenhouse", "lever", "ashby"]
-    assert all(source.deactivate_missing_listings for source in sources)
+    assert all(not source.deactivate_missing_listings for source in sources)
     assert all(settings.source_poll_interval_seconds(source.name) == 86400 for source in sources)

@@ -41,6 +41,9 @@ async def test_health_and_read_only_endpoints(
     assert jobs_response.json()["total"] == 2
     assert len(jobs_response.json()["items"]) == 2
     assert jobs_response.json()["items"][0]["source_url"].startswith("https://")
+    assert jobs_response.json()["items"][0]["source_name"] == "mock"
+    assert jobs_response.json()["items"][0]["source_display_name"] == "Mock Source"
+    assert jobs_response.json()["items"][0]["first_seen_at"].endswith("Z")
     assert query_response.json()["total"] == 1
     assert salary_response.json()["total"] == 1
     assert onsite_response.json()["total"] == 0
@@ -48,6 +51,7 @@ async def test_health_and_read_only_endpoints(
     assert matches_response.json()["total"] == 2
     assert matches_response.json()["items"][0]["score"] >= 55
     assert matches_response.json()["items"][0]["reasons"]
+    assert matches_response.json()["items"][0]["matched_skills"]
     assert sources_response.status_code == 200
     assert sources_response.json()[0]["name"] == "mock"
     assert health_response.headers["x-content-type-options"] == "nosniff"

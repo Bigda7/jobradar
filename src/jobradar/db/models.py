@@ -181,6 +181,8 @@ class Listing(TimestampMixin, Base):
         index=True,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    archive_reason: Mapped[str | None] = mapped_column(String(50))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     source: Mapped[Source] = relationship(back_populates="listings")
     opportunity: Mapped[Opportunity] = relationship(back_populates="listings")
@@ -215,6 +217,7 @@ class MatchEvaluation(Base):
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     reasons: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list, nullable=False)
     concerns: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list, nullable=False)
+    matched_skills: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list, nullable=False)
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,

@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from decimal import Decimal
 
 import httpx
@@ -71,6 +72,8 @@ def test_parse_job_postings_ignores_unrelated_json_ld() -> None:
 @pytest.mark.asyncio
 async def test_djinni_source_keeps_only_remote_jobs_and_normalizes_schema() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, text="<html></html>")
         assert request.url == httpx.URL("https://djinni.test/jobs/remote/")
         return httpx.Response(200, text=_html(REMOTE_JOB, ONSITE_JOB))
 
@@ -95,6 +98,36 @@ async def test_djinni_source_keeps_only_remote_jobs_and_normalizes_schema() -> N
     assert normalized.salary_currency == "USD"
     assert normalized.published_at is not None
     assert normalized.published_at.isoformat() == "2026-08-22T12:36:45+00:00"
+
+
+@pytest.mark.asyncio
+async def test_djinni_source_loads_later_pages_without_duplicate_results() -> None:
+    second_job = deepcopy(REMOTE_JOB)
+    second_job.update(
+        {
+            "identifier": 844410,
+            "title": "Junior React Developer",
+            "url": "https://djinni.co/jobs/844410-junior-react-developer/",
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        if page is None:
+            return httpx.Response(200, text=_html(REMOTE_JOB))
+        if page == "2":
+            return httpx.Response(200, text=_html(REMOTE_JOB, second_job))
+        return httpx.Response(200, text="<html></html>")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(
+            jobs_url="https://djinni.test/jobs/remote/?primary_keyword=Python",
+            max_pages=3,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in listings] == ["844408", "844410"]
 
 
 @pytest.mark.asyncio

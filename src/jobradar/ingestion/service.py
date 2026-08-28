@@ -258,7 +258,9 @@ class IngestionService:
             opportunity = stored_opportunity
 
             listing.last_seen_at = now
-            listing.is_active = True
+            listing.is_active = raw_listing.is_available
+            listing.archive_reason = None if raw_listing.is_available else "source_closed"
+            listing.archived_at = None if raw_listing.is_available else now
             if raw_listing.detail_fetched_at is not None:
                 listing.detail_fetched_at = raw_listing.detail_fetched_at
             listing.normalized_data = normalized_snapshot(normalized)
@@ -310,6 +312,8 @@ class IngestionService:
             opportunity_ids = {listing.opportunity_id for listing in listings}
             for listing in listings:
                 listing.is_active = False
+                listing.archive_reason = "missing"
+                listing.archived_at = datetime.now(UTC)
             await session.flush()
             for opportunity_id in opportunity_ids:
                 await refresh_opportunity_from_best_listing(session, opportunity_id)
@@ -409,7 +413,9 @@ class IngestionService:
             "detail_fetched_at": raw_listing.detail_fetched_at,
             "first_seen_at": now,
             "last_seen_at": now,
-            "is_active": True,
+            "is_active": raw_listing.is_available,
+            "archive_reason": None if raw_listing.is_available else "source_closed",
+            "archived_at": None if raw_listing.is_available else now,
         }
         dialect_name = session.bind.dialect.name
         dialect_insert: Any

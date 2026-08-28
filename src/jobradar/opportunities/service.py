@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.db.models import Listing, MatchEvaluation, Opportunity, OpportunityUserState, Source
@@ -22,7 +22,8 @@ class FavoriteOpportunity:
 @dataclass(frozen=True, slots=True)
 class OpportunityStats:
     collected: int
-    evaluated: int
+    active: int
+    evaluated_active: int
     matched: int
     filtered: int
     favorites: int
@@ -187,11 +188,41 @@ class OpportunityStateService:
             collected = int(
                 await session.scalar(select(func.count()).select_from(Opportunity)) or 0
             )
+            active_listing = exists(
+                select(Listing.id)
+                .join(Source, Source.id == Listing.source_id)
+                .where(
+                    Listing.opportunity_id == Opportunity.id,
+                    Listing.is_active.is_(True),
+                    Source.enabled.is_(True),
+                )
+            )
+            active = int(
+                await session.scalar(
+                    select(func.count()).select_from(Opportunity).where(active_listing)
+                )
+                or 0
+            )
             evaluation_filter = (
                 MatchEvaluation.profile_id == profile.profile_id,
                 MatchEvaluation.rules_version == profile.rules_version,
+                exists(
+                    select(Listing.id)
+                    .join(Source, Source.id == Listing.source_id)
+                    .where(
+                        Listing.opportunity_id == MatchEvaluation.opportunity_id,
+                        Listing.is_active.is_(True),
+                        Source.enabled.is_(True),
+                    )
+                ),
+                ~exists(
+                    select(OpportunityUserState.opportunity_id).where(
+                        OpportunityUserState.opportunity_id == MatchEvaluation.opportunity_id,
+                        OpportunityUserState.disposition == OpportunityDisposition.HIDDEN.value,
+                    )
+                ),
             )
-            evaluated = int(
+            evaluated_active = int(
                 await session.scalar(
                     select(func.count()).select_from(MatchEvaluation).where(*evaluation_filter)
                 )
@@ -209,9 +240,10 @@ class OpportunityStateService:
             hidden = await self._state_count(session, OpportunityDisposition.HIDDEN)
         return OpportunityStats(
             collected=collected,
-            evaluated=evaluated,
+            active=active,
+            evaluated_active=evaluated_active,
             matched=matched,
-            filtered=max(0, evaluated - matched),
+            filtered=max(0, evaluated_active - matched),
             favorites=favorites,
             hidden=hidden,
         )
