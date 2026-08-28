@@ -220,6 +220,7 @@ class FreelancerSource(BaseSource):
                                 web_base_url=self._web_base_url,
                             ),
                             payload=payload,
+                            is_available=not _is_terminal_project(project),
                         )
                         seen_ids.add(external_id)
 
@@ -300,6 +301,26 @@ def _is_local_or_contest(project: Mapping[str, Any]) -> bool:
             _truthy(project.get("contest")),
             project_type in {"local", "contest"},
         )
+    )
+
+
+def _is_terminal_project(project: Mapping[str, Any]) -> bool:
+    terminal_states = {
+        "cancelled",
+        "canceled",
+        "closed",
+        "complete",
+        "completed",
+        "ended",
+        "expired",
+        "rejected",
+    }
+    for key in ("status", "state", "project_status", "frontend_project_status"):
+        value = _optional_string(project.get(key))
+        if value is not None and value.casefold() in terminal_states:
+            return True
+    return any(
+        _truthy(project.get(key)) for key in ("closed", "cancelled", "canceled", "ended", "expired")
     )
 
 

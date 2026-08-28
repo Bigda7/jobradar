@@ -194,9 +194,16 @@ def create_app(
 
         total = await session.scalar(select(func.count()).select_from(Opportunity).where(*filters))
         listing_url = _canonical_listing_url()
+        source_name = _canonical_source_name()
+        source_display_name = _canonical_source_display_name()
         rows = (
             await session.execute(
-                select(Opportunity, listing_url.label("source_url"))
+                select(
+                    Opportunity,
+                    listing_url.label("source_url"),
+                    source_name.label("source_name"),
+                    source_display_name.label("source_display_name"),
+                )
                 .where(*filters)
                 .order_by(Opportunity.published_at.desc().nullslast(), Opportunity.id.desc())
                 .limit(limit)
@@ -205,9 +212,11 @@ def create_app(
         ).all()
         return JobListResponse(
             items=[
-                _build_job_response(opportunity, source_url)
-                for opportunity, source_url in rows
+                _build_job_response(opportunity, source_url, source_name, source_display_name)
+                for opportunity, source_url, source_name, source_display_name in rows
                 if source_url is not None
+                and source_name is not None
+                and source_display_name is not None
             ],
             total=total or 0,
             limit=limit,
@@ -262,9 +271,17 @@ def create_app(
             select(func.count()).select_from(MatchEvaluation).where(*filters)
         )
         listing_url = _canonical_listing_url()
+        source_name = _canonical_source_name()
+        source_display_name = _canonical_source_display_name()
         rows = (
             await session.execute(
-                select(Opportunity, MatchEvaluation, listing_url.label("source_url"))
+                select(
+                    Opportunity,
+                    MatchEvaluation,
+                    listing_url.label("source_url"),
+                    source_name.label("source_name"),
+                    source_display_name.label("source_display_name"),
+                )
                 .join(
                     MatchEvaluation,
                     MatchEvaluation.opportunity_id == Opportunity.id,
@@ -280,16 +297,22 @@ def create_app(
             )
         ).all()
         items: list[MatchResponse] = []
-        for opportunity, evaluation, source_url in rows:
-            if source_url is None:
+        for opportunity, evaluation, source_url, source_name, source_display_name in rows:
+            if source_url is None or source_name is None or source_display_name is None:
                 continue
-            job_data = _build_job_response(opportunity, source_url).model_dump()
+            job_data = _build_job_response(
+                opportunity,
+                source_url,
+                source_name,
+                source_display_name,
+            ).model_dump()
             items.append(
                 MatchResponse(
                     **job_data,
                     score=evaluation.score,
                     reasons=evaluation.reasons,
                     concerns=evaluation.concerns,
+                    matched_skills=evaluation.matched_skills,
                     rules_version=evaluation.rules_version,
                 )
             )
@@ -338,11 +361,48 @@ def _canonical_listing_url() -> ScalarSelect[str]:
     )
 
 
-def _build_job_response(opportunity: Opportunity, source_url: str) -> JobResponse:
+def _canonical_source_name() -> ScalarSelect[str]:
+    return (
+        select(Source.name)
+        .join(Listing, Listing.source_id == Source.id)
+        .where(
+            Listing.opportunity_id == Opportunity.id,
+            Listing.is_active.is_(True),
+            Source.enabled.is_(True),
+        )
+        .order_by(*canonical_source_link_order())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _canonical_source_display_name() -> ScalarSelect[str]:
+    return (
+        select(Source.display_name)
+        .join(Listing, Listing.source_id == Source.id)
+        .where(
+            Listing.opportunity_id == Opportunity.id,
+            Listing.is_active.is_(True),
+            Source.enabled.is_(True),
+        )
+        .order_by(*canonical_source_link_order())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _build_job_response(
+    opportunity: Opportunity,
+    source_url: str,
+    source_name: str,
+    source_display_name: str,
+) -> JobResponse:
     fields = {
         field_name: getattr(opportunity, field_name)
         for field_name in JobResponse.model_fields
-        if field_name != "source_url"
+        if field_name not in {"source_url", "source_name", "source_display_name"}
     }
     fields["source_url"] = source_url
+    fields["source_name"] = source_name
+    fields["source_display_name"] = source_display_name
     return JobResponse.model_validate(fields)

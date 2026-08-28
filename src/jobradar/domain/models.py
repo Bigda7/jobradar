@@ -14,6 +14,7 @@ class RawListing(BaseModel):
     source_url: HttpUrl
     payload: dict[str, Any]
     detail_fetched_at: datetime | None = None
+    is_available: bool = True
 
 
 class NormalizedOpportunity(BaseModel):

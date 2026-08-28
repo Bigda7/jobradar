@@ -31,6 +31,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 remote_only=settings.djinni_remote_only,
                 request_timeout_seconds=settings.djinni_request_timeout_seconds,
                 max_items=settings.djinni_max_items,
+                max_pages=settings.djinni_max_pages,
             )
         )
     if settings.freelancer_source_enabled:

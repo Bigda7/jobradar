@@ -2,9 +2,11 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.bot import BOT_COMMANDS, TelegramBotService
+from jobradar.db.models import Listing
 from jobradar.domain.enums import OpportunityDisposition
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
@@ -164,7 +166,9 @@ async def test_favorites_latest_and_stats_commands(
     assert "<b>Избранное: 1</b>" in telegram.messages[-1][0]
 
     await bot.handle_update({"message": {"chat": {"id": 123}, "text": "/stats"}})
-    assert "Собрано возможностей: 2" in telegram.messages[-1][0]
+    assert "Собрано за всё время: 2" in telegram.messages[-1][0]
+    assert "Актуально сейчас: 2" in telegram.messages[-1][0]
+    assert "Подходят сейчас: 2" in telegram.messages[-1][0]
     assert "В избранном: 1" in telegram.messages[-1][0]
 
     message_count = len(telegram.messages)
@@ -177,6 +181,42 @@ async def test_favorites_latest_and_stats_commands(
     await bot.handle_update({"message": {"chat": {"id": 123}, "text": "/clear"}})
     assert telegram.deleted_message_ids == [5, 4]
     assert telegram.messages[-1][0] == "Удалено сообщений с вакансиями: 2."
+
+
+@pytest.mark.asyncio
+async def test_stats_count_only_visible_active_matches(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, _, states, opportunity_ids = await _bot(sqlite_session_factory)
+    await states.hide(opportunity_ids[0])
+
+    stats = await states.stats(
+        BOHDAN_PROFILE,
+        BOHDAN_PROFILE.notification_threshold,
+    )
+
+    assert stats.collected == 2
+    assert stats.active == 2
+    assert stats.evaluated_active == 1
+    assert stats.matched == 1
+
+    async with sqlite_session_factory() as session, session.begin():
+        listing = await session.scalar(
+            select(Listing).where(Listing.opportunity_id == opportunity_ids[1])
+        )
+        assert listing is not None
+        listing.is_active = False
+        listing.archive_reason = "expired"
+
+    stats = await states.stats(
+        BOHDAN_PROFILE,
+        BOHDAN_PROFILE.notification_threshold,
+    )
+
+    assert stats.collected == 2
+    assert stats.active == 1
+    assert stats.evaluated_active == 0
+    assert stats.matched == 0
 
 
 @pytest.mark.asyncio

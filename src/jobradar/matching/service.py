@@ -113,6 +113,7 @@ class MatchingService:
                     score=result.score,
                     reasons=list(result.reasons),
                     concerns=list(result.concerns),
+                    matched_skills=list(result.matched_skills),
                 )
                 session.add(evaluation)
             else:
@@ -120,5 +121,6 @@ class MatchingService:
                 evaluation.score = result.score
                 evaluation.reasons = list(result.reasons)
                 evaluation.concerns = list(result.concerns)
+                evaluation.matched_skills = list(result.matched_skills)
                 evaluation.evaluated_at = utc_now()
             return True

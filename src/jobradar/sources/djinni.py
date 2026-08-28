@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -29,28 +30,43 @@ class DjinniSource(BaseSource):
         remote_only: bool = True,
         request_timeout_seconds: float = 20.0,
         max_items: int = 50,
+        max_pages: int = 10,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._jobs_url = jobs_url
         self._remote_only = remote_only
         self._request_timeout_seconds = request_timeout_seconds
         self._max_items = max_items
+        self._max_pages = max_pages
         self._client = client
 
     async def fetch(self) -> AsyncIterator[RawListing]:
-        html = await self._fetch_page()
-        postings = parse_job_postings(html)
-        if not postings:
-            raise DjinniSourceError("Djinni page did not contain JobPosting JSON-LD data.")
-
         yielded = 0
-        for posting in postings:
-            if self._remote_only and _work_mode(posting) is not WorkMode.REMOTE:
-                continue
-            if yielded >= self._max_items:
+        seen_ids: set[str] = set()
+        for page_number in range(1, self._max_pages + 1):
+            html = await self._fetch_page(page_number)
+            postings = parse_job_postings(html)
+            if not postings:
+                if page_number == 1:
+                    raise DjinniSourceError("Djinni page did not contain JobPosting JSON-LD data.")
                 break
-            yield _to_raw_listing(posting)
-            yielded += 1
+
+            new_ids = 0
+            for posting in postings:
+                raw_listing = _to_raw_listing(posting)
+                if raw_listing.external_id in seen_ids:
+                    continue
+                seen_ids.add(raw_listing.external_id)
+                new_ids += 1
+                if self._remote_only and _work_mode(posting) is not WorkMode.REMOTE:
+                    continue
+                yield raw_listing
+                yielded += 1
+                if yielded >= self._max_items:
+                    return
+
+            if new_ids == 0:
+                break
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         posting = raw_listing.payload
@@ -70,9 +86,10 @@ class DjinniSource(BaseSource):
             published_at=_datetime(posting.get("datePosted")),
         )
 
-    async def _fetch_page(self) -> str:
+    async def _fetch_page(self, page_number: int) -> str:
+        page_url = _page_url(self._jobs_url, page_number)
         if self._client is not None:
-            return await self._request(self._client)
+            return await self._request(self._client, page_url)
 
         timeout = httpx.Timeout(self._request_timeout_seconds)
         async with httpx.AsyncClient(
@@ -80,15 +97,26 @@ class DjinniSource(BaseSource):
             headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
             timeout=timeout,
         ) as client:
-            return await self._request(client)
+            return await self._request(client, page_url)
 
-    async def _request(self, client: httpx.AsyncClient) -> str:
+    async def _request(self, client: httpx.AsyncClient, page_url: str) -> str:
         try:
-            response = await client.get(self._jobs_url)
+            response = await client.get(page_url)
             response.raise_for_status()
         except httpx.HTTPError as error:
             raise DjinniSourceError(f"Djinni request failed: {error}") from error
         return response.text
+
+
+def _page_url(base_url: str, page_number: int) -> str:
+    if page_number <= 1:
+        return base_url
+    parsed = urlsplit(base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page_number)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def _to_raw_listing(posting: dict[str, Any]) -> RawListing:

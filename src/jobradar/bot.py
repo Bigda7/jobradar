@@ -289,10 +289,11 @@ class TelegramBotService:
         message = "\n".join(
             (
                 "<b>Статистика JobRadar</b>",
-                f"Собрано возможностей: {stats.collected}",
-                f"Оценено текущими правилами: {stats.evaluated}",
-                f"Подходят по порогу: {stats.matched}",
-                f"Отфильтровано: {stats.filtered}",
+                f"Собрано за всё время: {stats.collected}",
+                f"Актуально сейчас: {stats.active}",
+                f"Оценено среди актуальных: {stats.evaluated_active}",
+                f"Подходят сейчас: {stats.matched}",
+                f"Не прошли порог среди актуальных: {stats.filtered}",
                 f"В избранном: {stats.favorites}",
                 f"Скрыто: {stats.hidden}",
             )

@@ -13,7 +13,8 @@ from jobradar.ingestion.canonical import refresh_opportunity_from_best_listing
 class StaleExpirationSummary:
     expired_employment: int = 0
     expired_freelance: int = 0
-    protected_favorites: int = 0
+    archived_favorites: int = 0
+    restored_recent: int = 0
 
     @property
     def expired_total(self) -> int:
@@ -55,7 +56,6 @@ class StaleExpirationService:
                         OpportunityUserState,
                         OpportunityUserState.opportunity_id == Opportunity.id,
                     )
-                    .where(Listing.is_active.is_(True))
                     .order_by(Listing.id.asc())
                 )
             ).all()
@@ -65,14 +65,24 @@ class StaleExpirationService:
                 if cutoff is None:
                     continue
                 effective_date = listing.published_at or listing.first_seen_at
-                if _as_utc(effective_date) > cutoff:
+                is_recent = _as_utc(effective_date) > cutoff
+                if not listing.is_active:
+                    if listing.archive_reason in {None, "missing"} and is_recent:
+                        listing.is_active = True
+                        listing.archive_reason = None
+                        listing.archived_at = None
+                        summary.restored_recent += 1
+                        affected_opportunity_ids.add(listing.opportunity_id)
                     continue
-                if disposition == OpportunityDisposition.FAVORITE.value:
-                    summary.protected_favorites += 1
+                if is_recent:
                     continue
 
                 listing.is_active = False
+                listing.archive_reason = "expired"
+                listing.archived_at = reference_time
                 affected_opportunity_ids.add(listing.opportunity_id)
+                if disposition == OpportunityDisposition.FAVORITE.value:
+                    summary.archived_favorites += 1
                 if opportunity_kind == OpportunityKind.FREELANCE_PROJECT.value:
                     summary.expired_freelance += 1
                 else:

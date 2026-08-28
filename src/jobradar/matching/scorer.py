@@ -99,6 +99,7 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
             score=max(0, min(result.score + sanity.score_adjustment, 100)),
             reasons=result.reasons,
             concerns=result.concerns + sanity.concerns,
+            matched_skills=result.matched_skills,
         )
 
     if candidate.work_mode is not WorkMode.REMOTE:
@@ -190,6 +191,7 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
         score=final_score,
         reasons=tuple(reasons),
         concerns=tuple(concerns),
+        matched_skills=tuple(matched_skills),
     )
 
 

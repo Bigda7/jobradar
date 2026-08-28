@@ -18,7 +18,7 @@ class BaseSource(ABC):
     name: str
     display_name: str
     opportunity_kind: OpportunityKind
-    deactivate_missing_listings: bool = True
+    deactivate_missing_listings: bool = False
 
     def prime_listing_cache(self, listings: dict[str, CachedListing]) -> None:
         self._cached_listings = dict(listings)

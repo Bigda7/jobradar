@@ -57,6 +57,10 @@ class RollingFeedMockSource(MockSource):
     deactivate_missing_listings = False
 
 
+class SnapshotMockSource(MockSource):
+    deactivate_missing_listings = True
+
+
 class SecretFailingMockSource(MockSource):
     async def fetch(self):  # type: ignore[no-untyped-def]
         if False:
@@ -72,6 +76,16 @@ class CacheAwareMockSource(MockSource):
         detail_fetched_at = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
         async for listing in super().fetch():
             yield listing.model_copy(update={"detail_fetched_at": detail_fetched_at})
+
+
+class AvailabilityMockSource(MockSource):
+    def __init__(self, is_available: bool) -> None:
+        super().__init__((DEFAULT_LISTINGS[0],))
+        self._is_available = is_available
+
+    async def fetch(self):  # type: ignore[no-untyped-def]
+        async for listing in super().fetch():
+            yield listing.model_copy(update={"is_available": self._is_available})
 
 
 @pytest.mark.asyncio
@@ -95,6 +109,30 @@ async def test_repeated_run_is_idempotent(
         assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2
         assert await session.scalar(select(func.count()).select_from(Listing)) == 2
         assert await session.scalar(select(func.count()).select_from(SourceRun)) == 2
+
+
+@pytest.mark.asyncio
+async def test_explicitly_closed_listing_can_be_reactivated_when_source_reopens_it(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = IngestionService(sqlite_session_factory)
+    await service.run_source(AvailabilityMockSource(True))
+    await service.run_source(AvailabilityMockSource(False))
+
+    async with sqlite_session_factory() as session:
+        listing = await session.scalar(select(Listing))
+        assert listing is not None
+        assert listing.is_active is False
+        assert listing.archive_reason == "source_closed"
+
+    await service.run_source(AvailabilityMockSource(True))
+
+    async with sqlite_session_factory() as session:
+        listing = await session.scalar(select(Listing))
+        assert listing is not None
+        assert listing.is_active is True
+        assert listing.archive_reason is None
+        assert listing.archived_at is None
 
 
 @pytest.mark.asyncio
@@ -234,9 +272,9 @@ async def test_successful_crawl_deactivates_missing_listings_and_reactivates_the
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = IngestionService(sqlite_session_factory)
-    await service.run_source(MockSource())
+    await service.run_source(SnapshotMockSource())
 
-    partial_inventory = await service.run_source(MockSource((DEFAULT_LISTINGS[0],)))
+    partial_inventory = await service.run_source(SnapshotMockSource((DEFAULT_LISTINGS[0],)))
 
     assert partial_inventory.status is RunStatus.SUCCEEDED
     assert partial_inventory.deactivated == 1
@@ -245,7 +283,7 @@ async def test_successful_crawl_deactivates_missing_listings_and_reactivates_the
         assert inactive is not None
         assert inactive.is_active is False
 
-    restored_inventory = await service.run_source(MockSource())
+    restored_inventory = await service.run_source(SnapshotMockSource())
 
     assert restored_inventory.deactivated == 0
     async with sqlite_session_factory() as session:
@@ -294,9 +332,9 @@ async def test_empty_snapshot_is_blocked_before_deactivation(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = IngestionService(sqlite_session_factory)
-    await service.run_source(MockSource())
+    await service.run_source(SnapshotMockSource())
 
-    result = await service.run_source(MockSource(()))
+    result = await service.run_source(SnapshotMockSource(()))
 
     assert result.status is RunStatus.FAILED
     assert result.deactivated == 0
@@ -321,9 +359,9 @@ async def test_snapshot_losing_more_than_eighty_percent_is_blocked(
         )
         inventory.append(listing)
     service = IngestionService(sqlite_session_factory)
-    await service.run_source(MockSource(inventory))
+    await service.run_source(SnapshotMockSource(inventory))
 
-    result = await service.run_source(MockSource((inventory[0],)))
+    result = await service.run_source(SnapshotMockSource((inventory[0],)))
 
     assert result.status is RunStatus.FAILED
     assert result.deactivated == 0
@@ -350,9 +388,9 @@ async def test_snapshot_losing_exactly_eighty_percent_is_reconciled(
         )
         inventory.append(listing)
     service = IngestionService(sqlite_session_factory)
-    await service.run_source(MockSource(inventory))
+    await service.run_source(SnapshotMockSource(inventory))
 
-    result = await service.run_source(MockSource((inventory[0],)))
+    result = await service.run_source(SnapshotMockSource((inventory[0],)))
 
     assert result.status is RunStatus.SUCCEEDED
     assert result.deactivated == 4

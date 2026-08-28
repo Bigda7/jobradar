@@ -71,7 +71,8 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         freelance_days=settings.freelance_stale_after_days,
         expired_employment=expiration_summary.expired_employment,
         expired_freelance=expiration_summary.expired_freelance,
-        protected_favorites=expiration_summary.protected_favorites,
+        archived_favorites=expiration_summary.archived_favorites,
+        restored_recent=expiration_summary.restored_recent,
     )
 
     if not settings.matching_enabled:
