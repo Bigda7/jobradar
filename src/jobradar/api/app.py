@@ -12,6 +12,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import ScalarSelect
 
 from jobradar import __version__
@@ -244,9 +245,17 @@ def create_app(
         minimum_score: Annotated[int, Query(alias="min_score", ge=0, le=100)] = (
             selected_settings.matching_min_score
         ),
+        source_filter: Annotated[
+            str | None,
+            Query(alias="source", min_length=1, max_length=100),
+        ] = None,
         limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     ) -> MatchListResponse:
+        selected_source_name = _normalize_optional_filter(source_filter, "source")
+        if selected_source_name is not None:
+            selected_source_name = selected_source_name.casefold()
+
         filters = (
             MatchEvaluation.profile_id == BOHDAN_PROFILE.profile_id,
             MatchEvaluation.rules_version == BOHDAN_PROFILE.rules_version,
@@ -261,18 +270,19 @@ def create_app(
                 select(Listing.id)
                 .join(Source, Source.id == Listing.source_id)
                 .where(
-                    Listing.opportunity_id == MatchEvaluation.opportunity_id,
-                    Listing.is_active.is_(True),
-                    Source.enabled.is_(True),
+                    *_active_listing_conditions(
+                        selected_source_name,
+                        opportunity_id=MatchEvaluation.opportunity_id,
+                    ),
                 )
             ),
         )
         total = await session.scalar(
             select(func.count()).select_from(MatchEvaluation).where(*filters)
         )
-        listing_url = _canonical_listing_url()
-        source_name = _canonical_source_name()
-        source_display_name = _canonical_source_display_name()
+        listing_url = _canonical_listing_url(selected_source_name)
+        source_name = _canonical_source_name(selected_source_name)
+        source_display_name = _canonical_source_display_name(selected_source_name)
         rows = (
             await session.execute(
                 select(
@@ -346,14 +356,27 @@ def _normalize_optional_filter(value: str | None, parameter_name: str) -> str | 
     return normalized
 
 
-def _canonical_listing_url() -> ScalarSelect[str]:
+def _active_listing_conditions(
+    source_name: str | None,
+    *,
+    opportunity_id: object = Opportunity.id,
+) -> tuple[ColumnElement[bool], ...]:
+    conditions: list[ColumnElement[bool]] = [
+        Listing.opportunity_id == opportunity_id,
+        Listing.is_active.is_(True),
+        Source.enabled.is_(True),
+    ]
+    if source_name is not None:
+        conditions.append(Source.name == source_name)
+    return tuple(conditions)
+
+
+def _canonical_listing_url(source_name: str | None = None) -> ScalarSelect[str]:
     return (
         select(Listing.source_url)
         .join(Source, Source.id == Listing.source_id)
         .where(
-            Listing.opportunity_id == Opportunity.id,
-            Listing.is_active.is_(True),
-            Source.enabled.is_(True),
+            *_active_listing_conditions(source_name),
         )
         .order_by(*canonical_source_link_order())
         .limit(1)
@@ -361,14 +384,12 @@ def _canonical_listing_url() -> ScalarSelect[str]:
     )
 
 
-def _canonical_source_name() -> ScalarSelect[str]:
+def _canonical_source_name(source_name: str | None = None) -> ScalarSelect[str]:
     return (
         select(Source.name)
         .join(Listing, Listing.source_id == Source.id)
         .where(
-            Listing.opportunity_id == Opportunity.id,
-            Listing.is_active.is_(True),
-            Source.enabled.is_(True),
+            *_active_listing_conditions(source_name),
         )
         .order_by(*canonical_source_link_order())
         .limit(1)
@@ -376,14 +397,14 @@ def _canonical_source_name() -> ScalarSelect[str]:
     )
 
 
-def _canonical_source_display_name() -> ScalarSelect[str]:
+def _canonical_source_display_name(
+    source_name: str | None = None,
+) -> ScalarSelect[str]:
     return (
         select(Source.display_name)
         .join(Listing, Listing.source_id == Source.id)
         .where(
-            Listing.opportunity_id == Opportunity.id,
-            Listing.is_active.is_(True),
-            Source.enabled.is_(True),
+            *_active_listing_conditions(source_name),
         )
         .order_by(*canonical_source_link_order())
         .limit(1)
