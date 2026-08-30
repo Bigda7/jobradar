@@ -43,6 +43,13 @@ from jobradar.security import redact_sensitive_text
 MAX_PAGE_SIZE = 200
 MAX_OFFSET = 100_000
 MAX_SALARY_FILTER = Decimal("1000000000")
+EMPLOYMENT_TYPE_ALIASES = {
+    "full_time": ("full_time", "fulltime", "fulltime_permanent", "full_time_permanent"),
+    "part_time": ("part_time", "parttime"),
+    "contractor": ("contractor", "contract"),
+    "temporary": ("temporary", "temp"),
+    "internship": ("internship", "intern"),
+}
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -189,7 +196,29 @@ def create_app(
                 )
             )
         if employment_type is not None:
-            filters.append(Opportunity.employment_type == employment_type.casefold())
+            normalized_employment_type = (
+                employment_type.casefold().replace("-", "_").replace(" ", "_")
+            )
+            stored_employment_types = func.replace(
+                func.replace(func.lower(Opportunity.employment_type), "-", "_"),
+                " ",
+                "",
+            )
+            accepted_employment_types = EMPLOYMENT_TYPE_ALIASES.get(
+                normalized_employment_type,
+                (normalized_employment_type,),
+            )
+            filters.append(
+                or_(
+                    *(
+                        ("," + stored_employment_types + ",").like(
+                            f"%,{_escape_like(accepted_type)},%",
+                            escape="\\",
+                        )
+                        for accepted_type in accepted_employment_types
+                    )
+                )
+            )
         if minimum_salary is not None:
             filters.append(Opportunity.salary_max >= minimum_salary)
 
