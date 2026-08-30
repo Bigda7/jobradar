@@ -242,7 +242,8 @@ retention independently with an S3 lifecycle rule.
 | `GET` | `/sources` | source health and collection timestamps |
 
 `GET /jobs` supports `q`, `work_mode`, `employment_type`, `min_salary`, `limit`, and `offset`.
-`GET /matches` supports `min_score`, `limit`, and `offset`. OpenAPI documentation is available at
+`GET /matches` supports `min_score`, `source`, `limit`, and `offset`. The optional `source`
+filter uses the registered source name and returns that source's active listing URL. OpenAPI documentation is available at
 `/docs` and `/openapi.json` outside production. `/health` and `/ready` are public for platform
 health checks; the three data endpoints require `Authorization: Bearer <token>` when a token is
 configured.
