@@ -63,6 +63,44 @@ async def test_health_and_read_only_endpoints(
 
 
 @pytest.mark.asyncio
+async def test_jobs_employment_type_filter_matches_a_value_in_a_combined_field(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+
+    async with sqlite_session_factory() as session:
+        opportunity = await session.scalar(select(Opportunity).order_by(Opportunity.id))
+        assert opportunity is not None
+        opportunity.employment_type = "fulltime_permanent,part_time"
+        await session.commit()
+
+    application = create_app(sqlite_session_factory)
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        full_time_response = await client.get(
+            "/jobs",
+            params={"employment_type": "full-time"},
+        )
+        part_time_response = await client.get(
+            "/jobs",
+            params={"employment_type": "part_time"},
+        )
+        contractor_response = await client.get(
+            "/jobs",
+            params={"employment_type": "contractor"},
+        )
+
+    assert full_time_response.status_code == 200
+    assert full_time_response.json()["total"] == 2
+    assert part_time_response.status_code == 200
+    assert part_time_response.json()["total"] == 1
+    assert contractor_response.status_code == 200
+    assert contractor_response.json()["total"] == 0
+
+
+@pytest.mark.asyncio
 async def test_matches_filter_uses_the_selected_source_listing(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
