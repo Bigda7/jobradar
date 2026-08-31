@@ -35,7 +35,7 @@ services:
 
   api:
     <<: *app-security
-    image: jobradar-app:1.0.0
+    image: jobradar-app:1.1.0
     build:
       context: .
       target: runtime
@@ -60,7 +60,7 @@ services:
 
   worker:
     <<: *app-security
-    image: jobradar-app:1.0.0
+    image: jobradar-app:1.1.0
     build:
       context: .
       target: runtime
@@ -78,7 +78,7 @@ services:
 
   bot:
     <<: *app-security
-    image: jobradar-app:1.0.0
+    image: jobradar-app:1.1.0
     build:
       context: .
       target: runtime
