@@ -26,6 +26,11 @@ APIs.
 - Creates validated daily PostgreSQL dumps, uploads them to a private encrypted S3 bucket through an EC2 IAM role, and applies independent local and off-site retention.
 - Verifies formatting, linting, typing, security checks, migrations, tests, container builds, dependency vulnerabilities, and Git history in CI.
 
+## Architectural Evolution: Personal Engine to SaaS v2
+
+- **v1.0 (Current Live Repository):** Built as a personal dogfooding platform to automate high-signal opportunity discovery across 18 remote channels. Battle-tested in production to validate ingestion reliability, deduplication heuristics, and automated AWS EC2/S3 operational pipelines.
+- **v2.0 (In Active Private Staging):** Multi-tenant SaaS evolution featuring tenant data isolation, per-user custom scoring profiles & negative skill filters, session auth & CSRF protection, server-persisted Kanban pipeline, and per-user Telegram alert routing.
+
 ## Architecture
 
 ```mermaid
