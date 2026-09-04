@@ -80,6 +80,52 @@ def test_matching_profile_scores_relevant_junior_role_highly() -> None:
     assert result.concerns == ()
 
 
+def test_matching_profile_accepts_english_b2_without_penalty() -> None:
+    baseline = score_candidate(_candidate(), BOHDAN_PROFILE)
+    result = score_candidate(
+        _candidate(
+            description=(
+                "Build React interfaces and Django REST APIs with PostgreSQL. "
+                "English B2 is required."
+            )
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score == baseline.score
+    assert not any("английского" in concern for concern in result.concerns)
+
+
+def test_matching_profile_penalizes_english_above_b2() -> None:
+    baseline = score_candidate(
+        _candidate(
+            salary_min=None,
+            salary_max=None,
+            salary_currency=None,
+            salary_period=None,
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+    result = score_candidate(
+        _candidate(
+            description=(
+                "Build React interfaces and Django REST APIs with PostgreSQL. "
+                "English C1 is required."
+            ),
+            salary_min=None,
+            salary_max=None,
+            salary_currency=None,
+            salary_period=None,
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score == baseline.score - 10
+    assert "выше текущего уровня B2" in result.concerns[0]
+
+
 @pytest.mark.parametrize(
     "technology",
     (
@@ -793,6 +839,22 @@ def test_freelance_profile_rewards_small_verified_fixed_project() -> None:
         "подходит для набора репутации" in reason and "платёж заказчика подтверждён" in reason
         for reason in result.reasons
     )
+
+
+def test_freelance_profile_accepts_english_b2_without_penalty() -> None:
+    baseline = score_candidate(_freelance_candidate(), BOHDAN_PROFILE)
+    result = score_candidate(
+        _freelance_candidate(
+            description=(
+                "Build a small dashboard and webhook integration with PostgreSQL. "
+                "English B2 is required."
+            )
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score == baseline.score
+    assert not any("английского" in concern for concern in result.concerns)
 
 
 def test_freelance_profile_does_not_reward_unverified_small_fixed_project() -> None:

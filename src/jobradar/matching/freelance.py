@@ -211,7 +211,7 @@ def score_freelance_candidate(
     score += _budget_adjustment(candidate, profile, reasons, concerns)
     score += _competition_adjustment(candidate.raw_data, reasons, concerns)
     score += _employer_adjustment(candidate.raw_data, reasons, concerns)
-    score += _language_adjustment(project_text, concerns)
+    score += _language_adjustment(project_text, profile, concerns)
 
     return ScoreResult(
         score=max(0, min(score, 100)),
@@ -405,13 +405,16 @@ def _payment_verified(raw_data: Mapping[str, Any]) -> bool:
     return isinstance(status, Mapping) and status.get("payment_verified") is True
 
 
-def _language_adjustment(project_text: str, concerns: list[str]) -> int:
+def _language_adjustment(
+    project_text: str,
+    profile: SearchProfile,
+    concerns: list[str],
+) -> int:
     if re.search(r"english\s*(?:-|:)?\s*(?:c1|c2|advanced|fluent)", project_text):
-        concerns.append("Требуемый уровень английского выше текущего уровня B1.")
+        concerns.append(
+            f"Требуемый уровень английского выше текущего уровня {profile.english_level}."
+        )
         return -10
-    if re.search(r"english\s*(?:-|:)?\s*b2", project_text):
-        concerns.append("Проект требует английский B2, а в профиле указан уровень B1.")
-        return -5
     return 0
 
 

@@ -191,7 +191,7 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
     score += sanity.score_adjustment
     score += _experience_adjustment(candidate, reasons, concerns)
     score += _salary_adjustment(candidate, profile, reasons, concerns)
-    score += _language_adjustment(searchable_text, concerns)
+    score += _language_adjustment(searchable_text, profile, concerns)
     score += _backend_stack_adjustment(title, searchable_text, concerns)
     score += _application_flow_adjustment(candidate.raw_data, concerns)
     negative_skills, has_core_negative_skill = _negative_skill_matches(
@@ -303,19 +303,24 @@ def _salary_adjustment(
     return -10
 
 
-def _language_adjustment(searchable_text: str, concerns: list[str]) -> int:
+def _language_adjustment(
+    searchable_text: str,
+    profile: SearchProfile,
+    concerns: list[str],
+) -> int:
     if re.search(r"english\s*(?:-|:)?\s*(?:c1|c2|advanced|fluent)", searchable_text):
-        concerns.append("Требуемый уровень английского выше текущего уровня B1.")
+        concerns.append(
+            f"Требуемый уровень английского выше текущего уровня {profile.english_level}."
+        )
         return -10
-    if re.search(r"english\s*(?:-|:)?\s*b2", searchable_text):
-        concerns.append("Вакансия требует английский B2, а в профиле указан уровень B1.")
-        return -5
     czech_markers = sum(marker in searchable_text for marker in CZECH_DESCRIPTION_MARKERS)
     if czech_markers >= 3 and not re.search(
         r"(?:czech|čeština|český jazyk).{0,24}(?:a1|a2|basic|základní)",
         searchable_text,
     ):
-        concerns.append("Описание преимущественно на чешском языке; текущий уровень — A2.")
+        concerns.append(
+            f"Описание преимущественно на чешском языке; текущий уровень — {profile.czech_level}."
+        )
         return -20
     return 0
 
