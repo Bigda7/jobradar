@@ -97,12 +97,8 @@ CZECH_DESCRIPTION_MARKERS = (
 NODE_BACKEND_PATTERN = re.compile(
     r"(?<!\w)(?:node(?:\.js|js)?|nestjs|express(?:\.js|js)?|fastify)(?!\w)"
 )
-PYTHON_BACKEND_PATTERN = re.compile(
-    r"(?<!\w)(?:python|django|fastapi|flask|sqlalchemy)(?!\w)"
-)
-BACKEND_ROLE_PATTERN = re.compile(
-    r"(?<!\w)(?:full[- ]?stack|backend|back[- ]end)(?!\w)"
-)
+PYTHON_BACKEND_PATTERN = re.compile(r"(?<!\w)(?:python|django|fastapi|flask|sqlalchemy)(?!\w)")
+BACKEND_ROLE_PATTERN = re.compile(r"(?<!\w)(?:full[- ]?stack|backend|back[- ]end)(?!\w)")
 SUSPICIOUS_APPLICATION_URL_PATTERN = re.compile(
     r"(?i)(?:job-seekers?/account/register|/(?:pricing|subscription|membership|"
     r"upgrade|checkout|payment)(?:[/?#]|$))"

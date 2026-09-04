@@ -103,15 +103,19 @@ def format_diagnostic_table(results: Iterable[SourceDiagnostic]) -> str:
         for result in results
     ]
     headers = ("Source", "Status", "Found", "Valid", "Latency", "Error")
-    widths = [
-        max(len(headers[index]), *(len(row[index]) for row in rows))
-        for index in range(len(headers))
-    ] if rows else [len(header) for header in headers]
+    widths = (
+        [
+            max(len(headers[index]), *(len(row[index]) for row in rows))
+            for index in range(len(headers))
+        ]
+        if rows
+        else [len(header) for header in headers]
+    )
 
     def render(row: tuple[str, ...]) -> str:
-        return "| " + " | ".join(
-            value.ljust(widths[index]) for index, value in enumerate(row)
-        ) + " |"
+        return (
+            "| " + " | ".join(value.ljust(widths[index]) for index, value in enumerate(row)) + " |"
+        )
 
     separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
     table_rows = (separator, render(headers), separator, *(render(row) for row in rows), separator)

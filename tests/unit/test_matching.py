@@ -489,9 +489,7 @@ def test_matching_profile_penalizes_node_only_backend_role() -> None:
 def test_matching_profile_warns_about_paid_application_flow() -> None:
     result = score_candidate(
         _candidate(
-            raw_data={
-                "application_url": "https://agency.example/job-seekers/account/register"
-            }
+            raw_data={"application_url": "https://agency.example/job-seekers/account/register"}
         ),
         BOHDAN_PROFILE,
     )

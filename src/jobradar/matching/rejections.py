@@ -41,9 +41,7 @@ SENIORITY_TITLE_PATTERN = re.compile(
 )
 NON_DEVELOPMENT_TITLE_PATTERNS = (
     re.compile(r"(?<!\w)(?:designer|ui[/ -]?ux)(?!\w)"),
-    re.compile(
-        r"(?<!\w)(?:ppc|media\s+buyer|seo|smm|affiliate|marketing|marketer)(?!\w)"
-    ),
+    re.compile(r"(?<!\w)(?:ppc|media\s+buyer|seo|smm|affiliate|marketing|marketer)(?!\w)"),
     re.compile(
         r"(?<!\w)(?:recruiter|recruitment|human\s+resources|hr|sales|"
         r"account\s+manager|customer\s+(?:service|support)|support)(?!\w)"
@@ -59,9 +57,7 @@ NON_DEVELOPMENT_TITLE_PATTERNS = (
     ),
     re.compile(r"(?<!\w)(?:system\s+administrator|sysadmin)(?!\w)"),
 )
-ANALYST_TITLE_PATTERN = re.compile(
-    r"(?<!\w)(?:product|business|bi)\s+analyst(?!\w)"
-)
+ANALYST_TITLE_PATTERN = re.compile(r"(?<!\w)(?:product|business|bi)\s+analyst(?!\w)")
 ENGINEERING_TITLE_PATTERN = re.compile(r"(?<!\w)(?:developer|engineer)(?!\w)")
 EXPERIENCE_VALUE_PATTERN = re.compile(
     r"(?<!\w)(?P<years>\d{1,2})(?:\s*\+|\s*(?:-|–|—|to)\s*\d{1,2})?\s*"

@@ -64,13 +64,8 @@ def evaluate_sanity(candidate: MatchCandidate, profile: SearchProfile) -> Sanity
         if restricted_region == "США":
             message = "Отклонено: удалённая работа доступна только кандидатам из США."
         else:
-            message = (
-                "Отклонено: удалённая работа явно ограничена регионом: "
-                f"{restricted_region}."
-            )
-        return SanityResult(
-            rejection_concern=message
-        )
+            message = f"Отклонено: удалённая работа явно ограничена регионом: {restricted_region}."
+        return SanityResult(rejection_concern=message)
     if EQUITY_ONLY_PATTERN.search(searchable_text) and not _has_base_salary(
         candidate, searchable_text
     ):

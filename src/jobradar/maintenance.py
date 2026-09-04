@@ -158,9 +158,7 @@ def main() -> None:
                 parser.error("--timeout must be positive.")
             if arguments.sample_size is not None and arguments.sample_size <= 0:
                 parser.error("--sample-size must be positive.")
-            asyncio.run(
-                test_adapters(arguments.source, arguments.timeout, arguments.sample_size)
-            )
+            asyncio.run(test_adapters(arguments.source, arguments.timeout, arguments.sample_size))
     finally:
         asyncio.run(engine.dispose())
 

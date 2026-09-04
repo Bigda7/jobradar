@@ -338,9 +338,8 @@ class IngestionService:
         session: AsyncSession,
         normalized: NormalizedOpportunity,
     ) -> Opportunity | None:
-        if (
-            normalized.kind.value != "employment"
-            or not normalize_company_identity(normalized.company)
+        if normalized.kind.value != "employment" or not normalize_company_identity(
+            normalized.company
         ):
             return None
         title_key = normalize_title_identity(normalized.title)
