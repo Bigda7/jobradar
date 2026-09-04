@@ -19,6 +19,8 @@ class NegativeSkillRule:
 class SearchProfile:
     profile_id: str
     rules_version: str
+    english_level: str
+    czech_level: str
     notification_threshold: int
     minimum_monthly_salary_usd: Decimal
     maximum_junior_monthly_salary_usd: Decimal
@@ -37,7 +39,9 @@ class SearchProfile:
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v12-eligibility",
+    rules_version="bohdan-multi-source-v13-language-profile",
+    english_level="B2",
+    czech_level="A2",
     notification_threshold=55,
     minimum_monthly_salary_usd=Decimal("1000"),
     maximum_junior_monthly_salary_usd=Decimal("2000"),
