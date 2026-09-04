@@ -7,7 +7,11 @@ from jobradar.matching.freelance import score_freelance_candidate
 from jobradar.matching.models import MatchCandidate as MatchCandidate
 from jobradar.matching.models import ScoreResult as ScoreResult
 from jobradar.matching.profile import NegativeSkillRule, SearchProfile
-from jobradar.matching.rejections import hard_rejection_concern
+from jobradar.matching.rejections import (
+    hard_rejection_concern,
+    has_junior_title,
+    required_experience_years,
+)
 from jobradar.matching.sanity import evaluate_sanity, monthly_salary_usd
 
 SENIOR_TITLE_TERMS = ("senior", "sr.", "lead", "principal", "staff", "head", "architect")
@@ -79,6 +83,25 @@ NEGATIVE_SKILL_OPTIONAL_MARKERS = (
     "желательно",
     "необязательно",
     "перевагою",
+)
+CZECH_DESCRIPTION_MARKERS = (
+    "nabízíme",
+    "požadujeme",
+    "pracovní pozice",
+    "pracovní doba",
+    "místo výkonu",
+    "zkušenosti",
+    "odpovědnosti",
+    "výhodou",
+)
+NODE_BACKEND_PATTERN = re.compile(
+    r"(?<!\w)(?:node(?:\.js|js)?|nestjs|express(?:\.js|js)?|fastify)(?!\w)"
+)
+PYTHON_BACKEND_PATTERN = re.compile(r"(?<!\w)(?:python|django|fastapi|flask|sqlalchemy)(?!\w)")
+BACKEND_ROLE_PATTERN = re.compile(r"(?<!\w)(?:full[- ]?stack|backend|back[- ]end)(?!\w)")
+SUSPICIOUS_APPLICATION_URL_PATTERN = re.compile(
+    r"(?i)(?:job-seekers?/account/register|/(?:pricing|subscription|membership|"
+    r"upgrade|checkout|payment)(?:[/?#]|$))"
 )
 
 
@@ -166,9 +189,11 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
         reasons.append("Формат занятости подходит как альтернативный вариант для старта.")
 
     score += sanity.score_adjustment
-    score += _experience_adjustment(candidate.raw_data, reasons, concerns)
+    score += _experience_adjustment(candidate, reasons, concerns)
     score += _salary_adjustment(candidate, profile, reasons, concerns)
     score += _language_adjustment(searchable_text, concerns)
+    score += _backend_stack_adjustment(title, searchable_text, concerns)
+    score += _application_flow_adjustment(candidate.raw_data, concerns)
     negative_skills, has_core_negative_skill = _negative_skill_matches(
         candidate,
         profile.negative_skills,
@@ -196,25 +221,22 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
 
 
 def _experience_adjustment(
-    raw_data: dict[str, Any],
+    candidate: MatchCandidate,
     reasons: list[str],
     concerns: list[str],
 ) -> int:
-    requirements = raw_data.get("experienceRequirements")
-    if not isinstance(requirements, dict):
+    years = required_experience_years(candidate)
+    if years is None:
         return 0
-    months = requirements.get("monthsOfExperience")
-    if not isinstance(months, int | float):
-        return 0
-    if months <= 12:
+    if years <= 1:
         reasons.append("Требуемый опыт не превышает одного года.")
         return 10
-    if months <= 24:
-        reasons.append("Требуемый опыт находится в достижимом диапазоне для Junior.")
-        return 5
-    if months <= 36:
-        concerns.append("Вакансия требует около трёх лет опыта.")
-        return -10
+    if years < 2:
+        concerns.append("Вакансия требует от одного до двух лет опыта.")
+        return -5
+    if years < 3 and has_junior_title(candidate.title):
+        concerns.append("Junior-вакансия требует около двух лет опыта.")
+        return -5
     concerns.append("Требуемый опыт значительно превышает уровень Junior.")
     return -25
 
@@ -288,7 +310,53 @@ def _language_adjustment(searchable_text: str, concerns: list[str]) -> int:
     if re.search(r"english\s*(?:-|:)?\s*b2", searchable_text):
         concerns.append("Вакансия требует английский B2, а в профиле указан уровень B1.")
         return -5
+    czech_markers = sum(marker in searchable_text for marker in CZECH_DESCRIPTION_MARKERS)
+    if czech_markers >= 3 and not re.search(
+        r"(?:czech|čeština|český jazyk).{0,24}(?:a1|a2|basic|základní)",
+        searchable_text,
+    ):
+        concerns.append("Описание преимущественно на чешском языке; текущий уровень — A2.")
+        return -20
     return 0
+
+
+def _backend_stack_adjustment(
+    title: str,
+    searchable_text: str,
+    concerns: list[str],
+) -> int:
+    if (
+        BACKEND_ROLE_PATTERN.search(title)
+        and NODE_BACKEND_PATTERN.search(searchable_text)
+        and not PYTHON_BACKEND_PATTERN.search(searchable_text)
+    ):
+        concerns.append("Backend вакансии основан на Node.js без Python в основном стеке.")
+        return -15
+    return 0
+
+
+def _application_flow_adjustment(raw_data: dict[str, Any], concerns: list[str]) -> int:
+    urls = tuple(_application_urls(raw_data))
+    if any(SUSPICIOUS_APPLICATION_URL_PATTERN.search(url) for url in urls):
+        concerns.append("Ссылка отклика может вести на платную регистрацию или подписку.")
+        return -10
+    return 0
+
+
+def _application_urls(value: Any, key: str = "") -> tuple[str, ...]:
+    if isinstance(value, dict):
+        return tuple(
+            url
+            for child_key, child_value in value.items()
+            for url in _application_urls(child_value, str(child_key))
+        )
+    if isinstance(value, list | tuple):
+        return tuple(url for child in value for url in _application_urls(child, key))
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        normalized_key = normalize_text(key)
+        if any(marker in normalized_key for marker in ("url", "link", "apply", "application")):
+            return (value,)
+    return ()
 
 
 def _negative_skill_matches(

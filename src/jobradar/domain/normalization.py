@@ -8,12 +8,65 @@ from jobradar.domain.models import NormalizedOpportunity
 
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "ref", "source"}
+COMPANY_LEGAL_SUFFIX_PATTERN = re.compile(
+    r"(?:\s+(?:llc|incorporated|inc|ltd|limited|gmbh|plc|corp|corporation|"
+    r"s\s*r\s*o|a\s*s|тов|тзов|пп|фоп))+$"
+)
+COMPANY_LEGAL_PREFIX_PATTERN = re.compile(
+    r"^(?:(?:llc|ltd|gmbh|corp|corporation|s\s*r\s*o|тов|тзов|пп|фоп)\s+)+"
+)
+TITLE_CONTEXT_MARKERS = {
+    "remote",
+    "remote work",
+    "віддалено",
+    "віддалена робота",
+    "europe",
+    "eu",
+    "worldwide",
+    "anywhere",
+    "kyiv",
+    "kiev",
+    "prague",
+    "praha",
+    "full time",
+    "full-time",
+}
+BRACKETED_TITLE_TEXT_PATTERN = re.compile(r"[\[(]([^\])]+)[\])]")
+TRAILING_TITLE_CONTEXT_PATTERN = re.compile(
+    r"\s+(?:[-–—|·])\s*(?:remote|remote work|віддалено|віддалена робота|"
+    r"europe|eu|worldwide|anywhere|kyiv|kiev|prague|praha|full[- ]time)\s*$"
+)
 
 
 def normalize_text(value: str | None) -> str:
     if not value:
         return ""
     return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def normalize_company_identity(value: str | None) -> str:
+    normalized = normalize_text(value)
+    normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+    normalized = normalized.replace("_", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = COMPANY_LEGAL_PREFIX_PATTERN.sub("", normalized).strip()
+    return COMPANY_LEGAL_SUFFIX_PATTERN.sub("", normalized).strip()
+
+
+def normalize_title_identity(value: str | None) -> str:
+    normalized = normalize_text(value)
+
+    def remove_context_group(match: re.Match[str]) -> str:
+        group = normalize_text(match.group(1))
+        parts = [part.strip() for part in re.split(r"[,/|·]+", group) if part.strip()]
+        if parts and all(part in TITLE_CONTEXT_MARKERS for part in parts):
+            return " "
+        return match.group(0)
+
+    normalized = BRACKETED_TITLE_TEXT_PATTERN.sub(remove_context_group, normalized)
+    normalized = TRAILING_TITLE_CONTEXT_PATTERN.sub("", normalized)
+    normalized = re.sub(r"[-–—_/.,:;]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def canonicalize_url(value: str) -> str:
@@ -40,8 +93,8 @@ def canonicalize_url(value: str) -> str:
 
 def build_canonical_key(opportunity: NormalizedOpportunity) -> str:
     components = [
-        normalize_text(opportunity.company),
-        normalize_text(opportunity.title),
+        normalize_company_identity(opportunity.company),
+        normalize_title_identity(opportunity.title),
         normalize_text(opportunity.location_text),
         opportunity.work_mode.value,
     ]

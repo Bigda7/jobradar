@@ -26,6 +26,16 @@ class BaseSource(ABC):
     def cached_listing(self, external_id: str) -> CachedListing | None:
         return getattr(self, "_cached_listings", {}).get(external_id)
 
+    def report_warning(self, message: str) -> None:
+        warnings = getattr(self, "_run_warnings", [])
+        warnings.append(message)
+        self._run_warnings = warnings
+
+    def consume_warnings(self) -> tuple[str, ...]:
+        warnings = tuple(getattr(self, "_run_warnings", []))
+        self._run_warnings = []
+        return warnings
+
     @abstractmethod
     def fetch(self) -> AsyncIterator[RawListing]:
         raise NotImplementedError

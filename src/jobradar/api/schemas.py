@@ -80,6 +80,13 @@ class SourceResponse(BaseModel):
     last_run_at: datetime | None
     last_success_at: datetime | None
     last_error: str | None
+    last_run_status: str | None = None
+    last_discovered_count: int | None = None
+    last_created_count: int | None = None
+    last_updated_count: int | None = None
+    last_unchanged_count: int | None = None
+    last_deactivated_count: int | None = None
+    last_error_count: int | None = None
 
     _normalize_datetimes = field_validator(
         "last_run_at",

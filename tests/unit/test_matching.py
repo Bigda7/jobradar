@@ -293,7 +293,7 @@ def test_matching_profile_hard_rejects_military_recruiting(
     assert "военный рекрутинг" in result.concerns[0]
 
 
-def test_matching_profile_penalizes_senior_experience() -> None:
+def test_matching_profile_rejects_senior_experience() -> None:
     result = score_candidate(
         _candidate(
             title="Senior React Developer",
@@ -302,9 +302,9 @@ def test_matching_profile_penalizes_senior_experience() -> None:
         BOHDAN_PROFILE,
     )
 
-    assert result.score < BOHDAN_PROFILE.notification_threshold
-    assert any("Senior" in concern for concern in result.concerns)
-    assert any("значительно превышает" in concern for concern in result.concerns)
+    assert result.score == 0
+    assert result.reasons == ()
+    assert any("Middle, Senior" in concern for concern in result.concerns)
 
 
 def test_matching_profile_penalizes_unrelated_specialization() -> None:
@@ -313,8 +313,189 @@ def test_matching_profile_penalizes_unrelated_specialization() -> None:
         BOHDAN_PROFILE,
     )
 
-    assert result.score < BOHDAN_PROFILE.notification_threshold
-    assert any("Специализация" in concern for concern in result.concerns)
+    assert result.score == 0
+    assert any("специализация" in concern for concern in result.concerns)
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
+        "Middle Python Developer",
+        "Lead React Engineer",
+        "Staff Software Engineer",
+        "Head of Engineering",
+        "Mid-Senior Full-Stack Developer",
+    ),
+)
+def test_matching_profile_hard_rejects_non_junior_seniority_titles(title: str) -> None:
+    result = score_candidate(_candidate(title=title), BOHDAN_PROFILE)
+
+    assert result.score == 0
+    assert "Middle, Senior" in result.concerns[0]
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "Requirements: 3+ years of professional experience with React.",
+        "We require at least 4 years experience building Django applications.",
+        "Коммерческий опыт от 3 лет с Python.",
+        "Досвід 3–5 років у веб-розробці.",
+        "Požadujeme minimálně 3 roky praxe s Reactem.",
+    ),
+)
+def test_matching_profile_rejects_three_or_more_years_in_description(
+    description: str,
+) -> None:
+    result = score_candidate(_candidate(description=description, raw_data={}), BOHDAN_PROFILE)
+
+    assert result.score == 0
+    assert "трёх лет" in result.concerns[0]
+
+
+def test_matching_profile_rejects_two_years_without_junior_title() -> None:
+    result = score_candidate(
+        _candidate(
+            title="React Developer",
+            description="Requirements: 2+ years of commercial experience with React.",
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score == 0
+    assert "двух лет" in result.concerns[0]
+
+
+def test_matching_profile_keeps_junior_role_requesting_two_years_with_concern() -> None:
+    result = score_candidate(
+        _candidate(
+            title="Junior React Developer",
+            description="Requirements: 2+ years of commercial experience with React.",
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score > 0
+    assert any("около двух лет" in concern for concern in result.concerns)
+    assert not any("достижимом диапазоне" in reason for reason in result.reasons)
+
+
+def test_matching_profile_does_not_treat_company_age_as_required_experience() -> None:
+    result = score_candidate(
+        _candidate(
+            description=(
+                "Our company was founded 5 years ago. Learn React and gain professional experience."
+            ),
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score > 0
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
+        "Junior PPC Specialist",
+        "IT Recruiter",
+        "Junior Product Analyst",
+        "SOC Analyst",
+        "Manual QA Engineer",
+        "Power Platform Developer",
+        "Odoo Developer",
+    ),
+)
+def test_matching_profile_hard_rejects_non_target_roles(title: str) -> None:
+    result = score_candidate(_candidate(title=title, raw_data={}), BOHDAN_PROFILE)
+
+    assert result.score == 0
+    assert "специализация" in result.concerns[0]
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "German C1 is required for daily communication.",
+        "Fluent Czech is mandatory for this role.",
+        "Native French speaker required.",
+        "Professional Spanish working proficiency is required.",
+    ),
+)
+def test_matching_profile_rejects_explicit_unsupported_language_requirement(
+    description: str,
+) -> None:
+    result = score_candidate(_candidate(description=description, raw_data={}), BOHDAN_PROFILE)
+
+    assert result.score == 0
+    assert "рабочее владение языком" in result.concerns[0]
+
+
+def test_matching_profile_allows_basic_czech_requirement() -> None:
+    result = score_candidate(
+        _candidate(
+            description="Basic Czech A2 is sufficient. Build React interfaces.",
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score > 0
+
+
+def test_matching_profile_does_not_reject_optional_foreign_language() -> None:
+    result = score_candidate(
+        _candidate(
+            description="German knowledge is optional and is not required for this role.",
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score > 0
+
+
+def test_matching_profile_penalizes_czech_description_without_basic_level() -> None:
+    result = score_candidate(
+        _candidate(
+            description=(
+                "Požadujeme zkušenosti s React. Nabízíme moderní pracovní pozici. "
+                "Místo výkonu je Praha."
+            ),
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score > 0
+    assert any("чешском языке" in concern for concern in result.concerns)
+
+
+def test_matching_profile_penalizes_node_only_backend_role() -> None:
+    result = score_candidate(
+        _candidate(
+            title="Junior Full-Stack Developer",
+            description="Build React applications with a Node.js and NestJS backend.",
+            raw_data={},
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert any("Node.js без Python" in concern for concern in result.concerns)
+
+
+def test_matching_profile_warns_about_paid_application_flow() -> None:
+    result = score_candidate(
+        _candidate(
+            raw_data={"application_url": "https://agency.example/job-seekers/account/register"}
+        ),
+        BOHDAN_PROFILE,
+    )
+
+    assert result.score > 0
+    assert any("платную регистрацию" in concern for concern in result.concerns)
 
 
 @pytest.mark.parametrize(
@@ -331,6 +512,34 @@ def test_sanity_check_rejects_us_only_remote_roles(field: str, marker: str) -> N
     assert result.score == 0
     assert result.reasons == ()
     assert "только кандидатам из США" in result.concerns[0]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    (
+        "Canada only",
+        "LATAM only",
+        "Candidates must be located in Brazil.",
+        "Candidates residing only in Argentina.",
+        "Applicants must reside in Colombia.",
+        "This role is only available within Ukraine.",
+    ),
+)
+def test_sanity_check_rejects_explicit_regional_restrictions(marker: str) -> None:
+    result = score_candidate(_candidate(description=marker), BOHDAN_PROFILE)
+
+    assert result.score == 0
+    assert "ограничена регионом" in result.concerns[0]
+
+
+@pytest.mark.parametrize(
+    "location",
+    ("Toronto, Canada", "Buenos Aires, Argentina", "Kyiv, Ukraine", "Europe"),
+)
+def test_sanity_check_keeps_locations_without_explicit_restriction(location: str) -> None:
+    result = score_candidate(_candidate(location_text=location), BOHDAN_PROFILE)
+
+    assert result.score > 0
 
 
 @pytest.mark.parametrize("marker", ("equity only", "unpaid startup", "profit share"))

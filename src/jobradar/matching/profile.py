@@ -37,7 +37,7 @@ class SearchProfile:
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v11-negative-skills",
+    rules_version="bohdan-multi-source-v12-eligibility",
     notification_threshold=55,
     minimum_monthly_salary_usd=Decimal("1000"),
     maximum_junior_monthly_salary_usd=Decimal("2000"),

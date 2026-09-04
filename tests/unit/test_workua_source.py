@@ -172,3 +172,38 @@ async def test_workua_source_retries_one_rate_limited_detail_request() -> None:
 
     assert len(listings) == 1
     assert detail_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_workua_source_continues_when_one_search_page_is_empty() -> None:
+    empty_attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal empty_attempts
+        if request.url.path == "/en/jobs-remote-empty/":
+            empty_attempts += 1
+            return httpx.Response(200, text="<html><body>No jobs</body></html>")
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.url.path == "/en/jobs/8441545/":
+            return httpx.Response(200, text=DETAIL_PAGE)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=(
+                "https://www.work.ua/en/jobs-remote-empty/",
+                "https://www.work.ua/en/jobs-remote-python/",
+            ),
+            reader_base_url="https://reader.test",
+            retry_attempts=2,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert len(listings) == 1
+    assert empty_attempts == 2
+    assert source.consume_warnings() == (
+        "Work.ua search page did not contain vacancy cards: "
+        "https://www.work.ua/en/jobs-remote-empty/",
+    )

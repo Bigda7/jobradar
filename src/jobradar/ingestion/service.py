@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -15,7 +15,8 @@ from jobradar.domain.normalization import (
     build_canonical_key,
     build_content_hash,
     canonicalize_url,
-    normalize_text,
+    normalize_company_identity,
+    normalize_title_identity,
 )
 from jobradar.ingestion.canonical import (
     listing_quality_score,
@@ -44,6 +45,7 @@ class IngestionResult:
     duplicates: int = 0
     deactivated: int = 0
     errors: int = 0
+    warnings: list[str] = field(default_factory=list)
 
 
 class IngestionService:
@@ -137,6 +139,17 @@ class IngestionService:
                 error=redact_sensitive_text(str(error)),
             )
 
+        source_warnings = adapter.consume_warnings()
+        if source_warnings:
+            result.errors += len(source_warnings)
+            result.warnings.extend(source_warnings)
+            for warning in source_warnings:
+                logger.warning(
+                    "source_run_warning",
+                    source=adapter.name,
+                    warning=redact_sensitive_text(warning),
+                )
+
         if terminal_error is None and adapter.deactivate_missing_listings:
             try:
                 result.deactivated = await self._deactivate_missing_listings(
@@ -172,6 +185,7 @@ class IngestionService:
             duplicates=result.duplicates,
             deactivated=result.deactivated,
             errors=result.errors,
+            warnings=len(result.warnings),
         )
         return result
 
@@ -324,10 +338,12 @@ class IngestionService:
         session: AsyncSession,
         normalized: NormalizedOpportunity,
     ) -> Opportunity | None:
-        if normalized.kind.value != "employment" or not normalize_text(normalized.company):
+        if normalized.kind.value != "employment" or not normalize_company_identity(
+            normalized.company
+        ):
             return None
-        title_key = normalize_text(normalized.title)
-        company_key = normalize_text(normalized.company)
+        title_key = normalize_title_identity(normalized.title)
+        company_key = normalize_company_identity(normalized.company)
         candidates = (
             await session.scalars(
                 select(Opportunity)
@@ -339,8 +355,8 @@ class IngestionService:
             (
                 opportunity
                 for opportunity in candidates
-                if normalize_text(opportunity.title) == title_key
-                and normalize_text(opportunity.company) == company_key
+                if normalize_title_identity(opportunity.title) == title_key
+                and normalize_company_identity(opportunity.company) == company_key
             ),
             None,
         )
@@ -484,15 +500,15 @@ class IngestionService:
             run.unchanged_count = result.unchanged
             run.deactivated_count = result.deactivated
             run.error_count = result.errors
-            safe_error = (
-                redact_sensitive_text(str(terminal_error))[:2000] if terminal_error else None
-            )
+            warning_text = "; ".join(result.warnings)
+            error_text = str(terminal_error) if terminal_error else warning_text
+            safe_error = redact_sensitive_text(error_text)[:2000] if error_text else None
             run.error_message = safe_error
 
             source.last_run_at = now
             if result.status in {RunStatus.SUCCEEDED, RunStatus.PARTIAL}:
                 source.last_success_at = now
-                source.last_error = None
+                source.last_error = safe_error if result.status is RunStatus.PARTIAL else None
             else:
                 source.last_error = safe_error or "Unknown error"
 

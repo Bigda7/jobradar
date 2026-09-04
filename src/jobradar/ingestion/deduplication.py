@@ -12,7 +12,10 @@ from jobradar.db.models import (
     TelegramOpportunityMessage,
 )
 from jobradar.domain.enums import DeliveryStatus, OpportunityDisposition, OpportunityKind
-from jobradar.domain.normalization import normalize_text
+from jobradar.domain.normalization import (
+    normalize_company_identity,
+    normalize_title_identity,
+)
 from jobradar.ingestion.canonical import refresh_opportunity_from_best_listing
 
 
@@ -20,6 +23,28 @@ from jobradar.ingestion.canonical import refresh_opportunity_from_best_listing
 class DeduplicationSummary:
     duplicate_groups: int = 0
     merged_opportunities: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateAuditGroup:
+    normalized_title: str
+    normalized_company: str
+    opportunity_ids: tuple[int, ...]
+    titles: tuple[str, ...]
+    companies: tuple[str | None, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DeduplicationAudit:
+    groups: tuple[DuplicateAuditGroup, ...]
+
+    @property
+    def candidate_groups(self) -> int:
+        return len(self.groups)
+
+    @property
+    def candidate_opportunities(self) -> int:
+        return sum(len(group.opportunity_ids) for group in self.groups)
 
 
 class CrossSourceDeduplicationService:
@@ -38,8 +63,8 @@ class CrossSourceDeduplicationService:
             ).all()
             groups: dict[tuple[str, str], list[Opportunity]] = {}
             for opportunity in opportunities:
-                title_key = normalize_text(opportunity.title)
-                company_key = normalize_text(opportunity.company)
+                title_key = normalize_title_identity(opportunity.title)
+                company_key = normalize_company_identity(opportunity.company)
                 if not title_key or not company_key:
                     continue
                 groups.setdefault((title_key, company_key), []).append(opportunity)
@@ -53,6 +78,37 @@ class CrossSourceDeduplicationService:
                     await self._merge_opportunity(session, primary, duplicate)
                     summary.merged_opportunities += 1
         return summary
+
+    async def audit_existing(self) -> DeduplicationAudit:
+        async with self._session_factory() as session:
+            opportunities = (
+                await session.scalars(
+                    select(Opportunity)
+                    .where(Opportunity.kind == OpportunityKind.EMPLOYMENT.value)
+                    .order_by(Opportunity.id.asc())
+                )
+            ).all()
+
+        groups: dict[tuple[str, str], list[Opportunity]] = {}
+        for opportunity in opportunities:
+            title_key = normalize_title_identity(opportunity.title)
+            company_key = normalize_company_identity(opportunity.company)
+            if not title_key or not company_key:
+                continue
+            groups.setdefault((title_key, company_key), []).append(opportunity)
+
+        audit_groups = tuple(
+            DuplicateAuditGroup(
+                normalized_title=identity[0],
+                normalized_company=identity[1],
+                opportunity_ids=tuple(item.id for item in group),
+                titles=tuple(item.title for item in group),
+                companies=tuple(item.company for item in group),
+            )
+            for identity, group in groups.items()
+            if len(group) > 1
+        )
+        return DeduplicationAudit(groups=audit_groups)
 
     async def _merge_opportunity(
         self,
