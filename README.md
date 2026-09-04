@@ -207,8 +207,18 @@ Run maintenance operations:
 ```powershell
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance rescore-all
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance expire-stale
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance audit-duplicates
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance deduplicate-opportunities
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance reset-hidden
+```
+
+`audit-duplicates` reports conservative cross-source duplicate candidates without changing data.
+Review its output before running the mutating deduplication command.
+
+Test one adapter against its live source without writing to PostgreSQL:
+
+```powershell
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance test-adapters --source workua --sample-size 5
 ```
 
 Employment and freelance listings leave the active inventory after 30 days. They remain stored as

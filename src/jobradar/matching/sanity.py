@@ -7,15 +7,15 @@ from jobradar.domain.normalization import normalize_text
 from jobradar.matching.models import MatchCandidate
 from jobradar.matching.profile import SearchProfile
 
-LOCATION_REJECTION_PATTERN = re.compile(
-    r"(?<!\w)(?:"
-    r"u\.?s\.?[- ]+only|"
-    r"united\s+states[- ]+only|"
-    r"must\s+(?:reside|live|be\s+based|be\s+located)\s+in\s+(?:the\s+)?u\.?s\.?|"
-    r"(?:position|role|job)?\s*(?:is\s+)?only\s+available\s+"
-    r"(?:within|in|to\s+candidates\s+in)\s+(?:the\s+)?u\.?s\.?"
-    r")(?!\w)"
-)
+RESTRICTED_REGIONS = {
+    "США": r"(?:the\s+)?(?:u\.?s\.?(?:a\.?)?|united\s+states)",
+    "Канадой": r"canada",
+    "Латинской Америкой": r"(?:latam|latin\s+america)",
+    "Бразилией": r"brazil",
+    "Аргентиной": r"argentina",
+    "Колумбией": r"colombia",
+    "Украиной": r"ukraine",
+}
 EQUITY_ONLY_PATTERN = re.compile(
     r"(?<!\w)(?:equity[- ]+only|unpaid\s+startup|profit[- ]+share)(?!\w)"
 )
@@ -59,9 +59,17 @@ def evaluate_sanity(candidate: MatchCandidate, profile: SearchProfile) -> Sanity
             if value
         )
     )
-    if LOCATION_REJECTION_PATTERN.search(searchable_text):
+    restricted_region = _restricted_region(searchable_text)
+    if restricted_region is not None:
+        if restricted_region == "США":
+            message = "Отклонено: удалённая работа доступна только кандидатам из США."
+        else:
+            message = (
+                "Отклонено: удалённая работа явно ограничена регионом: "
+                f"{restricted_region}."
+            )
         return SanityResult(
-            rejection_concern=("Отклонено: удалённая работа доступна только кандидатам из США.")
+            rejection_concern=message
         )
     if EQUITY_ONLY_PATTERN.search(searchable_text) and not _has_base_salary(
         candidate, searchable_text
@@ -166,3 +174,19 @@ def _monthly_period_factor(value: str | None) -> Decimal | None:
 def _is_full_time(value: str | None) -> bool:
     normalized = normalize_text(value).replace("_", " ").replace("-", " ")
     return re.search(r"(?<!\w)full\s*time(?!\w)", normalized) is not None
+
+
+def _restricted_region(searchable_text: str) -> str | None:
+    for label, region in RESTRICTED_REGIONS.items():
+        patterns = (
+            rf"(?<!\w){region}[- ]+only(?!\w)",
+            rf"(?<!\w)(?:must|required\s+to)\s+"
+            rf"(?:reside|live|be\s+based|be\s+located)\s+in\s+{region}(?!\w)",
+            rf"(?<!\w)candidates?\s+(?:must\s+be\s+)?"
+            rf"(?:located|based|residing|living)\s+(?:only\s+)?in\s+{region}(?!\w)",
+            rf"(?<!\w)(?:position|role|job)\s+(?:is\s+)?only\s+available\s+"
+            rf"(?:within|in|to\s+candidates\s+in)\s+{region}(?!\w)",
+        )
+        if any(re.search(pattern, searchable_text) is not None for pattern in patterns):
+            return label
+    return None

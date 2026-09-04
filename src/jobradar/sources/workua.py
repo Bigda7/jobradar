@@ -78,13 +78,24 @@ class WorkUaSource(BaseSource):
     async def fetch(self) -> AsyncIterator[RawListing]:
         seen: set[str] = set()
         yielded = 0
+        card_batches: list[list[WorkUaCard]] = []
         for search_url in self._search_urls:
-            html = await self._fetch_page(search_url)
-            cards = parse_workua_cards(html)
+            try:
+                cards = await self._fetch_search_cards(search_url)
+            except WorkUaSourceError as error:
+                self.report_warning(str(error))
+                continue
             if not cards:
-                raise WorkUaSourceError(
+                self.report_warning(
                     f"Work.ua search page did not contain vacancy cards: {search_url}"
                 )
+                continue
+            card_batches.append(cards)
+
+        if not card_batches:
+            raise WorkUaSourceError("Every configured Work.ua search page failed.")
+
+        for cards in card_batches:
             for card in cards:
                 if card.external_id in seen:
                     continue
@@ -124,6 +135,15 @@ class WorkUaSource(BaseSource):
                 yielded += 1
                 if yielded >= self._max_items:
                     return
+
+    async def _fetch_search_cards(self, search_url: str) -> list[WorkUaCard]:
+        cards: list[WorkUaCard] = []
+        for _ in range(self._retry_attempts):
+            html = await self._fetch_page(search_url)
+            cards = parse_workua_cards(html)
+            if cards:
+                break
+        return cards
 
     async def _fetch_description(self, vacancy_url: str) -> str | None:
         try:

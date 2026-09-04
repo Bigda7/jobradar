@@ -456,6 +456,32 @@ async def test_cross_source_title_company_duplicate_uses_one_opportunity(
 
 
 @pytest.mark.asyncio
+async def test_cross_source_duplicate_ignores_legal_suffix_and_context_tag(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_listing = deepcopy(DEFAULT_LISTINGS[0])
+    second_listing = deepcopy(DEFAULT_LISTINGS[0])
+    second_listing.update(
+        {
+            "id": "alternate-normalized-001",
+            "url": "https://alternate.example/jobs/normalized-duplicate",
+            "title": "Junior Full Stack Developer (Remote / EU)",
+            "company": "Example Labs, LLC",
+        }
+    )
+    service = IngestionService(sqlite_session_factory)
+
+    await service.run_source(MockSource((first_listing,)))
+    result = await service.run_source(AlternateMockSource((second_listing,)))
+
+    assert result.created == 0
+    assert result.duplicates == 1
+    async with sqlite_session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Opportunity)) == 1
+        assert await session.scalar(select(func.count()).select_from(Listing)) == 2
+
+
+@pytest.mark.asyncio
 async def test_cross_source_duplicate_promotes_richer_listing_to_canonical(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -613,3 +639,36 @@ async def test_existing_cross_source_duplicates_are_merged_with_user_state(
         state = await session.get(OpportunityUserState, opportunities[0].id)
         assert state is not None
         assert state.disposition == OpportunityDisposition.FAVORITE.value
+
+
+@pytest.mark.asyncio
+async def test_duplicate_audit_reports_broader_candidates_without_mutation(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sqlite_session_factory() as session, session.begin():
+        session.add_all(
+            (
+                Opportunity(
+                    kind=OpportunityKind.EMPLOYMENT.value,
+                    canonical_key="audit-primary",
+                    title="Junior Python Developer",
+                    company="Example Labs",
+                    work_mode="remote",
+                ),
+                Opportunity(
+                    kind=OpportunityKind.EMPLOYMENT.value,
+                    canonical_key="audit-candidate",
+                    title="Junior Python Developer (Remote / EU)",
+                    company="Example Labs, LLC",
+                    work_mode="remote",
+                ),
+            )
+        )
+
+    audit = await CrossSourceDeduplicationService(sqlite_session_factory).audit_existing()
+
+    assert audit.candidate_groups == 1
+    assert audit.candidate_opportunities == 2
+    assert audit.groups[0].normalized_title == "junior python developer"
+    async with sqlite_session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2

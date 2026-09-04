@@ -4,12 +4,31 @@ from jobradar.domain.normalization import (
     build_canonical_key,
     build_content_hash,
     canonicalize_url,
+    normalize_company_identity,
     normalize_text,
+    normalize_title_identity,
 )
 
 
 def test_normalize_text_collapses_whitespace_and_case() -> None:
     assert normalize_text("  Junior   PYTHON Developer ") == "junior python developer"
+
+
+def test_company_identity_ignores_common_legal_suffixes() -> None:
+    assert normalize_company_identity("Example Labs, LLC") == "example labs"
+    assert normalize_company_identity("Example Labs s.r.o.") == "example labs"
+    assert normalize_company_identity("ТОВ Example Labs") == "example labs"
+
+
+def test_title_identity_ignores_only_non_semantic_context_tags() -> None:
+    assert normalize_title_identity("Python Developer (Remote / EU)") == "python developer"
+    assert normalize_title_identity("Python Developer — Remote") == "python developer"
+    assert normalize_title_identity("Python Developer (Django / FastAPI)") == (
+        "python developer (django fastapi)"
+    )
+    assert normalize_title_identity("Senior Python Developer") != normalize_title_identity(
+        "Junior Python Developer"
+    )
 
 
 def test_canonicalize_url_removes_tracking_and_fragment() -> None:

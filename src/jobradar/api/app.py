@@ -32,6 +32,7 @@ from jobradar.db.models import (
     Opportunity,
     OpportunityUserState,
     Source,
+    SourceRun,
 )
 from jobradar.db.session import engine, session_factory
 from jobradar.domain.enums import OpportunityDisposition, WorkMode
@@ -261,7 +262,26 @@ def create_app(
         sources = (await session.scalars(select(Source).order_by(Source.name))).all()
         responses: list[SourceResponse] = []
         for item in sources:
-            response = SourceResponse.model_validate(item)
+            latest_run = await session.scalar(
+                select(SourceRun)
+                .where(SourceRun.source_id == item.id)
+                .order_by(SourceRun.started_at.desc(), SourceRun.id.desc())
+                .limit(1)
+            )
+            run_details = (
+                {
+                    "last_run_status": latest_run.status,
+                    "last_discovered_count": latest_run.discovered_count,
+                    "last_created_count": latest_run.created_count,
+                    "last_updated_count": latest_run.updated_count,
+                    "last_unchanged_count": latest_run.unchanged_count,
+                    "last_deactivated_count": latest_run.deactivated_count,
+                    "last_error_count": latest_run.error_count,
+                }
+                if latest_run is not None
+                else {}
+            )
+            response = SourceResponse.model_validate(item).model_copy(update=run_details)
             if response.last_error:
                 response.last_error = redact_sensitive_text(response.last_error)
             responses.append(response)

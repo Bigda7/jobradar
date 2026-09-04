@@ -8,7 +8,6 @@ import structlog
 from jobradar.config import get_settings
 from jobradar.db.locks import try_transaction_advisory_lock
 from jobradar.db.session import engine, session_factory
-from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
 from jobradar.ingestion.service import IngestionService
 from jobradar.logging_config import configure_logging
 from jobradar.matching.profile import BOHDAN_PROFILE
@@ -52,13 +51,6 @@ async def run_cycle(*, force_sources: bool = False) -> None:
                 poll_interval_seconds=poll_interval_seconds,
                 jitter_ratio=settings.source_poll_jitter_ratio,
             )
-
-    deduplication_summary = await CrossSourceDeduplicationService(session_factory).merge_existing()
-    logger.info(
-        "cross_source_deduplication_finished",
-        duplicate_groups=deduplication_summary.duplicate_groups,
-        merged_opportunities=deduplication_summary.merged_opportunities,
-    )
 
     expiration_summary = await StaleExpirationService(session_factory).expire_stale(
         employment_days=settings.employment_stale_after_days,
