@@ -90,6 +90,7 @@ class AshbySource(BaseSource):
         seen: set[str] = set()
         for company in self._companies:
             url = f"{self._api_base_url}/posting-api/job-board/{quote(company.identifier)}"
+            self.record_page()
             try:
                 response = await client.get(url, params={"includeCompensation": "true"})
                 response.raise_for_status()
@@ -98,15 +99,19 @@ class AshbySource(BaseSource):
                 raise AtsSourceError(f"Ashby request failed for {company.name}: {error}") from error
             if not isinstance(document, Mapping) or not isinstance(document.get("jobs"), list):
                 raise AtsSourceError(f"Ashby returned invalid jobs for {company.name}.")
+            self.record_candidates(len(document["jobs"]))
             accepted = 0
             for item in document["jobs"]:
                 if not isinstance(item, Mapping) or not _is_remote(item):
+                    self.record_filtered()
                     continue
                 source_url = optional_string(item.get("jobUrl"))
                 if source_url is None:
+                    self.record_filtered()
                     continue
                 identifier = external_id(company, item.get("id"), source_url)
                 if identifier in seen:
+                    self.record_filtered()
                     continue
                 seen.add(identifier)
                 yield RawListing(
@@ -116,6 +121,7 @@ class AshbySource(BaseSource):
                 )
                 accepted += 1
                 if accepted >= self._max_items_per_company:
+                    self.mark_limit_reached()
                     break
 
 

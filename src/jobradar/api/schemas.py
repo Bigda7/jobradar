@@ -82,11 +82,20 @@ class SourceResponse(BaseModel):
     last_error: str | None
     last_run_status: str | None = None
     last_discovered_count: int | None = None
+    last_candidate_count: int | None = None
+    last_filtered_count: int | None = None
+    last_detail_failure_count: int | None = None
+    last_page_count: int | None = None
+    last_limit_reached: bool | None = None
     last_created_count: int | None = None
     last_updated_count: int | None = None
     last_unchanged_count: int | None = None
+    last_duplicate_count: int | None = None
     last_deactivated_count: int | None = None
+    last_normalization_error_count: int | None = None
+    last_warning_count: int | None = None
     last_error_count: int | None = None
+    last_coverage_warning: str | None = None
 
     _normalize_datetimes = field_validator(
         "last_run_at",

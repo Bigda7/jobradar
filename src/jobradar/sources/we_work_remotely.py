@@ -69,6 +69,7 @@ class WeWorkRemotelySource(BaseSource):
         )
 
     async def _fetch_with_client(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
+        self.record_page()
         try:
             response = await client.get(self._feed_url)
             response.raise_for_status()
@@ -82,17 +83,21 @@ class WeWorkRemotelySource(BaseSource):
                 f"We Work Remotely RSS request failed: {error}"
             ) from error
 
+        items = root.findall("./channel/item")
+        self.record_candidates(len(items))
         seen: set[str] = set()
         yielded = 0
-        for item in root.findall("./channel/item"):
+        for item in items:
             payload = {child.tag: child.text or "" for child in item}
             source_url = _optional_string(payload.get("link")) or _optional_string(
                 payload.get("guid")
             )
             if source_url is None:
+                self.record_filtered()
                 continue
             external_id = _external_id(source_url)
             if external_id in seen:
+                self.record_filtered()
                 continue
             seen.add(external_id)
             yield RawListing(
@@ -102,6 +107,7 @@ class WeWorkRemotelySource(BaseSource):
             )
             yielded += 1
             if yielded >= self._max_items:
+                self.mark_limit_reached()
                 return
 
 

@@ -39,8 +39,8 @@ class StartupJobsSource(BaseSource):
         role: str = "engineering",
         request_timeout_seconds: float = 30.0,
         page_size: int = 50,
-        max_pages: int = 2,
-        max_items: int = 100,
+        max_pages: int = 4,
+        max_items: int = 200,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key.strip():
@@ -106,12 +106,15 @@ class StartupJobsSource(BaseSource):
             }
             if cursor is not None:
                 params["starting_after"] = cursor
+            self.record_page()
             response = await self._request_page(client, params)
             items = response.get("data")
             if not isinstance(items, list):
                 raise StartupJobsSourceError("Startup.jobs response is missing the data list.")
+            self.record_candidates(len(items))
             for item in items:
                 if not isinstance(item, dict):
+                    self.record_filtered()
                     continue
                 external_id = _optional_string(item.get("id"))
                 source_url = _optional_string(item.get("url"))
@@ -121,6 +124,7 @@ class StartupJobsSource(BaseSource):
                     or external_id in seen
                     or _optional_string(item.get("workplace_type")) != "remote"
                 ):
+                    self.record_filtered()
                     continue
                 seen.add(external_id)
                 yield RawListing(
@@ -130,6 +134,7 @@ class StartupJobsSource(BaseSource):
                 )
                 yielded += 1
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
             has_more = response.get("has_more") is True
             next_cursor = response.get("next_cursor")

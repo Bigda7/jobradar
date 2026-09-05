@@ -78,8 +78,11 @@ class PraceCzSource(BaseSource):
     async def fetch(self) -> AsyncIterator[RawListing]:
         card_groups: list[list[PraceCzCard]] = []
         for search_url in self._search_urls:
+            self.record_page()
             html = await self._fetch_page(search_url)
-            card_groups.append(parse_prace_cz_cards(html))
+            cards = parse_prace_cz_cards(html)
+            self.record_candidates(len(cards))
+            card_groups.append(cards)
         if not any(card_groups):
             raise PraceCzSourceError("Prace.cz search pages did not contain any vacancy cards.")
 
@@ -90,6 +93,7 @@ class PraceCzSource(BaseSource):
                 continue
             seen.add(card.external_id)
             if self._remote_only and not card.fully_remote:
+                self.record_filtered()
                 continue
             search_card = _search_card_payload(card)
             fingerprint = discovery_fingerprint(search_card)
@@ -115,6 +119,7 @@ class PraceCzSource(BaseSource):
                 await polite_delay(self._detail_request_delay_seconds)
                 fetched_posting = await self._fetch_posting(card.url)
                 if fetched_posting is None:
+                    self.record_detail_failure()
                     continue
                 posting = fetched_posting
                 detail_fetched_at = datetime.now(UTC)
@@ -128,6 +133,7 @@ class PraceCzSource(BaseSource):
             )
             yielded += 1
             if yielded >= self._max_items:
+                self.mark_limit_reached()
                 return
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:

@@ -15,6 +15,7 @@ from jobradar.sources.lever import LeverSource
 from jobradar.sources.mock import MockSource
 from jobradar.sources.prace_cz import PraceCzSource
 from jobradar.sources.remotive import RemotiveSource
+from jobradar.sources.robota_ua import RobotaUaSource
 from jobradar.sources.startup_jobs import StartupJobsSource
 from jobradar.sources.startupjobs_cz import StartupJobsCzSource
 from jobradar.sources.the_muse import TheMuseSource
@@ -56,11 +57,26 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 search_urls=settings.workua_urls,
                 reader_base_url=settings.workua_reader_base_url,
                 request_timeout_seconds=settings.workua_request_timeout_seconds,
+                max_pages_per_search=settings.workua_max_pages_per_search,
                 max_items=settings.workua_max_items,
                 remote_only=settings.workua_remote_only,
                 detail_cache_ttl_seconds=settings.workua_detail_cache_ttl_seconds,
                 detail_request_delay_seconds=settings.workua_detail_request_delay_seconds,
                 retry_attempts=settings.workua_retry_attempts,
+            )
+        )
+    if settings.robota_ua_source_enabled:
+        sources.append(
+            RobotaUaSource(
+                search_urls=settings.robota_ua_urls,
+                reader_base_url=settings.robota_ua_reader_base_url,
+                request_timeout_seconds=settings.robota_ua_request_timeout_seconds,
+                max_pages_per_search=settings.robota_ua_max_pages_per_search,
+                max_items=settings.robota_ua_max_items,
+                remote_only=settings.robota_ua_remote_only,
+                detail_cache_ttl_seconds=settings.robota_ua_detail_cache_ttl_seconds,
+                detail_request_delay_seconds=(settings.robota_ua_detail_request_delay_seconds),
+                retry_attempts=settings.robota_ua_retry_attempts,
             )
         )
     if settings.jobs_cz_source_enabled:

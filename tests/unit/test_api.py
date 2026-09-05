@@ -58,9 +58,18 @@ async def test_health_and_read_only_endpoints(
     assert sources_response.json()[0]["name"] == "mock"
     assert sources_response.json()[0]["last_run_status"] == "succeeded"
     assert sources_response.json()[0]["last_discovered_count"] == 2
+    assert sources_response.json()[0]["last_candidate_count"] == 2
+    assert sources_response.json()[0]["last_filtered_count"] == 0
+    assert sources_response.json()[0]["last_detail_failure_count"] == 0
+    assert sources_response.json()[0]["last_page_count"] == 0
+    assert sources_response.json()[0]["last_limit_reached"] is False
     assert sources_response.json()[0]["last_created_count"] == 2
     assert sources_response.json()[0]["last_updated_count"] == 0
+    assert sources_response.json()[0]["last_duplicate_count"] == 0
+    assert sources_response.json()[0]["last_normalization_error_count"] == 0
+    assert sources_response.json()[0]["last_warning_count"] == 0
     assert sources_response.json()[0]["last_error_count"] == 0
+    assert sources_response.json()[0]["last_coverage_warning"] is None
     assert health_response.headers["x-content-type-options"] == "nosniff"
     assert health_response.headers["x-frame-options"] == "DENY"
     assert health_response.headers["content-security-policy"] == "frame-ancestors 'none'"

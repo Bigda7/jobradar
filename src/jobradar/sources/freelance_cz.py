@@ -93,6 +93,7 @@ class FreelanceCzSource(BaseSource):
         seen: set[str] = set()
         yielded = 0
         for page in range(1, self._max_pages + 1):
+            self.record_page()
             response = await self._request_json(
                 client,
                 "POST",
@@ -104,14 +105,18 @@ class FreelanceCzSource(BaseSource):
                 raise FreelanceCzSourceError(
                     "Freelance.cz search response is missing the projects list."
                 )
+            self.record_candidates(len(projects))
             for summary in projects:
                 if not isinstance(summary, Mapping):
+                    self.record_filtered()
                     continue
                 external_id = _optional_string(summary.get("id"))
                 if external_id is None or external_id in seen:
+                    self.record_filtered()
                     continue
                 seen.add(external_id)
                 if self._remote_only and summary.get("remote") != "remote":
+                    self.record_filtered()
                     continue
                 stable_summary = dict(summary)
                 fingerprint = discovery_fingerprint(stable_summary)
@@ -144,10 +149,13 @@ class FreelanceCzSource(BaseSource):
                     )
                     detail_fetched_at = datetime.now(UTC)
                 if detail.get("visibility") != "online":
+                    self.record_filtered()
                     continue
                 if detail.get("type") != "project_only":
+                    self.record_filtered()
                     continue
                 if self._remote_only and detail.get("remote") != "remote":
+                    self.record_filtered()
                     continue
                 detail["_search_summary"] = stable_summary
                 detail["description_truncated"] = detail.get("descriptionTruncated") is True
@@ -166,6 +174,7 @@ class FreelanceCzSource(BaseSource):
                 )
                 yielded += 1
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
 
             pagination = response.get("pagination")
@@ -174,6 +183,8 @@ class FreelanceCzSource(BaseSource):
             pages_count = _integer(pagination.get("pagesCount"))
             if pages_count is None or page >= pages_count:
                 break
+            if page >= self._max_pages:
+                self.mark_limit_reached()
 
     def _search_body(self, page: int) -> dict[str, Any]:
         return {

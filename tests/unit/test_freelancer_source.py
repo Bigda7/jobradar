@@ -193,6 +193,7 @@ def test_registry_builds_freelancer_source_from_settings() -> None:
         djinni_source_enabled=False,
         freelancer_source_enabled=True,
         workua_source_enabled=False,
+        robota_ua_source_enabled=False,
         jobs_cz_source_enabled=False,
         startupjobs_cz_source_enabled=False,
         prace_cz_source_enabled=False,

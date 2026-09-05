@@ -30,8 +30,8 @@ class HimalayasSource(BaseSource):
         api_url: str = DEFAULT_API_URL,
         request_timeout_seconds: float = 30.0,
         page_size: int = MAX_API_PAGE_SIZE,
-        max_pages: int = 5,
-        max_items: int = 100,
+        max_pages: int = 10,
+        max_items: int = 200,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_url = api_url
@@ -101,17 +101,21 @@ class HimalayasSource(BaseSource):
             if cursor is not None:
                 params["cursor"] = cursor
 
+            self.record_page()
             payload = await self._request_page(client, params)
             jobs = payload.get("jobs")
             if not isinstance(jobs, list):
                 raise HimalayasSourceError("Himalayas response is missing the jobs list.")
+            self.record_candidates(len(jobs))
 
             for item in jobs:
                 if not isinstance(item, dict):
+                    self.record_filtered()
                     continue
                 external_id = _optional_string(item.get("guid"))
                 source_url = _optional_string(item.get("applicationLink"))
                 if external_id is None or source_url is None or external_id in seen:
+                    self.record_filtered()
                     continue
                 seen.add(external_id)
                 yielded += 1
@@ -121,6 +125,7 @@ class HimalayasSource(BaseSource):
                     payload=item,
                 )
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
 
             next_cursor = _optional_string(payload.get("nextCursor"))
