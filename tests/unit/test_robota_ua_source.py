@@ -6,6 +6,7 @@ import pytest
 
 from jobradar.config import Settings
 from jobradar.domain.enums import WorkMode
+from jobradar.domain.normalization import build_content_hash
 from jobradar.sources.base import CachedListing
 from jobradar.sources.registry import build_source_registry
 from jobradar.sources.robota_ua import (
@@ -142,6 +143,8 @@ async def test_robota_ua_source_filters_onsite_jobs_and_normalizes() -> None:
     assert normalized.salary_currency == "UAH"
     assert normalized.salary_period == "month"
     assert normalized.published_at == datetime(2026, 9, 5, tzinfo=UTC)
+    assert listings[0].payload["published_at"] == "2026-09-05T00:00:00+00:00"
+    assert build_content_hash(normalized, listings[0].payload)
 
     metrics = source.consume_run_metrics()
     assert metrics.page_count == 1
