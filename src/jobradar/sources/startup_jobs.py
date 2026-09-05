@@ -39,8 +39,8 @@ class StartupJobsSource(BaseSource):
         role: str = "engineering",
         request_timeout_seconds: float = 30.0,
         page_size: int = 50,
-        max_pages: int = 4,
-        max_items: int = 200,
+        max_pages: int = 10,
+        max_items: int = 500,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key.strip():

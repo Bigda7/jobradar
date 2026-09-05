@@ -28,7 +28,7 @@ class JobicySource(BaseSource):
         api_url: str = DEFAULT_API_URL,
         industry: str = "engineering",
         request_timeout_seconds: float = 30.0,
-        max_items: int = 100,
+        max_items: int = 200,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_url = api_url

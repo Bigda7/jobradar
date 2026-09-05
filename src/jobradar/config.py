@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     )
     freelancer_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     freelancer_page_size: int = Field(default=50, ge=1, le=100)
-    freelancer_max_pages_per_query: int = Field(default=2, ge=1, le=10)
+    freelancer_max_pages_per_query: int = Field(default=3, ge=1, le=10)
     freelancer_poll_interval_seconds: int = Field(default=3600, ge=1800)
     workua_source_enabled: bool = True
     workua_reader_base_url: str = "https://r.jina.ai/http://www.work.ua"
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     )
     workua_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     workua_max_pages_per_search: int = Field(default=2, ge=1, le=5)
-    workua_max_items: int = Field(default=100, ge=1, le=200)
+    workua_max_items: int = Field(default=75, ge=1, le=200)
     workua_remote_only: bool = True
     workua_detail_cache_ttl_seconds: int = Field(default=86400, ge=3600)
     workua_detail_request_delay_seconds: float = Field(default=1.5, ge=0, le=10)
@@ -156,14 +156,14 @@ class Settings(BaseSettings):
     startup_jobs_role: str = "engineering"
     startup_jobs_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     startup_jobs_page_size: int = Field(default=50, ge=1, le=50)
-    startup_jobs_max_pages: int = Field(default=4, ge=1, le=10)
-    startup_jobs_max_items: int = Field(default=200, ge=1, le=500)
+    startup_jobs_max_pages: int = Field(default=10, ge=1, le=10)
+    startup_jobs_max_items: int = Field(default=500, ge=1, le=500)
     startup_jobs_poll_interval_seconds: int = Field(default=21600, ge=3600)
     jobicy_source_enabled: bool = True
     jobicy_api_url: str = "https://jobicy.com/api/v2/remote-jobs"
     jobicy_industry: str = "engineering"
     jobicy_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
-    jobicy_max_items: int = Field(default=100, ge=1, le=100)
+    jobicy_max_items: int = Field(default=200, ge=1, le=200)
     jobicy_poll_interval_seconds: int = Field(default=21600, ge=3600)
     we_work_remotely_source_enabled: bool = True
     we_work_remotely_feed_url: str = (

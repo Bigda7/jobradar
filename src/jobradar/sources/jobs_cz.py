@@ -380,6 +380,7 @@ class _JobsCzDescriptionParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.fallback_description: str | None = None
         self._capture_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -389,6 +390,12 @@ class _JobsCzDescriptionParser(HTMLParser):
             self._capture_depth += 1
         elif normalized_tag == "div" and attributes.get("data-jobad") == "body":
             self._capture_depth = 1
+        elif (
+            normalized_tag == "meta"
+            and (attributes.get("property") or "").casefold() == "og:description"
+            and self.fallback_description is None
+        ):
+            self.fallback_description = _optional_string(attributes.get("content"))
 
     def handle_endtag(self, tag: str) -> None:
         if self._capture_depth and tag.casefold() == "div":
@@ -410,7 +417,7 @@ def parse_jobs_cz_cards(html: str) -> list[JobsCzCard]:
 def parse_jobs_cz_description(html: str) -> str | None:
     parser = _JobsCzDescriptionParser()
     parser.feed(html)
-    return _join_parts(parser.parts) or None
+    return _join_parts(parser.parts) or parser.fallback_description
 
 
 def parse_salary(value: Any) -> tuple[Decimal | None, Decimal | None, str | None]:
