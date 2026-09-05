@@ -165,7 +165,12 @@ class RobotaUaSource(BaseSource):
                     detail_fetched_at = cached.detail_fetched_at
                 else:
                     await polite_delay(self._detail_request_delay_seconds)
-                    detail = await self._fetch_detail(card.url)
+                    try:
+                        detail = await self._fetch_detail(card.url)
+                    except RobotaUaSourceError as error:
+                        self.report_warning(str(error))
+                        self.record_detail_failure()
+                        continue
                     if detail is None:
                         self.record_detail_failure()
                         continue
@@ -272,7 +277,9 @@ class RobotaUaSource(BaseSource):
             )
             response.raise_for_status()
         except httpx.HTTPError as error:
-            raise RobotaUaSourceError(f"Robota.ua reader request failed: {error}") from error
+            raise RobotaUaSourceError(
+                f"Robota.ua reader request failed ({type(error).__name__})."
+            ) from error
         return response.text
 
 
