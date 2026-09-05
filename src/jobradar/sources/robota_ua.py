@@ -364,7 +364,7 @@ def _detail_payload(detail: RobotaUaDetail) -> dict[str, Any]:
         "salary_text": detail.salary_text,
         "location_text": detail.location_text,
         "employment_type": detail.employment_type,
-        "published_at": detail.published_at,
+        "published_at": detail.published_at.isoformat() if detail.published_at else None,
         "is_remote": detail.is_remote,
     }
 
