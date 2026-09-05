@@ -87,6 +87,7 @@ class RemotiveSource(BaseSource):
         params: dict[str, str | int] = {"limit": self._max_items}
         if self._category:
             params["category"] = self._category
+        self.record_page()
         try:
             response = await client.get(self._api_url, params=params)
             response.raise_for_status()
@@ -98,14 +99,19 @@ class RemotiveSource(BaseSource):
         jobs = payload.get("jobs")
         if not isinstance(jobs, list):
             raise RemotiveSourceError("Remotive response is missing the jobs list.")
+        self.record_candidates(len(jobs))
+        if len(jobs) >= self._max_items:
+            self.mark_limit_reached()
 
         seen: set[str] = set()
         for item in jobs[: self._max_items]:
             if not isinstance(item, dict):
+                self.record_filtered()
                 continue
             external_id = _optional_string(item.get("id"))
             source_url = _optional_string(item.get("url"))
             if external_id is None or source_url is None or external_id in seen:
+                self.record_filtered()
                 continue
             seen.add(external_id)
             yield RawListing(

@@ -113,6 +113,7 @@ class DouJobsSource(BaseSource):
         )
 
     async def _fetch_with_client(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
+        self.record_page()
         try:
             response = await client.get(self._feed_url)
             response.raise_for_status()
@@ -122,21 +123,26 @@ class DouJobsSource(BaseSource):
         except (httpx.HTTPError, ElementTree.ParseError, DefusedXmlException) as error:
             raise DouJobsSourceError(f"DOU Jobs RSS request failed: {error}") from error
 
+        items = root.findall("./channel/item")
+        self.record_candidates(len(items))
         seen: set[str] = set()
         yielded = 0
-        for item in root.findall("./channel/item"):
+        for item in items:
             payload = {child.tag: child.text or "" for child in item}
             headline = _decode_html(_optional_string(payload.get("title")) or "")
             description = html_to_text(_optional_string(payload.get("description")) or "")
             if not _is_strict_remote(headline, description):
+                self.record_filtered()
                 continue
             source_url = _optional_string(payload.get("link")) or _optional_string(
                 payload.get("guid")
             )
             if source_url is None:
+                self.record_filtered()
                 continue
             external_id = _external_id(source_url)
             if external_id in seen:
+                self.record_filtered()
                 continue
             seen.add(external_id)
             yield RawListing(
@@ -146,6 +152,7 @@ class DouJobsSource(BaseSource):
             )
             yielded += 1
             if yielded >= self._max_items:
+                self.mark_limit_reached()
                 return
 
 

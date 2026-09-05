@@ -29,7 +29,7 @@ class DjinniSource(BaseSource):
         jobs_url: str = DEFAULT_JOBS_URL,
         remote_only: bool = True,
         request_timeout_seconds: float = 20.0,
-        max_items: int = 50,
+        max_items: int = 100,
         max_pages: int = 10,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -44,8 +44,10 @@ class DjinniSource(BaseSource):
         yielded = 0
         seen_ids: set[str] = set()
         for page_number in range(1, self._max_pages + 1):
+            self.record_page()
             html = await self._fetch_page(page_number)
             postings = parse_job_postings(html)
+            self.record_candidates(len(postings))
             if not postings:
                 if page_number == 1:
                     raise DjinniSourceError("Djinni page did not contain JobPosting JSON-LD data.")
@@ -59,10 +61,12 @@ class DjinniSource(BaseSource):
                 seen_ids.add(raw_listing.external_id)
                 new_ids += 1
                 if self._remote_only and _work_mode(posting) is not WorkMode.REMOTE:
+                    self.record_filtered()
                     continue
                 yield raw_listing
                 yielded += 1
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
 
             if new_ids == 0:

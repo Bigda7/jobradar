@@ -107,6 +107,7 @@ class StartupJobsCzSource(BaseSource):
         for query in self._search_queries:
             query_results: list[dict[str, Any]] = []
             for page in range(1, self._max_pages_per_query + 1):
+                self.record_page()
                 response = await self._request_json(
                     client,
                     "POST",
@@ -119,10 +120,13 @@ class StartupJobsCzSource(BaseSource):
                     raise StartupJobsCzSourceError(
                         "StartupJobs.cz search response is missing the member list."
                     )
+                self.record_candidates(len(members))
                 query_results.extend(item for item in members if isinstance(item, dict))
                 view = response.get("view")
                 if not isinstance(view, Mapping) or not view.get("next"):
                     break
+                if page >= self._max_pages_per_query:
+                    self.mark_limit_reached()
             groups.append(query_results)
 
         seen: set[str] = set()
@@ -130,9 +134,11 @@ class StartupJobsCzSource(BaseSource):
         for summary in _round_robin(groups):
             external_id = _optional_string(summary.get("id"))
             if external_id is None or external_id in seen:
+                self.record_filtered()
                 continue
             seen.add(external_id)
             if self._remote_only and not _summary_is_fully_remote(summary):
+                self.record_filtered()
                 continue
             stable_summary = dict(summary)
             _remove_generated_ids(stable_summary)
@@ -164,8 +170,10 @@ class StartupJobsCzSource(BaseSource):
                 )
                 detail_fetched_at = datetime.now(UTC)
             if detail.get("state") != "published":
+                self.record_filtered()
                 continue
             if self._remote_only and not _detail_is_fully_remote(detail):
+                self.record_filtered()
                 continue
             _remove_generated_ids(detail)
             detail["_search_summary"] = stable_summary
@@ -179,6 +187,7 @@ class StartupJobsCzSource(BaseSource):
             )
             yielded += 1
             if yielded >= self._max_items:
+                self.mark_limit_reached()
                 return
 
     @staticmethod

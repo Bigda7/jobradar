@@ -272,11 +272,20 @@ def create_app(
                 {
                     "last_run_status": latest_run.status,
                     "last_discovered_count": latest_run.discovered_count,
+                    "last_candidate_count": latest_run.candidate_count,
+                    "last_filtered_count": latest_run.filtered_count,
+                    "last_detail_failure_count": latest_run.detail_failure_count,
+                    "last_page_count": latest_run.page_count,
+                    "last_limit_reached": latest_run.limit_reached,
                     "last_created_count": latest_run.created_count,
                     "last_updated_count": latest_run.updated_count,
                     "last_unchanged_count": latest_run.unchanged_count,
+                    "last_duplicate_count": latest_run.duplicate_count,
                     "last_deactivated_count": latest_run.deactivated_count,
+                    "last_normalization_error_count": latest_run.normalization_error_count,
+                    "last_warning_count": latest_run.warning_count,
                     "last_error_count": latest_run.error_count,
+                    "last_coverage_warning": _source_coverage_warning(latest_run),
                 }
                 if latest_run is not None
                 else {}
@@ -391,6 +400,16 @@ app = create_app()
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _source_coverage_warning(run: SourceRun) -> str | None:
+    if run.limit_reached:
+        return "limit_reached"
+    if run.discovered_count == 0 and run.candidate_count > 0:
+        return "all_candidates_filtered"
+    if run.discovered_count == 0:
+        return "empty_result"
+    return None
 
 
 def _normalize_optional_filter(value: str | None, parameter_name: str) -> str | None:

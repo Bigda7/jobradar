@@ -72,6 +72,7 @@ class ArbeitnowSource(BaseSource):
         for page in range(1, self._max_pages + 1):
             if next_url is None or yielded >= self._max_items:
                 return
+            self.record_page()
             try:
                 response = await client.get(next_url, params={"page": page})
                 response.raise_for_status()
@@ -83,13 +84,16 @@ class ArbeitnowSource(BaseSource):
             jobs = payload.get("data")
             if not isinstance(jobs, list):
                 raise ArbeitnowSourceError("Arbeitnow response is missing the data list.")
+            self.record_candidates(len(jobs))
 
             for item in jobs:
                 if not isinstance(item, dict) or item.get("remote") is not True:
+                    self.record_filtered()
                     continue
                 external_id = _optional_string(item.get("slug"))
                 source_url = _optional_string(item.get("url"))
                 if external_id is None or source_url is None or external_id in seen:
+                    self.record_filtered()
                     continue
                 seen.add(external_id)
                 yield RawListing(
@@ -99,10 +103,13 @@ class ArbeitnowSource(BaseSource):
                 )
                 yielded += 1
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
 
             links = payload.get("links")
             next_url = _optional_string(links.get("next")) if isinstance(links, Mapping) else None
+        if next_url is not None:
+            self.mark_limit_reached()
 
 
 def _employment_type(value: Any) -> str | None:

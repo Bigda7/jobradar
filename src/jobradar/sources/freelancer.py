@@ -192,7 +192,8 @@ class FreelancerSource(BaseSource):
         async with self._api_client:
             for query in self._search_queries:
                 offset = 0
-                for _ in range(self._max_pages_per_query):
+                for page_number in range(1, self._max_pages_per_query + 1):
+                    self.record_page()
                     page = await self._api_client.search_active_projects(
                         query,
                         limit=self._page_size,
@@ -200,12 +201,15 @@ class FreelancerSource(BaseSource):
                     )
                     if not page.projects:
                         break
+                    self.record_candidates(len(page.projects))
 
                     for project in page.projects:
                         external_id = _optional_string(project.get("id"))
                         if external_id is None or external_id in seen_ids:
+                            self.record_filtered()
                             continue
                         if _is_local_or_contest(project):
+                            self.record_filtered()
                             continue
 
                         payload = dict(project)
@@ -227,6 +231,8 @@ class FreelancerSource(BaseSource):
                     offset += len(page.projects)
                     if len(page.projects) < self._page_size or offset >= page.total_count:
                         break
+                    if page_number >= self._max_pages_per_query:
+                        self.mark_limit_reached()
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         project = raw_listing.payload

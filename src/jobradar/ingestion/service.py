@@ -39,11 +39,17 @@ class IngestionResult:
     run_id: int
     status: RunStatus
     discovered: int = 0
+    candidates: int = 0
+    filtered: int = 0
+    detail_failures: int = 0
+    pages: int = 0
+    limit_reached: bool = False
     created: int = 0
     updated: int = 0
     unchanged: int = 0
     duplicates: int = 0
     deactivated: int = 0
+    normalization_errors: int = 0
     errors: int = 0
     warnings: list[str] = field(default_factory=list)
 
@@ -98,6 +104,7 @@ class IngestionService:
 
     async def run_source(self, adapter: BaseSource) -> IngestionResult:
         source_id, run_id = await self._start_run(adapter)
+        adapter.begin_run()
         adapter.prime_listing_cache(await self._load_listing_cache(source_id))
         result = IngestionResult(
             source_name=adapter.name,
@@ -113,6 +120,17 @@ class IngestionService:
                 seen_external_ids.add(raw_listing.external_id)
                 try:
                     normalized = adapter.normalize(raw_listing)
+                except Exception as error:
+                    result.normalization_errors += 1
+                    result.errors += 1
+                    logger.exception(
+                        "listing_normalization_failed",
+                        source=adapter.name,
+                        external_id=raw_listing.external_id,
+                        error=redact_sensitive_text(str(error)),
+                    )
+                    continue
+                try:
                     outcome = await self._ingest_listing(source_id, raw_listing, normalized)
                     if outcome == "created":
                         result.created += 1
@@ -140,6 +158,12 @@ class IngestionService:
             )
 
         source_warnings = adapter.consume_warnings()
+        source_metrics = adapter.consume_run_metrics()
+        result.candidates = max(source_metrics.candidate_count, result.discovered)
+        result.filtered = source_metrics.filtered_count
+        result.detail_failures = source_metrics.detail_failure_count
+        result.pages = source_metrics.page_count
+        result.limit_reached = source_metrics.limit_reached
         if source_warnings:
             result.errors += len(source_warnings)
             result.warnings.extend(source_warnings)
@@ -149,6 +173,24 @@ class IngestionService:
                     source=adapter.name,
                     warning=redact_sensitive_text(warning),
                 )
+
+        if result.limit_reached:
+            logger.warning(
+                "source_inventory_limit_reached",
+                source=adapter.name,
+                candidates=result.candidates,
+                discovered=result.discovered,
+                pages=result.pages,
+            )
+        if result.discovered == 0:
+            logger.warning(
+                "source_run_empty",
+                source=adapter.name,
+                candidates=result.candidates,
+                filtered=result.filtered,
+                detail_failures=result.detail_failures,
+                pages=result.pages,
+            )
 
         if terminal_error is None and adapter.deactivate_missing_listings:
             try:
@@ -179,6 +221,11 @@ class IngestionService:
             run_id=run_id,
             status=result.status.value,
             discovered=result.discovered,
+            candidates=result.candidates,
+            filtered=result.filtered,
+            detail_failures=result.detail_failures,
+            pages=result.pages,
+            limit_reached=result.limit_reached,
             created=result.created,
             updated=result.updated,
             unchanged=result.unchanged,
@@ -495,10 +542,18 @@ class IngestionService:
             run.status = result.status.value
             run.finished_at = now
             run.discovered_count = result.discovered
+            run.candidate_count = result.candidates
+            run.filtered_count = result.filtered
+            run.detail_failure_count = result.detail_failures
+            run.page_count = result.pages
+            run.limit_reached = result.limit_reached
             run.created_count = result.created
             run.updated_count = result.updated
             run.unchanged_count = result.unchanged
+            run.duplicate_count = result.duplicates
             run.deactivated_count = result.deactivated
+            run.normalization_error_count = result.normalization_errors
+            run.warning_count = len(result.warnings)
             run.error_count = result.errors
             warning_text = "; ".join(result.warnings)
             error_text = str(terminal_error) if terminal_error else warning_text

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -21,10 +21,19 @@ from jobradar.sources.detail_cache import (
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://www.work.ua"
 DEFAULT_SEARCH_URLS = (
+    "https://www.work.ua/en/jobs-remote-programmer/",
+    "https://www.work.ua/en/jobs-remote-developer/",
+    "https://www.work.ua/en/jobs-remote-junior+developer/",
+    "https://www.work.ua/en/jobs-remote-front-end+developer/",
+    "https://www.work.ua/en/jobs-remote-back-end+developer/",
+    "https://www.work.ua/en/jobs-remote-full-stack+developer/",
     "https://www.work.ua/en/jobs-remote-python/",
     "https://www.work.ua/en/jobs-remote-django/",
+    "https://www.work.ua/en/jobs-remote-fastapi/",
     "https://www.work.ua/en/jobs-remote-react/",
     "https://www.work.ua/en/jobs-remote-javascript/",
+    "https://www.work.ua/en/jobs-remote-typescript/",
+    "https://www.work.ua/en/jobs-remote-node.js/",
     "https://www.work.ua/en/jobs-remote-shopify/",
 )
 USER_AGENT = "JobRadar/0.5 (personal job aggregator)"
@@ -58,7 +67,8 @@ class WorkUaSource(BaseSource):
         search_urls: tuple[str, ...] = DEFAULT_SEARCH_URLS,
         reader_base_url: str = DEFAULT_READER_BASE_URL,
         request_timeout_seconds: float = 30.0,
-        max_items: int = 50,
+        max_pages_per_search: int = 2,
+        max_items: int = 100,
         remote_only: bool = True,
         detail_cache_ttl_seconds: int = 86400,
         detail_request_delay_seconds: float = 0.0,
@@ -68,6 +78,7 @@ class WorkUaSource(BaseSource):
         self._search_urls = search_urls
         self._reader_base_url = reader_base_url.rstrip("/")
         self._request_timeout_seconds = request_timeout_seconds
+        self._max_pages_per_search = max_pages_per_search
         self._max_items = max_items
         self._remote_only = remote_only
         self._detail_cache_ttl_seconds = detail_cache_ttl_seconds
@@ -78,21 +89,31 @@ class WorkUaSource(BaseSource):
     async def fetch(self) -> AsyncIterator[RawListing]:
         seen: set[str] = set()
         yielded = 0
+        successful_search_pages = 0
         card_batches: list[list[WorkUaCard]] = []
         for search_url in self._search_urls:
-            try:
-                cards = await self._fetch_search_cards(search_url)
-            except WorkUaSourceError as error:
-                self.report_warning(str(error))
-                continue
-            if not cards:
-                self.report_warning(
-                    f"Work.ua search page did not contain vacancy cards: {search_url}"
-                )
-                continue
-            card_batches.append(cards)
+            query_ids: set[str] = set()
+            for page_number in range(1, self._max_pages_per_search + 1):
+                page_url = _page_url(search_url, page_number)
+                self.record_page()
+                try:
+                    cards = await self._fetch_search_cards(page_url)
+                except WorkUaSourceError as error:
+                    self.report_warning(str(error))
+                    break
+                successful_search_pages += 1
+                self.record_candidates(len(cards))
+                if not cards:
+                    break
+                new_cards = [card for card in cards if card.external_id not in query_ids]
+                if not new_cards:
+                    break
+                query_ids.update(card.external_id for card in new_cards)
+                card_batches.append(new_cards)
 
         if not card_batches:
+            if successful_search_pages:
+                raise WorkUaSourceError("Configured Work.ua searches returned no vacancy cards.")
             raise WorkUaSourceError("Every configured Work.ua search page failed.")
 
         for cards in card_batches:
@@ -101,6 +122,7 @@ class WorkUaSource(BaseSource):
                     continue
                 seen.add(card.external_id)
                 if self._remote_only and not _is_remote(card.location_text):
+                    self.record_filtered()
                     continue
                 discovery_payload = _card_payload(card)
                 fingerprint = discovery_fingerprint(discovery_payload)
@@ -124,6 +146,7 @@ class WorkUaSource(BaseSource):
                     await polite_delay(self._detail_request_delay_seconds)
                     description = await self._fetch_description(card.url)
                     if description is None:
+                        self.record_detail_failure()
                         continue
                     detail_fetched_at = datetime.now(UTC)
                 yield RawListing(
@@ -134,6 +157,7 @@ class WorkUaSource(BaseSource):
                 )
                 yielded += 1
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
 
     async def _fetch_search_cards(self, search_url: str) -> list[WorkUaCard]:
@@ -467,6 +491,17 @@ def _reader_url(reader_base_url: str, search_url: str) -> str:
     if not target.startswith("/"):
         raise WorkUaSourceError(f"Unsupported Work.ua search URL: {search_url}")
     return f"{reader_base_url}{target}"
+
+
+def _page_url(search_url: str, page_number: int) -> str:
+    if page_number <= 1:
+        return search_url
+    parsed = urlsplit(search_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page_number)
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
 
 
 def _is_remote(value: str | None) -> bool:

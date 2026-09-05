@@ -10,6 +10,7 @@ from jobradar.sources.himalayas import HimalayasSource
 from jobradar.sources.jobs_cz import JobsCzSource
 from jobradar.sources.lever import LeverSource
 from jobradar.sources.mock import MockSource
+from jobradar.sources.robota_ua import RobotaUaSource
 from jobradar.sources.the_muse import TheMuseSource
 from jobradar.sources.workua import WorkUaSource
 
@@ -25,6 +26,7 @@ __all__ = [
     "JobsCzSource",
     "LeverSource",
     "MockSource",
+    "RobotaUaSource",
     "TheMuseSource",
     "WorkUaSource",
 ]

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     djinni_jobs_url: str = "https://djinni.co/jobs/l-nonhr/remote/"
     djinni_remote_only: bool = True
     djinni_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    djinni_max_items: int = Field(default=50, ge=1, le=100)
+    djinni_max_items: int = Field(default=100, ge=1, le=200)
     djinni_max_pages: int = Field(default=10, ge=1, le=20)
     djinni_poll_interval_seconds: int = Field(default=3600, ge=1800)
     freelancer_source_enabled: bool = False
@@ -51,19 +51,48 @@ class Settings(BaseSettings):
     workua_source_enabled: bool = True
     workua_reader_base_url: str = "https://r.jina.ai/http://www.work.ua"
     workua_search_urls: str = (
+        "https://www.work.ua/en/jobs-remote-programmer/;"
+        "https://www.work.ua/en/jobs-remote-developer/;"
+        "https://www.work.ua/en/jobs-remote-junior+developer/;"
+        "https://www.work.ua/en/jobs-remote-front-end+developer/;"
+        "https://www.work.ua/en/jobs-remote-back-end+developer/;"
+        "https://www.work.ua/en/jobs-remote-full-stack+developer/;"
         "https://www.work.ua/en/jobs-remote-python/;"
         "https://www.work.ua/en/jobs-remote-django/;"
+        "https://www.work.ua/en/jobs-remote-fastapi/;"
         "https://www.work.ua/en/jobs-remote-react/;"
         "https://www.work.ua/en/jobs-remote-javascript/;"
+        "https://www.work.ua/en/jobs-remote-typescript/;"
+        "https://www.work.ua/en/jobs-remote-node.js/;"
         "https://www.work.ua/en/jobs-remote-shopify/"
     )
     workua_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
-    workua_max_items: int = Field(default=50, ge=1, le=100)
+    workua_max_pages_per_search: int = Field(default=2, ge=1, le=5)
+    workua_max_items: int = Field(default=100, ge=1, le=200)
     workua_remote_only: bool = True
     workua_detail_cache_ttl_seconds: int = Field(default=86400, ge=3600)
     workua_detail_request_delay_seconds: float = Field(default=1.5, ge=0, le=10)
     workua_retry_attempts: int = Field(default=2, ge=1, le=3)
     workua_poll_interval_seconds: int = Field(default=21600, ge=3600)
+    robota_ua_source_enabled: bool = True
+    robota_ua_reader_base_url: str = "https://r.jina.ai/http://robota.ua"
+    robota_ua_search_urls: str = (
+        "https://robota.ua/zapros/developer-remote/ukraine;"
+        "https://robota.ua/zapros/junior-developer-remote/ukraine;"
+        "https://robota.ua/zapros/frontend-developer-remote/ukraine;"
+        "https://robota.ua/zapros/backend-developer-remote/ukraine;"
+        "https://robota.ua/zapros/full-stack-developer-remote/ukraine;"
+        "https://robota.ua/zapros/python-remote/ukraine;"
+        "https://robota.ua/zapros/react-remote/ukraine"
+    )
+    robota_ua_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    robota_ua_max_pages_per_search: int = Field(default=2, ge=1, le=5)
+    robota_ua_max_items: int = Field(default=100, ge=1, le=200)
+    robota_ua_remote_only: bool = True
+    robota_ua_detail_cache_ttl_seconds: int = Field(default=86400, ge=3600)
+    robota_ua_detail_request_delay_seconds: float = Field(default=1.5, ge=0, le=10)
+    robota_ua_retry_attempts: int = Field(default=2, ge=1, le=3)
+    robota_ua_poll_interval_seconds: int = Field(default=21600, ge=3600)
     jobs_cz_source_enabled: bool = True
     jobs_cz_search_urls: str = (
         "https://www.jobs.cz/prace/?q%5B0%5D=Python&arrangement=work-mostly-from-home;"
@@ -126,8 +155,8 @@ class Settings(BaseSettings):
     startup_jobs_role: str = "engineering"
     startup_jobs_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     startup_jobs_page_size: int = Field(default=50, ge=1, le=50)
-    startup_jobs_max_pages: int = Field(default=2, ge=1, le=10)
-    startup_jobs_max_items: int = Field(default=100, ge=1, le=500)
+    startup_jobs_max_pages: int = Field(default=4, ge=1, le=10)
+    startup_jobs_max_items: int = Field(default=200, ge=1, le=500)
     startup_jobs_poll_interval_seconds: int = Field(default=21600, ge=3600)
     jobicy_source_enabled: bool = True
     jobicy_api_url: str = "https://jobicy.com/api/v2/remote-jobs"
@@ -151,8 +180,8 @@ class Settings(BaseSettings):
     himalayas_api_url: str = "https://himalayas.app/jobs/api"
     himalayas_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     himalayas_page_size: int = Field(default=20, ge=1, le=20)
-    himalayas_max_pages: int = Field(default=5, ge=1, le=25)
-    himalayas_max_items: int = Field(default=100, ge=1, le=500)
+    himalayas_max_pages: int = Field(default=10, ge=1, le=25)
+    himalayas_max_items: int = Field(default=200, ge=1, le=500)
     himalayas_poll_interval_seconds: int = Field(default=86400, ge=86400)
     the_muse_source_enabled: bool = False
     the_muse_api_url: str = "https://www.themuse.com/api/public/jobs"
@@ -161,8 +190,8 @@ class Settings(BaseSettings):
     the_muse_levels: str = "Entry Level;Mid Level"
     the_muse_location: str = "Flexible / Remote"
     the_muse_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
-    the_muse_max_pages: int = Field(default=5, ge=1, le=25)
-    the_muse_max_items: int = Field(default=100, ge=1, le=500)
+    the_muse_max_pages: int = Field(default=10, ge=1, le=25)
+    the_muse_max_items: int = Field(default=200, ge=1, le=500)
     the_muse_poll_interval_seconds: int = Field(default=21600, ge=21600)
     ats_source_enabled: bool = False
     ats_companies_file: str = "companies.yaml"
@@ -187,6 +216,7 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: int | None = None
     telegram_notify_existing: bool = False
+    telegram_source_health_alerts_enabled: bool = True
     telegram_max_messages_per_cycle: int = Field(default=3, ge=1, le=20)
     telegram_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     telegram_polling_enabled: bool = False
@@ -322,6 +352,10 @@ class Settings(BaseSettings):
         return tuple(url.strip() for url in self.workua_search_urls.split(";") if url.strip())
 
     @property
+    def robota_ua_urls(self) -> tuple[str, ...]:
+        return tuple(url.strip() for url in self.robota_ua_search_urls.split(";") if url.strip())
+
+    @property
     def jobs_cz_urls(self) -> tuple[str, ...]:
         return tuple(url.strip() for url in self.jobs_cz_search_urls.split(";") if url.strip())
 
@@ -352,6 +386,14 @@ class Settings(BaseSettings):
         if self.workua_source_enabled and not self.workua_urls:
             raise ValueError(
                 "WORKUA_SEARCH_URLS must contain at least one URL when the source is enabled."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_robota_ua_configuration(self) -> "Settings":
+        if self.robota_ua_source_enabled and not self.robota_ua_urls:
+            raise ValueError(
+                "ROBOTA_UA_SEARCH_URLS must contain at least one URL when the source is enabled."
             )
         return self
 
@@ -414,6 +456,7 @@ class Settings(BaseSettings):
             "djinni": self.djinni_poll_interval_seconds,
             "freelancer": self.freelancer_poll_interval_seconds,
             "workua": self.workua_poll_interval_seconds,
+            "robota_ua": self.robota_ua_poll_interval_seconds,
             "jobs_cz": self.jobs_cz_poll_interval_seconds,
             "startupjobs_cz": self.startupjobs_cz_poll_interval_seconds,
             "prace_cz": self.prace_cz_poll_interval_seconds,

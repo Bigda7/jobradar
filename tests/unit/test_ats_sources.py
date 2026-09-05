@@ -229,6 +229,7 @@ companies:
         djinni_source_enabled=False,
         freelancer_source_enabled=False,
         workua_source_enabled=False,
+        robota_ua_source_enabled=False,
         jobs_cz_source_enabled=False,
         startupjobs_cz_source_enabled=False,
         prace_cz_source_enabled=False,

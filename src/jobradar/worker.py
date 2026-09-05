@@ -14,6 +14,7 @@ from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
 from jobradar.notifications.currency import NbuExchangeRateClient
 from jobradar.notifications.service import NotificationService
+from jobradar.notifications.source_health import SourceHealthAlertService
 from jobradar.notifications.telegram import TelegramClient
 from jobradar.opportunities.expiration import StaleExpirationService
 from jobradar.sources.registry import build_source_registry
@@ -34,6 +35,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         reconciliation_max_missing_ratio=settings.source_reconciliation_max_missing_ratio,
     )
     sources = build_source_registry(settings)
+    completed_run_ids: list[int] = []
     await ingestion.synchronize_enabled_sources(sources)
     for source in sources:
         poll_interval_seconds = settings.source_poll_interval_seconds(source.name)
@@ -43,7 +45,8 @@ async def run_cycle(*, force_sources: bool = False) -> None:
             jitter_ratio=settings.source_poll_jitter_ratio,
             now=cycle_started_at,
         ):
-            await ingestion.run_source(source)
+            result = await ingestion.run_source(source)
+            completed_run_ids.append(result.run_id)
         else:
             logger.info(
                 "source_run_skipped_not_due",
@@ -51,6 +54,20 @@ async def run_cycle(*, force_sources: bool = False) -> None:
                 poll_interval_seconds=poll_interval_seconds,
                 jitter_ratio=settings.source_poll_jitter_ratio,
             )
+
+    telegram_client: TelegramClient | None = None
+    if settings.telegram_enabled:
+        if settings.telegram_bot_token is None or settings.telegram_chat_id is None:
+            raise RuntimeError("Telegram is enabled without complete credentials.")
+        telegram_client = TelegramClient(
+            bot_token=settings.telegram_bot_token.get_secret_value(),
+            chat_id=settings.telegram_chat_id,
+            request_timeout_seconds=settings.telegram_request_timeout_seconds,
+        )
+        if settings.telegram_source_health_alerts_enabled:
+            source_alerts = SourceHealthAlertService(session_factory, telegram_client)
+            for run_id in completed_run_ids:
+                await source_alerts.process_run(run_id)
 
     expiration_summary = await StaleExpirationService(session_factory).expire_stale(
         employment_days=settings.employment_stale_after_days,
@@ -78,15 +95,8 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         unchanged=matching_summary.unchanged,
     )
 
-    if not settings.telegram_enabled:
+    if telegram_client is None:
         return
-    if settings.telegram_bot_token is None or settings.telegram_chat_id is None:
-        raise RuntimeError("Telegram is enabled without complete credentials.")
-    telegram_client = TelegramClient(
-        bot_token=settings.telegram_bot_token.get_secret_value(),
-        chat_id=settings.telegram_chat_id,
-        request_timeout_seconds=settings.telegram_request_timeout_seconds,
-    )
     notification_summary = await NotificationService(
         session_factory,
         telegram_client,

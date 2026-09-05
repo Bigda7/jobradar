@@ -88,6 +88,22 @@ class AvailabilityMockSource(MockSource):
             yield listing.model_copy(update={"is_available": self._is_available})
 
 
+class CoverageMockSource(MockSource):
+    async def fetch(self):  # type: ignore[no-untyped-def]
+        self.record_page(2)
+        self.record_candidates(5)
+        self.record_filtered(2)
+        self.record_detail_failure()
+        self.mark_limit_reached()
+        async for listing in super().fetch():
+            yield listing
+
+
+class NormalizationFailingMockSource(MockSource):
+    def normalize(self, raw_listing):  # type: ignore[no-untyped-def]
+        raise ValueError(f"Invalid listing {raw_listing.external_id}")
+
+
 @pytest.mark.asyncio
 async def test_repeated_run_is_idempotent(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
@@ -109,6 +125,51 @@ async def test_repeated_run_is_idempotent(
         assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2
         assert await session.scalar(select(func.count()).select_from(Listing)) == 2
         assert await session.scalar(select(func.count()).select_from(SourceRun)) == 2
+
+
+@pytest.mark.asyncio
+async def test_source_coverage_metrics_are_persisted(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    result = await IngestionService(sqlite_session_factory).run_source(CoverageMockSource())
+
+    assert result.candidates == 5
+    assert result.filtered == 2
+    assert result.detail_failures == 1
+    assert result.pages == 2
+    assert result.limit_reached is True
+
+    async with sqlite_session_factory() as session:
+        run = await session.scalar(select(SourceRun))
+        assert run is not None
+        assert run.candidate_count == 5
+        assert run.filtered_count == 2
+        assert run.detail_failure_count == 1
+        assert run.page_count == 2
+        assert run.limit_reached is True
+        assert run.duplicate_count == 0
+        assert run.normalization_error_count == 0
+        assert run.warning_count == 0
+
+
+@pytest.mark.asyncio
+async def test_normalization_failures_are_counted_separately(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    result = await IngestionService(sqlite_session_factory).run_source(
+        NormalizationFailingMockSource()
+    )
+
+    assert result.status is RunStatus.PARTIAL
+    assert result.discovered == 2
+    assert result.normalization_errors == 2
+    assert result.errors == 2
+
+    async with sqlite_session_factory() as session:
+        run = await session.scalar(select(SourceRun))
+        assert run is not None
+        assert run.normalization_error_count == 2
+        assert run.error_count == 2
 
 
 @pytest.mark.asyncio

@@ -87,14 +87,20 @@ class JobicySource(BaseSource):
         jobs = payload.get("jobs")
         if not isinstance(jobs, list):
             raise JobicySourceError("Jobicy response is missing the jobs list.")
+        self.record_page()
+        self.record_candidates(len(jobs))
+        if len(jobs) >= self._max_items:
+            self.mark_limit_reached()
 
         seen: set[str] = set()
         for item in jobs:
             if not isinstance(item, dict):
+                self.record_filtered()
                 continue
             external_id = _optional_string(item.get("id"))
             source_url = _optional_string(item.get("url"))
             if external_id is None or source_url is None or external_id in seen:
+                self.record_filtered()
                 continue
             seen.add(external_id)
             yield RawListing(

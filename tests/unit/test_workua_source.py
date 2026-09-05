@@ -89,6 +89,7 @@ async def test_workua_source_keeps_remote_jobs_and_normalizes() -> None:
         source = WorkUaSource(
             search_urls=("https://www.work.ua/en/jobs-remote-python/",),
             reader_base_url="https://reader.test",
+            max_pages_per_search=1,
             client=client,
         )
         listings = [listing async for listing in source.fetch()]
@@ -126,6 +127,7 @@ async def test_workua_source_reuses_cached_detail_for_an_unchanged_card() -> Non
         source = WorkUaSource(
             search_urls=("https://www.work.ua/en/jobs-remote-python/",),
             reader_base_url="https://reader.test",
+            max_pages_per_search=1,
             client=client,
         )
         first = [listing async for listing in source.fetch()]
@@ -165,6 +167,7 @@ async def test_workua_source_retries_one_rate_limited_detail_request() -> None:
         source = WorkUaSource(
             search_urls=("https://www.work.ua/en/jobs-remote-python/",),
             reader_base_url="https://reader.test",
+            max_pages_per_search=1,
             retry_attempts=2,
             client=client,
         )
@@ -196,6 +199,7 @@ async def test_workua_source_continues_when_one_search_page_is_empty() -> None:
                 "https://www.work.ua/en/jobs-remote-python/",
             ),
             reader_base_url="https://reader.test",
+            max_pages_per_search=1,
             retry_attempts=2,
             client=client,
         )
@@ -203,7 +207,41 @@ async def test_workua_source_continues_when_one_search_page_is_empty() -> None:
 
     assert len(listings) == 1
     assert empty_attempts == 2
-    assert source.consume_warnings() == (
-        "Work.ua search page did not contain vacancy cards: "
-        "https://www.work.ua/en/jobs-remote-empty/",
+    assert source.consume_warnings() == ()
+
+
+@pytest.mark.asyncio
+async def test_workua_source_paginates_and_reports_coverage_metrics() -> None:
+    second_page = (
+        SEARCH_PAGE.replace("8441545", "8441550")
+        .replace("Office Developer", "Remote React Developer")
+        .replace("Office Corp", "Remote Corp")
+        .replace(", Kyiv", ", Remote")
     )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/en/jobs-remote-programmer/":
+            if request.url.params.get("page") == "2":
+                return httpx.Response(200, text=second_page)
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.url.path in {"/en/jobs/8441545/", "/en/jobs/8441550/"}:
+            return httpx.Response(200, text=DETAIL_PAGE)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-programmer/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=2,
+            max_items=2,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    metrics = source.consume_run_metrics()
+    assert [listing.external_id for listing in listings] == ["8441545", "8441550"]
+    assert metrics.page_count == 2
+    assert metrics.candidate_count == 4
+    assert metrics.filtered_count == 1
+    assert metrics.detail_failure_count == 0
+    assert metrics.limit_reached is True

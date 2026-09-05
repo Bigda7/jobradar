@@ -55,8 +55,8 @@ class TheMuseSource(BaseSource):
         levels: Sequence[str] = ("Entry Level", "Mid Level"),
         location: str = "Flexible / Remote",
         request_timeout_seconds: float = 30.0,
-        max_pages: int = 5,
-        max_items: int = 100,
+        max_pages: int = 10,
+        max_items: int = 200,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_url = api_url
@@ -113,17 +113,21 @@ class TheMuseSource(BaseSource):
         for page in range(self._max_pages):
             if yielded >= self._max_items:
                 return
+            self.record_page()
             payload = await self._request_page(client, page)
             jobs = payload.get("results")
             if not isinstance(jobs, list):
                 raise TheMuseSourceError("The Muse response is missing the results list.")
+            self.record_candidates(len(jobs))
 
             for item in jobs:
                 if not isinstance(item, dict) or not _is_remote(item.get("locations")):
+                    self.record_filtered()
                     continue
                 external_id = _optional_string(item.get("id"))
                 source_url = _source_url(item.get("refs"))
                 if external_id is None or source_url is None or external_id in seen:
+                    self.record_filtered()
                     continue
                 seen.add(external_id)
                 yielded += 1
@@ -133,6 +137,7 @@ class TheMuseSource(BaseSource):
                     payload=item,
                 )
                 if yielded >= self._max_items:
+                    self.mark_limit_reached()
                     return
 
             page_count = _integer(payload.get("page_count"))

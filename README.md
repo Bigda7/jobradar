@@ -18,7 +18,7 @@ APIs.
 
 ## Portfolio Highlights
 
-- Integrates 18 employment, freelance, RSS, structured-data, and public ATS sources behind a common adapter contract.
+- Integrates 19 employment, freelance, RSS, structured-data, and public ATS sources behind a common adapter contract.
 - Uses idempotent ingestion, content hashes, canonical records, a 30-day archive lifecycle, and cross-source deduplication.
 - Produces explainable match scores with persisted reasons, concerns, rule versions, and content-aware notification idempotency.
 - Runs FastAPI, PostgreSQL 17, the worker, and Telegram bot as hardened Docker Compose services on an ARM64 AWS EC2 instance.
@@ -28,7 +28,7 @@ APIs.
 
 ## Architectural Evolution: Personal Engine to SaaS v2
 
-- **v1.0 (Current Live Repository):** Built as a personal dogfooding platform to automate high-signal opportunity discovery across 18 remote channels. Battle-tested in production to validate ingestion reliability, deduplication heuristics, and automated AWS EC2/S3 operational pipelines.
+- **v1.0 (Current Live Repository):** Built as a personal dogfooding platform to automate high-signal opportunity discovery across 19 remote channels. Battle-tested in production to validate ingestion reliability, deduplication heuristics, and automated AWS EC2/S3 operational pipelines.
 - **v2.0 (In Active Private Staging):** Multi-tenant SaaS evolution featuring tenant data isolation, per-user custom scoring profiles & negative skill filters, session auth & CSRF protection, server-persisted Kanban pipeline, and per-user Telegram alert routing.
 
 ## Architecture
@@ -73,6 +73,7 @@ All adapters implement `BaseSource` and remain independent of API and notificati
 | Djinni | public JSON-LD | employment |
 | Freelancer.com | official API | freelance |
 | Work.ua | public pages through a read-only text reader | employment |
+| Robota.ua | public pages through a read-only text reader | employment |
 | Jobs.cz | public HTML and JSON-LD | employment |
 | StartupJobs.cz | public JSON endpoints | employment |
 | Prace.cz | public HTML and JSON-LD | employment |

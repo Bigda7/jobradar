@@ -101,8 +101,10 @@ class JobsCzSource(BaseSource):
     async def fetch(self) -> AsyncIterator[RawListing]:
         card_groups: list[list[JobsCzCard]] = []
         for search_url in self._search_urls:
+            self.record_page()
             html = await self._fetch_page(search_url)
             cards = parse_jobs_cz_cards(html)
+            self.record_candidates(len(cards))
             card_groups.append(cards)
         if not any(card_groups):
             raise JobsCzSourceError("Jobs.cz search pages did not contain any vacancy cards.")
@@ -117,6 +119,7 @@ class JobsCzSource(BaseSource):
                 _is_hybrid_remote(card.arrangement)
                 or not _has_strict_remote_marker(card.title, card.arrangement)
             ):
+                self.record_filtered()
                 continue
 
             discovery_payload = _card_payload(card)
@@ -141,6 +144,7 @@ class JobsCzSource(BaseSource):
                 await polite_delay(self._detail_request_delay_seconds)
                 description = await self._fetch_description(card.url)
                 if description is None:
+                    self.record_detail_failure()
                     continue
                 detail_fetched_at = datetime.now(UTC)
             if description is None:
@@ -149,6 +153,7 @@ class JobsCzSource(BaseSource):
                 _has_hybrid_marker(description)
                 or not _has_strict_remote_marker(card.title, card.arrangement, description)
             ):
+                self.record_filtered()
                 continue
             yield RawListing(
                 external_id=card.external_id,
@@ -158,6 +163,7 @@ class JobsCzSource(BaseSource):
             )
             yielded += 1
             if yielded >= self._max_items:
+                self.mark_limit_reached()
                 return
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
