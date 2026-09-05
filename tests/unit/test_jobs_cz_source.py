@@ -47,6 +47,17 @@ DETAIL_PAGE = """
 </body></html>
 """
 
+BRANDED_DETAIL_PAGE = """
+<html><head>
+<meta property="og:description"
+  content="Build Python and React services in a fully remote engineering role.">
+<meta name="description" content="Generic company careers page.">
+</head><body>
+<div id="vacancy-detail"><div class="loader"></div></div>
+<div>Unrelated page footer</div>
+</body></html>
+"""
+
 
 def test_jobs_cz_html_parser_extracts_cards() -> None:
     cards = parse_jobs_cz_cards(SEARCH_PAGE)
@@ -69,6 +80,12 @@ def test_jobs_cz_detail_parser_extracts_only_vacancy_body() -> None:
     assert "Python, Django and React" in description
     assert "Build REST APIs" in description
     assert "Unrelated page footer" not in description
+
+
+def test_jobs_cz_detail_parser_uses_vacancy_metadata_for_branded_page() -> None:
+    description = parse_jobs_cz_description(BRANDED_DETAIL_PAGE)
+
+    assert description == "Build Python and React services in a fully remote engineering role."
 
 
 def test_jobs_cz_salary_parser_handles_czk_range() -> None:

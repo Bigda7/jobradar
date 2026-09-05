@@ -82,3 +82,14 @@ def test_production_accepts_complete_secure_configuration() -> None:
     )
 
     assert settings.app_env == "production"
+
+
+def test_source_coverage_defaults_use_audited_balanced_limits() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.djinni_max_items == 100
+    assert settings.freelancer_max_pages_per_query == 3
+    assert settings.workua_max_items == 75
+    assert settings.startup_jobs_max_pages == 10
+    assert settings.startup_jobs_max_items == 500
+    assert settings.jobicy_max_items == 200

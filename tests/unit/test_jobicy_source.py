@@ -46,7 +46,7 @@ async def test_jobicy_source_requests_engineering_jobs_and_normalizes_full_descr
         listings = [listing async for listing in source.fetch()]
 
     assert len(requests) == 1
-    assert requests[0].url.params["count"] == "100"
+    assert requests[0].url.params["count"] == "200"
     assert requests[0].url.params["industry"] == "engineering"
     assert len(listings) == 1
     assert listings[0].external_id == "151391"

@@ -172,7 +172,7 @@ class FreelancerSource(BaseSource):
         search_queries: Sequence[str],
         web_base_url: str = DEFAULT_WEB_BASE_URL,
         page_size: int = 50,
-        max_pages_per_query: int = 2,
+        max_pages_per_query: int = 3,
     ) -> None:
         queries = tuple(query.strip() for query in search_queries if query.strip())
         if not queries:

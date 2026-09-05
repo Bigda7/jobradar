@@ -146,6 +146,21 @@ async def test_the_muse_uses_remote_filters_pagination_and_normalizes_fields() -
     assert source.normalize(listings[1]).location_text == "Prague, Czechia"
 
 
+def test_the_muse_compacts_large_remote_location_lists() -> None:
+    source = TheMuseSource()
+    locations = [
+        {"name": "Flexible / Remote"},
+        *[{"name": f"Location {index} with a descriptive regional name"} for index in range(100)],
+    ]
+
+    candidate = _candidate(source, _job(locations=locations))
+
+    assert candidate.location_text is not None
+    assert len(candidate.location_text) <= 500
+    assert candidate.location_text.startswith("Location 0")
+    assert candidate.location_text.endswith("+95 more locations")
+
+
 def test_the_muse_structured_tags_and_entry_level_contribute_to_scoring() -> None:
     source = TheMuseSource()
 

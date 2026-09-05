@@ -68,7 +68,7 @@ class WorkUaSource(BaseSource):
         reader_base_url: str = DEFAULT_READER_BASE_URL,
         request_timeout_seconds: float = 30.0,
         max_pages_per_search: int = 2,
-        max_items: int = 100,
+        max_items: int = 75,
         remote_only: bool = True,
         detail_cache_ttl_seconds: int = 86400,
         detail_request_delay_seconds: float = 0.0,

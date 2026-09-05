@@ -15,6 +15,8 @@ from jobradar.sources.structured_data import html_to_text
 DEFAULT_API_URL = "https://www.themuse.com/api/public/jobs"
 USER_AGENT = "JobRadar/1.5 (personal job aggregator)"
 API_PAGE_SIZE = 20
+MAX_LOCATION_TEXT_LENGTH = 500
+MAX_DISPLAYED_LOCATIONS = 5
 REMOTE_LOCATION_NAMES = frozenset({"flexible / remote", "remote / flexible", "remote"})
 SALARY_PATTERN = re.compile(
     r"(?:(?P<label>base\s+(?:pay|salary)|salary|compensation)\s*(?:range)?\s*:?\s*)?"
@@ -251,7 +253,19 @@ def _employment_type(description: str) -> str | None:
 def _location_text(value: Any) -> str:
     names = _location_names(value)
     physical_locations = [name for name in names if name.casefold() not in REMOTE_LOCATION_NAMES]
-    return "; ".join(physical_locations) if physical_locations else "Remote"
+    if not physical_locations:
+        return "Remote"
+
+    location_text = "; ".join(physical_locations)
+    if len(location_text) <= MAX_LOCATION_TEXT_LENGTH:
+        return location_text
+
+    displayed_locations = physical_locations[:MAX_DISPLAYED_LOCATIONS]
+    omitted_count = len(physical_locations) - len(displayed_locations)
+    suffix = f"; +{omitted_count} more locations" if omitted_count else ""
+    prefix = "; ".join(displayed_locations)
+    prefix = prefix[: MAX_LOCATION_TEXT_LENGTH - len(suffix)].rstrip(" ;")
+    return f"{prefix}{suffix}" if prefix else "Remote"
 
 
 def _is_remote(value: Any) -> bool:
