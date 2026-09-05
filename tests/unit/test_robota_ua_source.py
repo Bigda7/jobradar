@@ -190,6 +190,33 @@ async def test_robota_ua_source_uses_platform_pagination_and_detail_cache() -> N
     assert second[0].detail_fetched_at == first[0].detail_fetched_at
 
 
+@pytest.mark.asyncio
+async def test_robota_ua_source_continues_after_one_detail_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/zapros/python-remote/ukraine":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.url.path == "/company123/vacancy111":
+            raise httpx.ReadTimeout("detail timed out", request=request)
+        if request.url.path == "/company456/vacancy222":
+            return httpx.Response(200, text=DETAIL_PAGE)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            search_urls=("https://robota.ua/zapros/python-remote/ukraine",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            retry_attempts=1,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in listings] == ["222"]
+    metrics = source.consume_run_metrics()
+    assert metrics.detail_failure_count == 1
+    assert source.consume_warnings() == ("Robota.ua reader request failed (ReadTimeout).",)
+
+
 def test_registry_builds_robota_ua_with_safe_poll_interval() -> None:
     settings = Settings(
         _env_file=None,
