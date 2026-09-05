@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     workua_poll_interval_seconds: int = Field(default=21600, ge=3600)
     robota_ua_source_enabled: bool = True
     robota_ua_reader_base_url: str = "https://r.jina.ai/http://robota.ua"
+    robota_ua_api_reader_base_url: str = "https://r.jina.ai/http://api.robota.ua"
     robota_ua_search_urls: str = (
         "https://robota.ua/zapros/developer-remote/ukraine;"
         "https://robota.ua/zapros/junior-developer-remote/ukraine;"

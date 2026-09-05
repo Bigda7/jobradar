@@ -70,6 +70,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
             RobotaUaSource(
                 search_urls=settings.robota_ua_urls,
                 reader_base_url=settings.robota_ua_reader_base_url,
+                api_reader_base_url=settings.robota_ua_api_reader_base_url,
                 request_timeout_seconds=settings.robota_ua_request_timeout_seconds,
                 max_pages_per_search=settings.robota_ua_max_pages_per_search,
                 max_items=settings.robota_ua_max_items,
