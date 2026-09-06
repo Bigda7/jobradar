@@ -43,6 +43,8 @@ class Source(TimestampMixin, Base):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     failure_alert_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    coverage_alert_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    coverage_alert_reason: Mapped[str | None] = mapped_column(String(50))
 
     runs: Mapped[list["SourceRun"]] = relationship(back_populates="source")
     listings: Mapped[list["Listing"]] = relationship(back_populates="source")
