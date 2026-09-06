@@ -70,6 +70,7 @@ async def _create_run(
     error_message: str | None = None,
     candidate_count: int = 0,
     discovered_count: int = 0,
+    limit_reached: bool = False,
 ) -> int:
     async with session_factory() as session, session.begin():
         run = SourceRun(
@@ -80,6 +81,7 @@ async def _create_run(
             error_message=error_message,
             candidate_count=candidate_count,
             discovered_count=discovered_count,
+            limit_reached=limit_reached,
         )
         session.add(run)
         source = await session.get(Source, source_id)
@@ -188,3 +190,122 @@ async def test_failed_source_alert_delivery_is_retried(
     assert retry_result.event == "failure"
     assert retry_result.sent is True
     assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_source_health_alerts_on_new_repeated_limit_and_recovery(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=started_at)
+    telegram = RecordingTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    for offset in range(2):
+        run_id = await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.SUCCEEDED,
+            started_at=started_at + timedelta(hours=offset),
+            candidate_count=200,
+            discovered_count=100,
+            limit_reached=True,
+        )
+        result = await service.process_run(run_id)
+        assert result.event is None
+
+    third_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=started_at + timedelta(hours=2),
+        candidate_count=200,
+        discovered_count=100,
+        limit_reached=True,
+    )
+    issue_result = await service.process_run(third_run_id)
+    duplicate_result = await service.process_run(third_run_id)
+
+    assert issue_result.event == "coverage_issue"
+    assert issue_result.sent is True
+    assert duplicate_result.event is None
+    assert len(telegram.messages) == 1
+    assert "Неполное покрытие источника: Work.ua" in telegram.messages[0]
+    assert "Три последних запуска достигли настроенного предела выдачи." in telegram.messages[0]
+
+    recovery_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=started_at + timedelta(hours=3),
+        candidate_count=82,
+        discovered_count=67,
+        limit_reached=False,
+    )
+    recovery_result = await service.process_run(recovery_run_id)
+
+    assert recovery_result.event == "coverage_recovery"
+    assert recovery_result.sent is True
+    assert len(telegram.messages) == 2
+    assert "Покрытие источника восстановлено: Work.ua" in telegram.messages[1]
+
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
+        assert source.coverage_alert_active is False
+        assert source.coverage_alert_reason is None
+
+
+@pytest.mark.asyncio
+async def test_source_health_alerts_on_sustained_discovery_drop(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=started_at)
+    telegram = RecordingTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    for offset, count in enumerate((42, 40, 44, 41, 43, 12, 11)):
+        run_id = await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.SUCCEEDED,
+            started_at=started_at + timedelta(hours=offset),
+            candidate_count=count + 5,
+            discovered_count=count,
+        )
+        result = await service.process_run(run_id)
+
+    assert result.event == "coverage_issue"
+    assert result.sent is True
+    assert len(telegram.messages) == 1
+    assert "два запуска подряд ниже половины" in telegram.messages[0]
+    assert "11 вместо примерно 42" in telegram.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_existing_repeated_limit_does_not_alert_after_state_migration(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=started_at)
+    telegram = RecordingTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    run_ids = []
+    for offset in range(4):
+        run_ids.append(
+            await _create_run(
+                sqlite_session_factory,
+                source_id=source_id,
+                status=RunStatus.SUCCEEDED,
+                started_at=started_at + timedelta(hours=offset),
+                discovered_count=100,
+                limit_reached=True,
+            )
+        )
+
+    result = await service.process_run(run_ids[-1])
+
+    assert result.event is None
+    assert telegram.messages == []

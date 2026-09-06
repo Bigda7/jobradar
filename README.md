@@ -229,6 +229,10 @@ response. Explicit source closure can archive it earlier, and a source-confirmed
 that archive state. Listings previously hidden by partial snapshots are restored while they are
 still within the 30-day window.
 
+Source-specific access, attribution, retention, and commercial-use constraints are tracked in
+[`docs/source-access-policy.md`](docs/source-access-policy.md). Review that register before raising
+source limits or enabling an adapter in a public or commercial deployment.
+
 ## Database backups
 
 `scripts/backup_postgres.sh` creates a compressed PostgreSQL dump, validates it with

@@ -181,8 +181,8 @@ class Settings(BaseSettings):
     himalayas_api_url: str = "https://himalayas.app/jobs/api"
     himalayas_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     himalayas_page_size: int = Field(default=20, ge=1, le=20)
-    himalayas_max_pages: int = Field(default=10, ge=1, le=25)
-    himalayas_max_items: int = Field(default=200, ge=1, le=500)
+    himalayas_max_pages: int = Field(default=20, ge=1, le=25)
+    himalayas_max_items: int = Field(default=400, ge=1, le=500)
     himalayas_poll_interval_seconds: int = Field(default=86400, ge=86400)
     the_muse_source_enabled: bool = False
     the_muse_api_url: str = "https://www.themuse.com/api/public/jobs"
@@ -202,8 +202,8 @@ class Settings(BaseSettings):
     arbeitnow_source_enabled: bool = True
     arbeitnow_api_url: str = "https://www.arbeitnow.com/api/job-board-api"
     arbeitnow_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
-    arbeitnow_max_pages: int = Field(default=3, ge=1, le=10)
-    arbeitnow_max_items: int = Field(default=100, ge=1, le=500)
+    arbeitnow_max_pages: int = Field(default=5, ge=1, le=10)
+    arbeitnow_max_items: int = Field(default=200, ge=1, le=500)
     arbeitnow_poll_interval_seconds: int = Field(default=21600, ge=3600)
     remotive_source_enabled: bool = True
     remotive_api_url: str = "https://remotive.com/api/remote-jobs"
