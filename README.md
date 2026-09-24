@@ -18,7 +18,7 @@ APIs.
 
 ## Portfolio Highlights
 
-- Integrates 19 employment, freelance, RSS, structured-data, and public ATS sources behind a common adapter contract.
+- Runs four focused Ukrainian employment sources behind a common adapter contract.
 - Uses idempotent ingestion, content hashes, canonical records, a 30-day archive lifecycle, and cross-source deduplication.
 - Produces explainable match scores with persisted reasons, concerns, rule versions, and content-aware notification idempotency.
 - Runs FastAPI, PostgreSQL 17, the worker, and Telegram bot as hardened Docker Compose services on an ARM64 AWS EC2 instance.
@@ -28,7 +28,7 @@ APIs.
 
 ## Architectural Evolution: Personal Engine to SaaS v2
 
-- **v1.0 (Current Live Repository):** Built as a personal dogfooding platform to automate high-signal opportunity discovery across 19 remote channels. Battle-tested in production to validate ingestion reliability, deduplication heuristics, and automated AWS EC2/S3 operational pipelines.
+- **v1.0 (Current Live Repository):** Built as a personal dogfooding platform to automate high-signal opportunity discovery across focused Ukrainian job channels. Battle-tested in production to validate ingestion reliability, deduplication heuristics, and automated AWS EC2/S3 operational pipelines.
 - **v2.0 (In Active Private Staging):** Multi-tenant SaaS evolution featuring tenant data isolation, per-user custom scoring profiles & negative skill filters, session auth & CSRF protection, server-persisted Kanban pipeline, and per-user Telegram alert routing.
 
 ## Architecture
@@ -64,34 +64,19 @@ manual one-shot worker from mutating the database concurrently.
 - Docker Compose
 - pytest, Ruff, and mypy
 
-## Supported sources
+## Active sources
 
-All adapters implement `BaseSource` and remain independent of API and notification code.
+The production registry intentionally enables only the sources used in the current personal workflow. All adapters implement `BaseSource` and remain independent of API and notification code.
 
 | Source | Transport | Data type |
 | --- | --- | --- |
 | Djinni | public JSON-LD | employment |
-| Freelancer.com | official API | freelance |
 | Work.ua | public pages through a read-only text reader | employment |
 | Robota.ua | public pages through a read-only text reader | employment |
-| Jobs.cz | public HTML and JSON-LD | employment |
-| StartupJobs.cz | public JSON endpoints | employment |
-| Prace.cz | public HTML and JSON-LD | employment |
-| Freelance.cz | public JSON endpoints | freelance |
-| Startup.jobs | official API | employment |
-| Jobicy | public API | employment |
-| We Work Remotely | RSS | employment |
 | DOU Jobs | RSS | employment |
-| Himalayas | public API | employment |
-| The Muse | official API | employment |
-| Greenhouse | public job board API | employment |
-| Lever | public postings API | employment |
-| Ashby | public job board API | employment |
-| Arbeitnow | public API | employment |
-| Remotive | public API | employment |
 
-Upwork is intentionally unsupported because custom job-search RSS feeds were discontinued. The
-project does not replace them with scraping or browser automation.
+Retired adapter implementations remain covered by tests, but they are disabled in production and
+their listings can be removed with the reviewed maintenance command below.
 
 ## Security model
 
@@ -211,10 +196,13 @@ Run maintenance operations:
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance audit-duplicates
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance deduplicate-opportunities
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance reset-hidden
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance prune-retired-sources
+.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance prune-retired-sources --apply
 ```
 
 `audit-duplicates` reports conservative cross-source duplicate candidates without changing data.
 Review its output before running the mutating deduplication command.
+`prune-retired-sources` is also a dry run by default. Review its counts before adding `--apply`.
 
 Test one adapter against its live source without writing to PostgreSQL:
 

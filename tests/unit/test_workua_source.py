@@ -7,9 +7,12 @@ from jobradar.domain.enums import WorkMode
 from jobradar.sources.base import CachedListing
 from jobradar.sources.workua import (
     WorkUaSource,
+    is_workua_challenge,
     parse_salary,
     parse_workua_cards,
     parse_workua_description,
+    parse_workua_markdown_cards,
+    parse_workua_markdown_description,
 )
 
 SEARCH_PAGE = """
@@ -47,6 +50,46 @@ DETAIL_PAGE = """
 </body></html>
 """
 
+CHALLENGE_PAGE = """
+<html><body><script src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform"></script>
+Work.ua має перевірити безпеку вашого з'єднання.</body></html>
+"""
+
+MARKDOWN_SEARCH_PAGE = (
+    "\n## [Backend Developer (Python, Django)]"
+    "(http://www.work.ua/en/jobs/8441545/ "
+    '"Backend Developer (Python, Django), job from August 21, 2026")'
+    """
+
+55 000 - 60 000 UAH
+
+Example Labs, Agency
+
+Remote
+
+Experience more than 1 year · Full-time
+
+Build Django APIs and React interfaces.
+
+To save a job, you need to sign in.
+"""
+)
+
+MARKDOWN_DETAIL_PAGE = """
+# Backend Developer (Python, Django)
+
+## About the job
+
+Build production **Django APIs** and React interfaces.
+
+* Write tests
+* Review code
+
+### Key requirements and skills
+
+Python
+"""
+
 
 def test_workua_html_parser_extracts_cards() -> None:
     cards = parse_workua_cards(SEARCH_PAGE)
@@ -73,6 +116,62 @@ def test_workua_detail_parser_extracts_full_description() -> None:
     assert "Build production Django APIs" in description
     assert "Write tests" in description
     assert "Unrelated footer" not in description
+
+
+def test_workua_markdown_parsers_extract_current_reader_content() -> None:
+    cards = parse_workua_markdown_cards(MARKDOWN_SEARCH_PAGE)
+    description = parse_workua_markdown_description(MARKDOWN_DETAIL_PAGE)
+
+    assert len(cards) == 1
+    assert cards[0].external_id == "8441545"
+    assert cards[0].url == "https://www.work.ua/en/jobs/8441545/"
+    assert cards[0].company == "Example Labs"
+    assert cards[0].location_text == "Remote"
+    assert cards[0].published_at == "2026-08-21T00:00:00+00:00"
+    assert description is not None
+    assert "Build production Django APIs" in description
+    assert "Key requirements" not in description
+
+
+def test_workua_challenge_is_detected() -> None:
+    assert is_workua_challenge(CHALLENGE_PAGE) is True
+    assert is_workua_challenge(SEARCH_PAGE) is False
+
+
+@pytest.mark.asyncio
+async def test_workua_source_falls_back_to_uncached_markdown_after_challenge() -> None:
+    requests: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response_format = request.headers["X-Return-Format"]
+        no_cache = request.headers.get("X-No-Cache")
+        requests.append((request.url.path, response_format, no_cache))
+        if response_format == "html":
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=MARKDOWN_SEARCH_PAGE)
+        if request.url.path == "/en/jobs/8441545/":
+            return httpx.Response(200, text=MARKDOWN_DETAIL_PAGE)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert len(listings) == 1
+    assert listings[0].payload["company"] == "Example Labs"
+    assert "Build production Django APIs" in listings[0].payload["description"]
+    assert (
+        "/en/jobs-remote-python/",
+        "markdown",
+        "true",
+    ) in requests
+    assert ("/en/jobs/8441545/", "markdown", "true") in requests
 
 
 @pytest.mark.asyncio
@@ -206,7 +305,7 @@ async def test_workua_source_continues_when_one_search_page_is_empty() -> None:
         listings = [listing async for listing in source.fetch()]
 
     assert len(listings) == 1
-    assert empty_attempts == 2
+    assert empty_attempts == 3
     assert source.consume_warnings() == ()
 
 
