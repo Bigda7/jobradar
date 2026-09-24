@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from jobradar.config import Settings
+from jobradar.sources.registry import build_source_registry
 
 
 def test_cors_origins_are_normalized_and_deduplicated() -> None:
@@ -93,3 +94,14 @@ def test_source_coverage_defaults_use_audited_balanced_limits() -> None:
     assert settings.startup_jobs_max_pages == 10
     assert settings.startup_jobs_max_items == 500
     assert settings.jobicy_max_items == 200
+
+
+def test_default_registry_contains_only_retained_sources() -> None:
+    settings = Settings(_env_file=None)
+
+    assert {source.name for source in build_source_registry(settings)} == {
+        "djinni",
+        "dou_jobs",
+        "robota_ua",
+        "workua",
+    }

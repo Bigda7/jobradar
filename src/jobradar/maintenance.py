@@ -9,7 +9,9 @@ from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
 from jobradar.opportunities.expiration import StaleExpirationService
+from jobradar.opportunities.pruning import SourcePruningService
 from jobradar.opportunities.service import OpportunityStateService
+from jobradar.sources.policy import RETIRED_SOURCE_NAMES
 from jobradar.sources.registry import build_source_registry
 
 
@@ -86,6 +88,24 @@ async def rescore_all() -> None:
     )
 
 
+async def prune_retired_sources(*, apply: bool) -> None:
+    summary = await SourcePruningService(session_factory).prune(
+        RETIRED_SOURCE_NAMES,
+        apply=apply,
+    )
+    print(
+        json.dumps(
+            {
+                "matched_sources": summary.matched_sources,
+                "deleted_listings": summary.deleted_listings,
+                "deleted_opportunities": summary.deleted_opportunities,
+                "preserved_shared_opportunities": summary.preserved_shared_opportunities,
+                "applied": summary.applied,
+            }
+        )
+    )
+
+
 async def test_adapters(
     source_name: str | None,
     timeout_seconds: float,
@@ -124,6 +144,15 @@ def main() -> None:
         "rescore-all",
         help="Force active opportunities to be evaluated with the current matching rules.",
     )
+    prune_parser = subcommands.add_parser(
+        "prune-retired-sources",
+        help="Remove listings owned by retired sources and delete orphan opportunities.",
+    )
+    prune_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the cleanup. Without this flag, only report the expected changes.",
+    )
     adapter_parser = subcommands.add_parser(
         "test-adapters",
         help="Fetch and normalize enabled sources without writing to the database.",
@@ -153,6 +182,8 @@ def main() -> None:
             asyncio.run(expire_stale())
         elif arguments.command == "rescore-all":
             asyncio.run(rescore_all())
+        elif arguments.command == "prune-retired-sources":
+            asyncio.run(prune_retired_sources(apply=arguments.apply))
         elif arguments.command == "test-adapters":
             if arguments.timeout <= 0:
                 parser.error("--timeout must be positive.")

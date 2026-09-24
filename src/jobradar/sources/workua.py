@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
+import structlog
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
@@ -39,6 +40,23 @@ DEFAULT_SEARCH_URLS = (
 USER_AGENT = "JobRadar/0.5 (personal job aggregator)"
 JOB_PATH_PATTERN = re.compile(r"/(?:en/)?jobs/(?P<id>\d+)/")
 NUMBER_PATTERN = re.compile(r"\d+(?:[\s\u00a0\u2009\u202f.,]\d+)*")
+MARKDOWN_CARD_PATTERN = re.compile(
+    r"^## \[(?P<title>.+?)\]\((?P<url>https?://(?:www\.)?work\.ua/(?:en/)?jobs/"
+    r'(?P<id>\d+)/)(?:\s+"(?P<label>[^"]*)")?\)\s*$',
+    flags=re.MULTILINE,
+)
+MARKDOWN_LINK_PATTERN = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+MARKDOWN_PUBLISHED_PATTERN = re.compile(
+    r"job from (?P<date>[A-Z][a-z]+ \d{1,2}, \d{4})",
+    flags=re.IGNORECASE,
+)
+CLOUDFLARE_MARKERS = (
+    "challenges.cloudflare.com",
+    "cf-chl-",
+    "performing security verification",
+    "work.ua має перевірити безпеку",
+)
+logger = structlog.get_logger(__name__)
 
 
 class WorkUaSourceError(RuntimeError):
@@ -99,7 +117,11 @@ class WorkUaSource(BaseSource):
                 try:
                     cards = await self._fetch_search_cards(page_url)
                 except WorkUaSourceError as error:
-                    self.report_warning(str(error))
+                    logger.warning(
+                        "workua_search_page_skipped",
+                        search_url=page_url,
+                        error=str(error),
+                    )
                     break
                 successful_search_pages += 1
                 self.record_candidates(len(cards))
@@ -144,7 +166,16 @@ class WorkUaSource(BaseSource):
                     detail_fetched_at = cached.detail_fetched_at
                 else:
                     await polite_delay(self._detail_request_delay_seconds)
-                    description = await self._fetch_description(card.url)
+                    try:
+                        description = await self._fetch_description(card.url)
+                    except WorkUaSourceError as error:
+                        logger.warning(
+                            "workua_detail_skipped",
+                            vacancy_url=card.url,
+                            error=str(error),
+                        )
+                        self.record_detail_failure()
+                        continue
                     if description is None:
                         self.record_detail_failure()
                         continue
@@ -163,20 +194,42 @@ class WorkUaSource(BaseSource):
     async def _fetch_search_cards(self, search_url: str) -> list[WorkUaCard]:
         cards: list[WorkUaCard] = []
         for _ in range(self._retry_attempts):
-            html = await self._fetch_page(search_url)
+            html = await self._fetch_page(search_url, response_format="html")
+            if is_workua_challenge(html):
+                break
             cards = parse_workua_cards(html)
             if cards:
-                break
-        return cards
+                return cards
+
+        markdown = await self._fetch_page(
+            search_url,
+            response_format="markdown",
+            no_cache=True,
+        )
+        if is_workua_challenge(markdown):
+            raise WorkUaSourceError("Work.ua returned a security challenge through the reader.")
+        return parse_workua_markdown_cards(markdown)
 
     async def _fetch_description(self, vacancy_url: str) -> str | None:
         try:
-            html = await self._fetch_page(vacancy_url)
+            html = await self._fetch_page(vacancy_url, response_format="html")
         except WorkUaSourceError as error:
             if "404" in str(error) or "410" in str(error):
                 return None
             raise
-        return parse_workua_description(html)
+        if not is_workua_challenge(html):
+            description = parse_workua_description(html)
+            if description is not None:
+                return description
+
+        markdown = await self._fetch_page(
+            vacancy_url,
+            response_format="markdown",
+            no_cache=True,
+        )
+        if is_workua_challenge(markdown):
+            raise WorkUaSourceError("Work.ua vacancy returned a security challenge.")
+        return parse_workua_markdown_description(markdown)
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         payload = raw_listing.payload
@@ -205,10 +258,19 @@ class WorkUaSource(BaseSource):
             published_at=_datetime(payload.get("published_at")),
         )
 
-    async def _fetch_page(self, search_url: str) -> str:
+    async def _fetch_page(
+        self,
+        search_url: str,
+        *,
+        response_format: str,
+        no_cache: bool = False,
+    ) -> str:
         request_url = _reader_url(self._reader_base_url, search_url)
+        headers = {"X-Return-Format": response_format}
+        if no_cache:
+            headers["X-No-Cache"] = "true"
         if self._client is not None:
-            return await self._request(self._client, request_url)
+            return await self._request(self._client, request_url, headers=headers)
 
         timeout = httpx.Timeout(self._request_timeout_seconds)
         async with httpx.AsyncClient(
@@ -216,18 +278,23 @@ class WorkUaSource(BaseSource):
             headers={
                 "User-Agent": USER_AGENT,
                 "Accept": "text/plain",
-                "X-Return-Format": "html",
             },
             timeout=timeout,
         ) as client:
-            return await self._request(client, request_url)
+            return await self._request(client, request_url, headers=headers)
 
-    async def _request(self, client: httpx.AsyncClient, request_url: str) -> str:
+    async def _request(
+        self,
+        client: httpx.AsyncClient,
+        request_url: str,
+        *,
+        headers: dict[str, str],
+    ) -> str:
         try:
             response = await get_with_backoff(
                 client,
                 request_url,
-                headers={"X-Return-Format": "html"},
+                headers=headers,
                 attempts=self._retry_attempts,
             )
             response.raise_for_status()
@@ -427,6 +494,83 @@ def parse_workua_description(html: str) -> str | None:
     return _join_parts(parser.parts) or None
 
 
+def parse_workua_markdown_cards(markdown: str) -> list[WorkUaCard]:
+    matches = list(MARKDOWN_CARD_PATTERN.finditer(markdown))
+    cards: list[WorkUaCard] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
+        block = markdown[match.end() : end]
+        lines = [_markdown_text(line) for line in block.splitlines()]
+        content_lines = [
+            line
+            for line in lines
+            if line
+            and not line.startswith("To save a job")
+            and line not in {"Already saved", "Save"}
+        ]
+        salary_text = next(
+            (line for line in content_lines if _salary_currency(line) is not None),
+            None,
+        )
+        location_text = next(
+            (line for line in content_lines if line.casefold() == "remote"),
+            None,
+        )
+        ignored = {line for line in (salary_text, location_text) if line is not None}
+        company_line = next(
+            (
+                line
+                for line in content_lines
+                if line not in ignored
+                and not line.casefold().startswith("experience ")
+                and not line.casefold().endswith(" ago")
+            ),
+            None,
+        )
+        company = company_line.removesuffix(", Agency") if company_line else None
+        description = next(
+            (
+                line
+                for line in content_lines
+                if line not in ignored
+                and line != company_line
+                and not line.casefold().startswith("experience ")
+                and not line.casefold().endswith(" ago")
+            ),
+            None,
+        )
+        cards.append(
+            WorkUaCard(
+                external_id=match.group("id"),
+                url=match.group("url").replace("http://", "https://", 1),
+                title=_markdown_text(match.group("title")),
+                company=company,
+                description=description,
+                salary_text=salary_text,
+                location_text=location_text,
+                published_at=_markdown_published_at(match.group("label")),
+            )
+        )
+    return cards
+
+
+def parse_workua_markdown_description(markdown: str) -> str | None:
+    marker = "## About the job"
+    if marker not in markdown:
+        return None
+    section = markdown.split(marker, 1)[1]
+    for end_marker in ("### Key requirements and skills", "## Similar jobs", "Apply now"):
+        if end_marker in section:
+            section = section.split(end_marker, 1)[0]
+    parts = [text for line in section.splitlines() if (text := _markdown_text(line))]
+    return _join_parts(parts) or None
+
+
+def is_workua_challenge(content: str) -> bool:
+    normalized = content.casefold()
+    return any(marker in normalized for marker in CLOUDFLARE_MARKERS)
+
+
 def parse_salary(value: Any) -> tuple[Decimal | None, Decimal | None, str | None]:
     text = _optional_string(value)
     if text is None:
@@ -520,6 +664,25 @@ def _optional_string(value: Any) -> str | None:
         return None
     result = _clean_text(str(value))
     return result or None
+
+
+def _markdown_text(value: str) -> str:
+    without_links = MARKDOWN_LINK_PATTERN.sub(r"\1", value)
+    without_formatting = re.sub(r"[*_`#]", "", without_links)
+    return _clean_text(without_formatting.lstrip("- "))
+
+
+def _markdown_published_at(value: str | None) -> str | None:
+    if value is None:
+        return None
+    match = MARKDOWN_PUBLISHED_PATTERN.search(value)
+    if match is None:
+        return None
+    try:
+        parsed = datetime.strptime(match.group("date"), "%B %d, %Y").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return parsed.isoformat()
 
 
 def _clean_text(value: str) -> str:

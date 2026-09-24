@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     robota_ua_detail_request_delay_seconds: float = Field(default=1.5, ge=0, le=10)
     robota_ua_retry_attempts: int = Field(default=2, ge=1, le=3)
     robota_ua_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    jobs_cz_source_enabled: bool = True
+    jobs_cz_source_enabled: bool = False
     jobs_cz_search_urls: str = (
         "https://www.jobs.cz/prace/?q%5B0%5D=Python&arrangement=work-mostly-from-home;"
         "https://www.jobs.cz/prace/?q%5B0%5D=React&arrangement=work-mostly-from-home;"
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     jobs_cz_detail_request_delay_seconds: float = Field(default=1.0, ge=0, le=10)
     jobs_cz_retry_attempts: int = Field(default=2, ge=1, le=3)
     jobs_cz_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    startupjobs_cz_source_enabled: bool = True
+    startupjobs_cz_source_enabled: bool = False
     startupjobs_cz_api_base_url: str = "https://back.startupjobs.cz"
     startupjobs_cz_web_base_url: str = "https://www.startupjobs.cz"
     startupjobs_cz_search_queries: str = (
@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     startupjobs_cz_detail_cache_ttl_seconds: int = Field(default=86400, ge=3600)
     startupjobs_cz_detail_request_delay_seconds: float = Field(default=0.5, ge=0, le=10)
     startupjobs_cz_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    prace_cz_source_enabled: bool = True
+    prace_cz_source_enabled: bool = False
     prace_cz_search_urls: str = (
         "https://www.prace.cz/nabidky/programator/;"
         "https://www.prace.cz/nabidky/?q=python;"
@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     prace_cz_detail_request_delay_seconds: float = Field(default=1.0, ge=0, le=10)
     prace_cz_retry_attempts: int = Field(default=2, ge=1, le=3)
     prace_cz_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    freelance_cz_source_enabled: bool = True
+    freelance_cz_source_enabled: bool = False
     freelance_cz_api_base_url: str = "https://www.freelance.cz/api/ui"
     freelance_cz_web_base_url: str = "https://www.freelance.cz"
     freelance_cz_category: str = "programovani-it"
@@ -159,13 +159,13 @@ class Settings(BaseSettings):
     startup_jobs_max_pages: int = Field(default=10, ge=1, le=10)
     startup_jobs_max_items: int = Field(default=500, ge=1, le=500)
     startup_jobs_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    jobicy_source_enabled: bool = True
+    jobicy_source_enabled: bool = False
     jobicy_api_url: str = "https://jobicy.com/api/v2/remote-jobs"
     jobicy_industry: str = "engineering"
     jobicy_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     jobicy_max_items: int = Field(default=200, ge=1, le=200)
     jobicy_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    we_work_remotely_source_enabled: bool = True
+    we_work_remotely_source_enabled: bool = False
     we_work_remotely_feed_url: str = (
         "https://weworkremotely.com/categories/remote-programming-jobs.rss"
     )
@@ -177,7 +177,7 @@ class Settings(BaseSettings):
     dou_jobs_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     dou_jobs_max_items: int = Field(default=100, ge=1, le=200)
     dou_jobs_poll_interval_seconds: int = Field(default=1800, ge=900)
-    himalayas_source_enabled: bool = True
+    himalayas_source_enabled: bool = False
     himalayas_api_url: str = "https://himalayas.app/jobs/api"
     himalayas_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     himalayas_page_size: int = Field(default=20, ge=1, le=20)
@@ -199,13 +199,13 @@ class Settings(BaseSettings):
     ats_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     ats_max_items_per_company: int = Field(default=500, ge=1, le=2000)
     ats_poll_interval_seconds: int = Field(default=86400, ge=21600)
-    arbeitnow_source_enabled: bool = True
+    arbeitnow_source_enabled: bool = False
     arbeitnow_api_url: str = "https://www.arbeitnow.com/api/job-board-api"
     arbeitnow_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     arbeitnow_max_pages: int = Field(default=5, ge=1, le=10)
     arbeitnow_max_items: int = Field(default=200, ge=1, le=500)
     arbeitnow_poll_interval_seconds: int = Field(default=21600, ge=3600)
-    remotive_source_enabled: bool = True
+    remotive_source_enabled: bool = False
     remotive_api_url: str = "https://remotive.com/api/remote-jobs"
     remotive_category: str = "software-dev"
     remotive_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
