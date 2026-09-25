@@ -70,9 +70,7 @@ The production registry intentionally enables only four sources used in the curr
 | Robota.ua | public pages through a read-only text reader | employment |
 | DOU Jobs | RSS | employment |
 
-The source registry contains only these adapters. The retired-source maintenance command remains
-available temporarily so historical database rows can be audited and cleaned in a separate,
-explicitly approved operation.
+The source registry contains only these adapters.
 
 ## Security model
 
@@ -192,15 +190,10 @@ Run maintenance operations:
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance audit-duplicates
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance deduplicate-opportunities
 .\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance reset-hidden
-.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance prune-retired-sources
-.\scripts\compose.ps1 run --rm worker python -m jobradar.maintenance prune-retired-sources --apply
 ```
 
 `audit-duplicates` reports conservative cross-source duplicate candidates without changing data.
 Review its output before running the mutating deduplication command.
-`prune-retired-sources` is also a dry run by default. Review its counts before adding `--apply`.
-The applied cleanup permanently removes retired source rows, their run history and listings, and
-opportunities that no longer have a retained listing.
 
 Test one adapter against its live source without writing to PostgreSQL:
 
