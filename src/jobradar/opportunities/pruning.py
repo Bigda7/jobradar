@@ -1,16 +1,17 @@
 from collections.abc import Collection
 from dataclasses import dataclass
 
-from sqlalchemy import delete, distinct, func, select, update
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from jobradar.db.models import Listing, MatchEvaluation, Opportunity, Source
+from jobradar.db.models import Listing, MatchEvaluation, Opportunity, Source, SourceRun
 from jobradar.ingestion.canonical import refresh_opportunity_from_best_listing
 
 
 @dataclass(frozen=True, slots=True)
 class SourcePruningSummary:
     matched_sources: int
+    deleted_source_runs: int
     deleted_listings: int
     deleted_opportunities: int
     preserved_shared_opportunities: int
@@ -31,14 +32,23 @@ class SourcePruningService:
             sorted({name.strip().casefold() for name in source_names if name.strip()})
         )
         if not normalized_names:
-            return SourcePruningSummary(0, 0, 0, 0, apply)
+            return SourcePruningSummary(0, 0, 0, 0, 0, apply)
 
         async with self._session_factory() as session, session.begin():
             source_ids = tuple(
                 await session.scalars(select(Source.id).where(Source.name.in_(normalized_names)))
             )
             if not source_ids:
-                return SourcePruningSummary(0, 0, 0, 0, apply)
+                return SourcePruningSummary(0, 0, 0, 0, 0, apply)
+
+            deleted_source_runs = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SourceRun)
+                    .where(SourceRun.source_id.in_(source_ids))
+                )
+                or 0
+            )
 
             deleted_listings = int(
                 await session.scalar(
@@ -84,16 +94,6 @@ class SourcePruningService:
                     await session.execute(
                         delete(Opportunity).where(Opportunity.id.in_(orphan_opportunity_ids))
                     )
-                await session.execute(
-                    update(Source)
-                    .where(Source.id.in_(source_ids))
-                    .values(
-                        enabled=False,
-                        failure_alert_active=False,
-                        coverage_alert_active=False,
-                        coverage_alert_reason=None,
-                    )
-                )
                 if shared_opportunity_ids:
                     await session.execute(
                         delete(MatchEvaluation).where(
@@ -103,9 +103,12 @@ class SourcePruningService:
                     await session.flush()
                     for opportunity_id in shared_opportunity_ids:
                         await refresh_opportunity_from_best_listing(session, opportunity_id)
+                await session.execute(delete(SourceRun).where(SourceRun.source_id.in_(source_ids)))
+                await session.execute(delete(Source).where(Source.id.in_(source_ids)))
 
             return SourcePruningSummary(
                 matched_sources=len(source_ids),
+                deleted_source_runs=deleted_source_runs,
                 deleted_listings=deleted_listings,
                 deleted_opportunities=len(orphan_opportunity_ids),
                 preserved_shared_opportunities=len(shared_opportunity_ids),

@@ -97,6 +97,7 @@ async def prune_retired_sources(*, apply: bool) -> None:
         json.dumps(
             {
                 "matched_sources": summary.matched_sources,
+                "deleted_source_runs": summary.deleted_source_runs,
                 "deleted_listings": summary.deleted_listings,
                 "deleted_opportunities": summary.deleted_opportunities,
                 "preserved_shared_opportunities": summary.preserved_shared_opportunities,
@@ -146,7 +147,7 @@ def main() -> None:
     )
     prune_parser = subcommands.add_parser(
         "prune-retired-sources",
-        help="Remove listings owned by retired sources and delete orphan opportunities.",
+        help="Remove retired sources, their runs and listings, and orphan opportunities.",
     )
     prune_parser.add_argument(
         "--apply",

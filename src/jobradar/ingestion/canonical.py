@@ -1,14 +1,12 @@
 from typing import Any
 
-from sqlalchemy import case, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jobradar.db.models import Listing, Opportunity, Source
 from jobradar.domain.enums import OpportunityStatus
 from jobradar.domain.models import NormalizedOpportunity
 from jobradar.domain.normalization import build_canonical_key, normalize_text
-
-DIRECT_ATS_SOURCE_NAMES = ("greenhouse", "lever", "ashby")
 
 
 def normalized_snapshot(normalized: NormalizedOpportunity) -> dict[str, Any]:
@@ -40,11 +38,7 @@ def canonical_listing_order() -> tuple[Any, ...]:
 
 
 def canonical_source_link_order() -> tuple[Any, ...]:
-    direct_ats_priority = case(
-        (Source.name.in_(DIRECT_ATS_SOURCE_NAMES), 1),
-        else_=0,
-    )
-    return direct_ats_priority.desc(), *canonical_listing_order()
+    return canonical_listing_order()
 
 
 async def refresh_opportunity_from_best_listing(
