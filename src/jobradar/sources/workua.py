@@ -166,20 +166,23 @@ class WorkUaSource(BaseSource):
                     detail_fetched_at = cached.detail_fetched_at
                 else:
                     await polite_delay(self._detail_request_delay_seconds)
+                    detail_fetched_at = None
                     try:
                         description = await self._fetch_description(card.url)
                     except WorkUaSourceError as error:
                         logger.warning(
-                            "workua_detail_skipped",
+                            "workua_detail_fallback",
                             vacancy_url=card.url,
                             error=str(error),
                         )
                         self.record_detail_failure()
-                        continue
-                    if description is None:
-                        self.record_detail_failure()
-                        continue
-                    detail_fetched_at = datetime.now(UTC)
+                        description = card.description
+                    else:
+                        if description is None:
+                            self.record_detail_failure()
+                            description = card.description
+                        else:
+                            detail_fetched_at = datetime.now(UTC)
                 yield RawListing(
                     external_id=card.external_id,
                     source_url=card.url,
