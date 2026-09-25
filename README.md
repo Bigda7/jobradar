@@ -66,7 +66,7 @@ manual one-shot worker from mutating the database concurrently.
 
 ## Active sources
 
-The production registry intentionally enables only the sources used in the current personal workflow. All adapters implement `BaseSource` and remain independent of API and notification code.
+The production registry intentionally enables only four sources used in the current personal workflow. All adapters implement `BaseSource` and remain independent of API and notification code.
 
 | Source | Transport | Data type |
 | --- | --- | --- |

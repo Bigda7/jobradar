@@ -92,7 +92,27 @@ class SourceRun(Base):
 
 class Opportunity(TimestampMixin, Base):
     __tablename__ = "opportunities"
-    __table_args__ = (Index("ix_opportunities_work_mode_published", "work_mode", "published_at"),)
+    __table_args__ = (
+        Index("ix_opportunities_work_mode_published", "work_mode", "published_at"),
+        Index(
+            "ix_opportunities_title_trgm",
+            "title",
+            postgresql_using="gin",
+            postgresql_ops={"title": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_opportunities_company_trgm",
+            "company",
+            postgresql_using="gin",
+            postgresql_ops={"company": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_opportunities_description_trgm",
+            "description",
+            postgresql_using="gin",
+            postgresql_ops={"description": "gin_trgm_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(PRIMARY_KEY_TYPE, primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(

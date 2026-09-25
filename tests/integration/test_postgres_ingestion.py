@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from jobradar.db.locks import try_transaction_advisory_lock
@@ -60,3 +60,34 @@ async def test_postgres_advisory_lock_prevents_overlapping_worker_cycles(
         TEST_ADVISORY_LOCK_KEY,
     ) as acquired_after_release:
         assert acquired_after_release is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_opportunity_search_indexes_use_trigrams(
+    postgres_engine: AsyncEngine,
+) -> None:
+    index_names = {
+        "ix_opportunities_title_trgm",
+        "ix_opportunities_company_trgm",
+        "ix_opportunities_description_trgm",
+    }
+    async with postgres_engine.connect() as connection:
+        rows = (
+            await connection.execute(
+                text(
+                    """
+                    SELECT indexname, indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = current_schema()
+                      AND tablename = 'opportunities'
+                      AND indexname = ANY(:index_names)
+                    """
+                ),
+                {"index_names": list(index_names)},
+            )
+        ).all()
+
+    definitions = {name: definition for name, definition in rows}
+    assert definitions.keys() == index_names
+    assert all("USING gin" in definition for definition in definitions.values())
+    assert all("gin_trgm_ops" in definition for definition in definitions.values())
