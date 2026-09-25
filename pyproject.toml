@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jobradar"
-version = "1.2.9"
+version = "1.2.10"
 description = "A private job opportunity aggregator"
 readme = "README.md"
 license = "MIT"
