@@ -277,6 +277,33 @@ async def test_workua_source_retries_one_rate_limited_detail_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workua_source_keeps_card_when_detail_is_blocked() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.url.path == "/en/jobs/8441545/":
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert len(listings) == 1
+    assert listings[0].external_id == "8441545"
+    assert listings[0].payload["description"] == (
+        "Full-time. We are also ready to hire a student. Build Django APIs."
+    )
+    assert listings[0].detail_fetched_at is None
+    assert source.consume_run_metrics().detail_failure_count == 1
+
+
+@pytest.mark.asyncio
 async def test_workua_source_continues_when_one_search_page_is_empty() -> None:
     empty_attempts = 0
 

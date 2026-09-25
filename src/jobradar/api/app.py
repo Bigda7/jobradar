@@ -3,7 +3,7 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 import structlog
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -307,6 +307,10 @@ def create_app(
             str | None,
             Query(alias="source", min_length=1, max_length=100),
         ] = None,
+        match_sort: Annotated[
+            Literal["score", "newest", "company"],
+            Query(alias="sort"),
+        ] = "score",
         limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     ) -> MatchListResponse:
@@ -341,6 +345,26 @@ def create_app(
         listing_url = _canonical_listing_url(selected_source_name)
         source_name = _canonical_source_name(selected_source_name)
         source_display_name = _canonical_source_display_name(selected_source_name)
+        order_by = (
+            (
+                Opportunity.published_at.desc().nullslast(),
+                MatchEvaluation.score.desc(),
+                Opportunity.id.desc(),
+            )
+            if match_sort == "newest"
+            else (
+                Opportunity.company.is_(None).asc(),
+                func.lower(Opportunity.company).asc(),
+                MatchEvaluation.score.desc(),
+                Opportunity.id.desc(),
+            )
+            if match_sort == "company"
+            else (
+                MatchEvaluation.score.desc(),
+                Opportunity.published_at.desc().nullslast(),
+                Opportunity.id.desc(),
+            )
+        )
         rows = (
             await session.execute(
                 select(
@@ -355,11 +379,7 @@ def create_app(
                     MatchEvaluation.opportunity_id == Opportunity.id,
                 )
                 .where(*filters)
-                .order_by(
-                    MatchEvaluation.score.desc(),
-                    Opportunity.published_at.desc().nullslast(),
-                    Opportunity.id.desc(),
-                )
+                .order_by(*order_by)
                 .limit(limit)
                 .offset(offset)
             )
@@ -405,6 +425,8 @@ def _escape_like(value: str) -> str:
 def _source_coverage_warning(run: SourceRun) -> str | None:
     if run.limit_reached:
         return "limit_reached"
+    if run.detail_failure_count > 0:
+        return "detail_failures"
     if run.discovered_count == 0 and run.candidate_count > 0:
         return "all_candidates_filtered"
     if run.discovered_count == 0:

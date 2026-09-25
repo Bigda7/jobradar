@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     djinni_jobs_url: str = "https://djinni.co/jobs/l-nonhr/remote/"
     djinni_remote_only: bool = True
     djinni_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    djinni_max_items: int = Field(default=100, ge=1, le=200)
-    djinni_max_pages: int = Field(default=10, ge=1, le=20)
+    djinni_max_items: int = Field(default=200, ge=1, le=200)
+    djinni_max_pages: int = Field(default=20, ge=1, le=20)
     djinni_poll_interval_seconds: int = Field(default=3600, ge=1800)
     freelancer_source_enabled: bool = False
     freelancer_api_base_url: str = "https://www.freelancer.com/api/projects/0.1"

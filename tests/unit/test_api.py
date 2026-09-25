@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.api.app import create_app
 from jobradar.config import Settings
-from jobradar.db.models import Listing, Opportunity, Source
+from jobradar.db.models import Listing, MatchEvaluation, Opportunity, Source
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
@@ -171,6 +172,47 @@ async def test_matches_filter_uses_the_selected_source_listing(
     assert missing_response.status_code == 200
     assert missing_response.json()["total"] == 0
     assert missing_response.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_matches_sort_is_applied_before_pagination(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+
+    async with sqlite_session_factory() as session:
+        opportunities = list(
+            (await session.scalars(select(Opportunity).order_by(Opportunity.id.asc()))).all()
+        )
+        evaluations = {
+            evaluation.opportunity_id: evaluation
+            for evaluation in (await session.scalars(select(MatchEvaluation))).all()
+        }
+        assert len(opportunities) == 2
+        older_high_score, newer_low_score = opportunities
+        older_high_score.company = "Zulu Labs"
+        older_high_score.published_at = datetime(2026, 8, 20, tzinfo=UTC)
+        newer_low_score.company = "Alpha Labs"
+        newer_low_score.published_at = datetime(2026, 8, 25, tzinfo=UTC)
+        evaluations[older_high_score.id].score = 99
+        evaluations[newer_low_score.id].score = 55
+        await session.commit()
+
+    application = create_app(sqlite_session_factory)
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        score_response = await client.get("/matches", params={"sort": "score", "limit": 1})
+        newest_response = await client.get("/matches", params={"sort": "newest", "limit": 1})
+        company_response = await client.get("/matches", params={"sort": "company", "limit": 1})
+        invalid_response = await client.get("/matches", params={"sort": "unsupported"})
+
+    assert score_response.json()["items"][0]["id"] == older_high_score.id
+    assert newest_response.json()["items"][0]["id"] == newer_low_score.id
+    assert company_response.json()["items"][0]["id"] == newer_low_score.id
+    assert invalid_response.status_code == 422
 
 
 @pytest.mark.asyncio
