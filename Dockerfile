@@ -26,7 +26,6 @@ RUN apk add --no-cache openssl=3.5.8-r0 sqlite-libs=3.53.4-r0 \
     && adduser -S -D -H -G jobradar jobradar
 
 COPY --from=builder --chown=jobradar:jobradar /app/.venv /app/.venv
-COPY --chown=jobradar:jobradar companies.yaml ./
 COPY --chown=jobradar:jobradar alembic.ini ./
 COPY --chown=jobradar:jobradar alembic ./alembic
 

@@ -20,8 +20,13 @@ from jobradar.notifications.service import (
     format_match_message,
 )
 from jobradar.notifications.telegram import InlineKeyboardMarkup, TelegramClient
-from jobradar.sources.freelancer import FreelancerApiClient, FreelancerSource
 from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
+
+
+class FreelanceMockSource(MockSource):
+    name = "freelance_mock"
+    display_name = "Project Board"
+    opportunity_kind = OpportunityKind.FREELANCE_PROJECT
 
 
 class RecordingTelegramClient(TelegramClient):
@@ -290,8 +295,8 @@ def test_freelance_notification_uses_project_specific_template() -> None:
         salary_currency="USD",
         salary_period="project",
         first_seen_at=datetime.now(UTC),
-        source_display_name="Freelancer.com",
-        source_url="https://www.freelancer.com/projects/python/django-api-integration",
+        source_display_name="Project Board",
+        source_url="https://projects.example.test/django-api-integration",
         content_hash="a" * 64,
         score=82,
         reasons=(
@@ -310,7 +315,7 @@ def test_freelance_notification_uses_project_specific_template() -> None:
 
     message = format_match_message(candidate, TEST_RATES)
 
-    assert "[Freelancer.com] Фриланс-проект: 82/100" in message
+    assert "[Project Board] Фриланс-проект: 82/100" in message
     assert "Тип проекта: Фиксированная цена" in message
     assert "<b>Бюджет</b>" in message
     assert "- USD: 300-600 / проект" in message
@@ -326,52 +331,25 @@ def test_freelance_notification_uses_project_specific_template() -> None:
 async def test_freelance_match_is_delivered_with_freelance_template(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    payload = {
-        "status": "success",
-        "result": {
-            "total_count": 1,
-            "projects": [
-                {
-                    "id": 9001,
-                    "owner_id": 8001,
-                    "title": "Small Django REST API webhook integration",
-                    "description": "Build a small React dashboard and PostgreSQL webhook.",
-                    "seo_url": "python/small-django-api-integration",
-                    "type": "fixed",
-                    "local": False,
-                    "language": "en",
-                    "submitdate": 1787385600,
-                    "budget": {"minimum": 300, "maximum": 600},
-                    "currency": {"code": "USD", "exchange_rate": 1.0},
-                    "jobs": [
-                        {"name": "Django"},
-                        {"name": "React.js"},
-                        {"name": "PostgreSQL"},
-                    ],
-                    "bid_stats": {"bid_count": 5},
-                }
-            ],
-            "users": {
-                "8001": {
-                    "display_name": "Verified Employer",
-                    "status": {"payment_verified": True},
-                }
-            },
-        },
+    listing = {
+        "id": "project-9001",
+        "url": "https://projects.example.test/django-api-integration",
+        "title": "Small Django REST API webhook integration",
+        "company": "Verified Employer",
+        "description": "Build a small React dashboard and PostgreSQL webhook.",
+        "location": "Remote",
+        "work_mode": "remote",
+        "employment_type": None,
+        "contract_type": "fixed",
+        "salary_min": "300",
+        "salary_max": "600",
+        "salary_currency": "USD",
+        "salary_period": "project",
+        "published_at": "2026-08-22T09:00:00+00:00",
+        "bid_stats": {"bid_count": 5},
+        "_owner": {"status": {"payment_verified": True}},
     }
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
-    ) as http_client:
-        source = FreelancerSource(
-            api_client=FreelancerApiClient(
-                oauth_token="test-oauth-token",
-                api_base_url="https://freelancer.test/api/projects/0.1",
-                client=http_client,
-            ),
-            search_queries=("django react",),
-            web_base_url="https://freelancer.test",
-        )
-        await IngestionService(sqlite_session_factory).run_source(source)
+    await IngestionService(sqlite_session_factory).run_source(FreelanceMockSource((listing,)))
 
     matching = await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
     client = RecordingTelegramClient()
@@ -389,6 +367,6 @@ async def test_freelance_match_is_delivered_with_freelance_template(
     assert matching.evaluated == 1
     assert delivery.sent == 1
     assert len(client.messages) == 1
-    assert "[Freelancer.com] Фриланс-проект" in client.messages[0]
+    assert "[Project Board] Фриланс-проект" in client.messages[0]
     assert "Конкуренция: 5 ставок" in client.messages[0]
     assert ">Открыть проект</a>" in client.messages[0]

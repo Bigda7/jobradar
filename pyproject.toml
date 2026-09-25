@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jobradar"
-version = "1.2.8"
-description = "A private job and freelance opportunity aggregator"
+version = "1.2.9"
+description = "A private job opportunity aggregator"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -17,7 +17,6 @@ dependencies = [
     "httpx>=0.28.1,<0.29",
     "psycopg[binary]>=3.3.4,<4.0",
     "pydantic-settings>=2.15.0,<3.0",
-    "pyyaml>=6.0.2,<7.0",
     "sqlalchemy[asyncio]>=2.0.52,<2.1",
     "structlog>=26.1.0,<27.0",
     "uvicorn[standard]>=0.52.4,<0.53",
@@ -33,7 +32,6 @@ dev = [
     "pytest-asyncio>=1.4.0,<2.0",
     "ruff>=0.16.4,<0.17",
     "types-defusedxml>=0.7.0.20250822,<0.8",
-    "types-pyyaml>=6.0.12.20250915,<7.0",
 ]
 
 [tool.setuptools.packages.find]

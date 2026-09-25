@@ -172,20 +172,9 @@ def test_registry_builds_dou_jobs_with_its_poll_interval() -> None:
     settings = Settings(
         _env_file=None,
         djinni_source_enabled=False,
-        freelancer_source_enabled=False,
         workua_source_enabled=False,
         robota_ua_source_enabled=False,
-        jobs_cz_source_enabled=False,
-        startupjobs_cz_source_enabled=False,
-        prace_cz_source_enabled=False,
-        freelance_cz_source_enabled=False,
-        startup_jobs_source_enabled=False,
-        jobicy_source_enabled=False,
-        we_work_remotely_source_enabled=False,
         dou_jobs_source_enabled=True,
-        himalayas_source_enabled=False,
-        arbeitnow_source_enabled=False,
-        remotive_source_enabled=False,
     )
 
     sources = build_source_registry(settings)

@@ -1,7 +1,7 @@
 # JobRadar Backend
 
 Production backend for JobRadar, a self-hosted job intelligence platform that collects remote
-employment and freelance opportunities, normalizes heterogeneous source data, reconciles and
+employment opportunities, normalizes heterogeneous source data, reconciles and
 deduplicates listings, applies deterministic matching rules, and exposes ranked results to a web
 client and Telegram.
 
@@ -26,16 +26,11 @@ APIs.
 - Creates validated daily PostgreSQL dumps, uploads them to a private encrypted S3 bucket through an EC2 IAM role, and applies independent local and off-site retention.
 - Verifies formatting, linting, typing, security checks, migrations, tests, container builds, dependency vulnerabilities, and Git history in CI.
 
-## Architectural Evolution: Personal Engine to SaaS v2
-
-- **v1.0 (Current Live Repository):** Built as a personal dogfooding platform to automate high-signal opportunity discovery across focused Ukrainian job channels. Battle-tested in production to validate ingestion reliability, deduplication heuristics, and automated AWS EC2/S3 operational pipelines.
-- **v2.0 (In Active Private Staging):** Multi-tenant SaaS evolution featuring tenant data isolation, per-user custom scoring profiles & negative skill filters, session auth & CSRF protection, server-persisted Kanban pipeline, and per-user Telegram alert routing.
-
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Sources[Public APIs, RSS, JSON-LD, HTML and ATS APIs] --> Adapters[BaseSource adapters]
+    Sources[RSS, JSON-LD and public job pages] --> Adapters[BaseSource adapters]
     Adapters --> Ingestion[Normalization, ingestion and reconciliation]
     Ingestion --> DB[(PostgreSQL 17)]
     DB --> Matcher[Deterministic matcher]
@@ -75,8 +70,9 @@ The production registry intentionally enables only four sources used in the curr
 | Robota.ua | public pages through a read-only text reader | employment |
 | DOU Jobs | RSS | employment |
 
-Retired adapter implementations remain covered by tests, but they are disabled in production and
-their listings can be removed with the reviewed maintenance command below.
+The source registry contains only these adapters. The retired-source maintenance command remains
+available temporarily so historical database rows can be audited and cleaned in a separate,
+explicitly approved operation.
 
 ## Security model
 
@@ -203,6 +199,8 @@ Run maintenance operations:
 `audit-duplicates` reports conservative cross-source duplicate candidates without changing data.
 Review its output before running the mutating deduplication command.
 `prune-retired-sources` is also a dry run by default. Review its counts before adding `--apply`.
+The applied cleanup permanently removes retired source rows, their run history and listings, and
+opportunities that no longer have a retained listing.
 
 Test one adapter against its live source without writing to PostgreSQL:
 

@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from jobradar.config import Settings
+from jobradar.sources.policy import RETAINED_SOURCE_NAMES
 from jobradar.sources.registry import build_source_registry
 
 
@@ -85,24 +86,17 @@ def test_production_accepts_complete_secure_configuration() -> None:
     assert settings.app_env == "production"
 
 
-def test_source_coverage_defaults_use_audited_balanced_limits() -> None:
+def test_active_source_coverage_defaults_use_audited_balanced_limits() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.djinni_max_items == 200
     assert settings.djinni_max_pages == 20
-    assert settings.freelancer_max_pages_per_query == 3
     assert settings.workua_max_items == 75
-    assert settings.startup_jobs_max_pages == 10
-    assert settings.startup_jobs_max_items == 500
-    assert settings.jobicy_max_items == 200
+    assert settings.robota_ua_max_items == 100
+    assert settings.dou_jobs_max_items == 100
 
 
 def test_default_registry_contains_only_retained_sources() -> None:
     settings = Settings(_env_file=None)
 
-    assert {source.name for source in build_source_registry(settings)} == {
-        "djinni",
-        "dou_jobs",
-        "robota_ua",
-        "workua",
-    }
+    assert {source.name for source in build_source_registry(settings)} == RETAINED_SOURCE_NAMES
