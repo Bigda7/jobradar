@@ -108,7 +108,10 @@ async def test_expiration_archives_all_opportunities_at_the_configured_age(
         )
         fallback.first_seen_at = now - timedelta(days=31)
 
-    summary = await StaleExpirationService(sqlite_session_factory).expire_stale(
+    summary = await StaleExpirationService(
+        sqlite_session_factory,
+        batch_size=1,
+    ).expire_stale(
         employment_days=30,
         freelance_days=30,
         now=now,
@@ -219,3 +222,10 @@ async def test_expiration_restores_recent_listings_archived_as_missing_only(
         assert listings["missing-recent"].is_active is True
         assert listings["missing-recent"].archive_reason is None
         assert listings["closed-recent"].is_active is False
+
+
+def test_expiration_rejects_a_non_positive_batch_size(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with pytest.raises(ValueError, match="batch size must be positive"):
+        StaleExpirationService(sqlite_session_factory, batch_size=0)
