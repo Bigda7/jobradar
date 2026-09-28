@@ -1,6 +1,6 @@
 # Source Access Policy
 
-Last reviewed: 2026-09-25
+Last reviewed: 2026-09-28
 
 This document records the access method, attribution requirements, retention constraints, and
 commercial-use risk for the four sources supported by the current production registry. It is an
@@ -14,7 +14,8 @@ checked again before a public or commercial release.
 - Prefer documented public APIs and RSS feeds over HTML or undocumented frontend APIs.
 - Respect upstream request limits even when the adapter can technically request more data.
 - Re-review this table before using a source in any public, commercial, or multi-user product.
-- Do not use a proxy or reader service to bypass an upstream access restriction.
+- Do not use a proxy or reader service to bypass an upstream access restriction. The
+  existing Work.ua reader integration is not an exception or evidence of permission.
 
 ## Source Register
 
@@ -23,14 +24,44 @@ checked again before a public or commercial release.
 | Djinni | Public job pages and JobPosting JSON-LD | Conditional | Keep Djinni attribution and the original URL | Request written permission before commercial use |
 | DOU Jobs | Official vacancy RSS feed | Approved | Keep DOU attribution and the original URL | Recheck feed terms before commercial launch |
 | Robota.ua | Public search pages and public vacancy details | Conditional | Preserve the original meaning and include a mandatory source link | Confirm commercial reuse before a commercial or multi-user launch |
-| Work.ua | Public pages through a read-only text reader | Permission required | Keep Work.ua attribution and the original URL; configured search paths are disallowed by Work.ua robots directives | Do not expand coverage; disable for commercial or multi-user use unless Work.ua grants permission |
+| Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Keep current polling and coverage unchanged; reassess terms and seek explicit permission before commercial or multi-user use |
+
+## Work.ua Review for the Public Portfolio
+
+The current registry enables Work.ua by default. The adapter requests configured Work.ua search
+and vacancy paths through `r.jina.ai`, not directly from Work.ua, and stores parsed vacancy text.
+JobRadar's public `/jobs` and `/matches` responses include the stored description, title,
+salary, source name, and original URL. This is public redistribution of source content, not only
+private job-search automation. The reader's ability to return a page does not establish
+permission from Work.ua, and the application cannot verify how the reader handles upstream
+security challenges or access controls.
+
+The [published robots directives](https://www.work.ua/robots.txt), checked on 2026-09-28,
+include `Disallow: /en/jobs-*-/` under `User-agent: *`. The currently configured
+`/en/jobs-remote-<term>/` search paths do not match that specific trailing-hyphen pattern.
+This corrects the previous blanket statement that all configured paths were disallowed. It
+does not establish permission for automated retrieval, use of a third-party reader, or public
+republication. Robots directives, search paths, and bot protections can change independently.
+
+The [published service conditions](https://www.work.ua/about-us/conditions/) do not serve as a
+documented permission grant to JobRadar for this use, and this repository contains no record of
+such a grant. The engineering status is therefore **unresolved for the intentionally public
+portfolio**. On 2026-09-28, the owner decided to keep Work.ua collection and display enabled
+for the existing public personal portfolio. This operating decision is not authorization from
+Work.ua. Keep the current polling, search coverage, and data reuse unchanged. Reassess the
+integration if upstream terms, access controls, or product scope change, and review the terms
+again before another public release. This decision changes documentation only; it does not
+alter the running source, remove stored listings, or make a legal determination.
 
 ## Primary References
 
 - Robota.ua usage notice: https://robota.ua/?goHome=true
 - Work.ua robots directives: https://www.work.ua/robots.txt
+- Work.ua service conditions: https://www.work.ua/about-us/conditions/
 
-## Unresolved Production Decisions
+## Open Source Access Questions
 
 1. Confirm commercial reuse terms for Djinni and Robota.ua before any public or commercial use.
-2. Work.ua must not be carried into a commercial or multi-user product without written permission.
+2. Work.ua permission for automated collection and public display remains unverified under the
+   owner's decision to keep the existing portfolio integration enabled. Commercial or multi-user
+   reuse requires a separate review and explicit permission.

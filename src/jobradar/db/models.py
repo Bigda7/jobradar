@@ -43,6 +43,7 @@ class Source(TimestampMixin, Base):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     failure_alert_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    failure_alert_reason: Mapped[str | None] = mapped_column(String(30))
     coverage_alert_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     coverage_alert_reason: Mapped[str | None] = mapped_column(String(50))
 
@@ -245,6 +246,7 @@ class MatchEvaluation(Base):
     profile_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     rules_version: Mapped[str] = mapped_column(String(64), nullable=False)
     listing_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    exchange_rates_hash: Mapped[str | None] = mapped_column(String(64))
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     reasons: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list, nullable=False)
     concerns: Mapped[list[str]] = mapped_column(JSON_TYPE, default=list, nullable=False)
@@ -287,6 +289,9 @@ class NotificationDelivery(Base):
     )
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message_text: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
@@ -305,6 +310,14 @@ class NotificationPreference(TimestampMixin, Base):
     is_paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationScanCursor(Base):
+    __tablename__ = "notification_scan_cursors"
+
+    profile_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(50), primary_key=True)
+    minimum_first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class OpportunityUserState(TimestampMixin, Base):
@@ -337,6 +350,10 @@ class TelegramOpportunityMessage(TimestampMixin, Base):
         PRIMARY_KEY_TYPE,
         nullable=False,
         unique=True,
+    )
+    delivery_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notification_deliveries.id", ondelete="SET NULL"),
+        index=True,
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 

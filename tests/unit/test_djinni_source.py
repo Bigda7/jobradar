@@ -138,3 +138,22 @@ async def test_djinni_source_reports_missing_structured_data() -> None:
         source = DjinniSource(client=client)
         with pytest.raises(DjinniSourceError, match="JobPosting JSON-LD"):
             _ = [listing async for listing in source.fetch()]
+
+
+@pytest.mark.asyncio
+async def test_djinni_skips_malformed_posting_without_losing_valid_items() -> None:
+    malformed = deepcopy(REMOTE_JOB)
+    malformed.pop("identifier")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, text="<html></html>")
+        return httpx.Response(200, text=_html(malformed, REMOTE_JOB))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, max_pages=2)
+        listings = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in listings] == ["844408"]
+    assert source.consume_warnings() == ("Djinni skipped 1 malformed JobPosting items.",)
+    assert source.consume_run_metrics().filtered_count == 1

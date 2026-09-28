@@ -8,12 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from jobradar.db.models import (
     Listing,
     MatchEvaluation,
+    NotificationDelivery,
     Opportunity,
     OpportunityUserState,
     Source,
     SourceRun,
+    TelegramOpportunityMessage,
 )
-from jobradar.domain.enums import OpportunityDisposition, OpportunityKind, RunStatus
+from jobradar.domain.enums import DeliveryStatus, OpportunityDisposition, OpportunityKind, RunStatus
 from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
 from jobradar.ingestion.service import IngestionService, jittered_poll_interval_seconds
 from jobradar.matching.profile import BOHDAN_PROFILE
@@ -474,7 +476,7 @@ async def test_cross_source_title_company_duplicate_uses_one_opportunity(
             "url": "https://alternate.example/jobs/react-developer",
             "title": "junior full-stack developer",
             "company": "EXAMPLE LABS",
-            "description": "A second platform copy with a different description.",
+            "description": first_listing["description"],
         }
     )
     service = IngestionService(sqlite_session_factory)
@@ -531,6 +533,108 @@ async def test_cross_source_duplicate_ignores_legal_suffix_and_context_tag(
         assert await session.scalar(select(func.count()).select_from(Listing)) == 2
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("location", "Remote Worldwide"),
+        ("published_at", "2026-09-22T09:00:00+00:00"),
+        (
+            "description",
+            "Maintain a separate data platform and build analytics pipelines with SQL.",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_ambiguous_cross_source_candidates_remain_separate(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    field: str,
+    value: str,
+) -> None:
+    first_listing = deepcopy(DEFAULT_LISTINGS[0])
+    second_listing = deepcopy(first_listing)
+    second_listing.update(
+        {
+            "id": "alternate-ambiguous",
+            "url": "https://alternate.example/jobs/ambiguous",
+            field: value,
+        }
+    )
+    service = IngestionService(sqlite_session_factory)
+
+    await service.run_source(MockSource((first_listing,)))
+    result = await service.run_source(AlternateMockSource((second_listing,)))
+
+    assert result.created == 1
+    assert result.duplicates == 0
+    async with sqlite_session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2
+
+
+@pytest.mark.asyncio
+async def test_cross_source_lookup_skips_ambiguous_identity_before_confident_match(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    ambiguous = deepcopy(DEFAULT_LISTINGS[0])
+    ambiguous["description"] = (
+        "Maintain a separate data platform and build analytics pipelines with SQL."
+    )
+    confident = deepcopy(DEFAULT_LISTINGS[0])
+    confident.update(
+        {
+            "id": "same-source-confident",
+            "url": "https://example.com/jobs/same-source-confident",
+        }
+    )
+    cross_posting = deepcopy(confident)
+    cross_posting.update(
+        {
+            "id": "alternate-confident",
+            "url": "https://alternate.example/jobs/alternate-confident",
+        }
+    )
+    service = IngestionService(sqlite_session_factory)
+
+    first = await service.run_source(MockSource((ambiguous, confident)))
+    second = await service.run_source(AlternateMockSource((cross_posting,)))
+
+    assert first.created == 2
+    assert second.duplicates == 1
+    async with sqlite_session_factory() as session:
+        listings = {
+            listing.external_id: listing for listing in await session.scalars(select(Listing))
+        }
+        assert (
+            listings["alternate-confident"].opportunity_id
+            == listings["same-source-confident"].opportunity_id
+        )
+        assert listings["alternate-confident"].opportunity_id != listings["mock-001"].opportunity_id
+
+
+@pytest.mark.asyncio
+async def test_same_source_roles_with_matching_content_remain_separate(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first_listing = deepcopy(DEFAULT_LISTINGS[0])
+    second_listing = deepcopy(first_listing)
+    second_listing.update(
+        {
+            "id": "second-opening",
+            "url": "https://example.com/jobs/second-opening",
+        }
+    )
+
+    result = await IngestionService(sqlite_session_factory).run_source(
+        MockSource((first_listing, second_listing))
+    )
+    merge = await CrossSourceDeduplicationService(sqlite_session_factory).merge_existing()
+
+    assert result.created == 2
+    assert result.duplicates == 0
+    assert merge.merged_opportunities == 0
+    async with sqlite_session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2
+
+
 @pytest.mark.asyncio
 async def test_cross_source_duplicate_promotes_richer_listing_to_canonical(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
@@ -538,7 +642,10 @@ async def test_cross_source_duplicate_promotes_richer_listing_to_canonical(
     sparse = deepcopy(DEFAULT_LISTINGS[0])
     sparse.update(
         {
-            "description": "React role.",
+            "description": (
+                "Build and test React and Django applications for remote teams "
+                "with PostgreSQL and Python."
+            ),
             "salary_min": None,
             "salary_max": None,
             "salary_currency": None,
@@ -550,7 +657,7 @@ async def test_cross_source_duplicate_promotes_richer_listing_to_canonical(
         {
             "id": "alternate-rich",
             "url": "https://alternate.example/jobs/rich",
-            "description": "Build and test React and Django applications. " * 20,
+            "description": sparse["description"] + " Add API tests.",
             "salary_min": "1200",
             "salary_max": "1800",
             "salary_currency": "USD",
@@ -614,22 +721,30 @@ async def test_existing_cross_source_duplicates_are_merged_with_user_state(
     service = IngestionService(sqlite_session_factory)
     await service.run_source(MockSource((DEFAULT_LISTINGS[0],)))
     async with sqlite_session_factory() as session, session.begin():
-        source = await session.scalar(select(Source).where(Source.name == "mock"))
-        assert source is not None
+        alternate_source = Source(
+            name="legacy_alternate",
+            display_name="Legacy Alternate",
+            opportunity_kind=OpportunityKind.EMPLOYMENT.value,
+            enabled=True,
+        )
+        session.add(alternate_source)
+        await session.flush()
         duplicate = Opportunity(
             kind=OpportunityKind.EMPLOYMENT.value,
             canonical_key="duplicate-key",
             title="JUNIOR FULL-STACK DEVELOPER",
             company="example labs",
-            description="Duplicate description",
+            description=DEFAULT_LISTINGS[0]["description"],
+            location_text=DEFAULT_LISTINGS[0]["location"],
             work_mode="remote",
+            published_at=datetime.fromisoformat(DEFAULT_LISTINGS[0]["published_at"]),
         )
         session.add(duplicate)
         await session.flush()
         session.add_all(
             (
                 Listing(
-                    source_id=source.id,
+                    source_id=alternate_source.id,
                     opportunity_id=duplicate.id,
                     external_id="legacy-duplicate",
                     source_url="https://legacy.example/jobs/duplicate",
@@ -655,6 +770,229 @@ async def test_existing_cross_source_duplicates_are_merged_with_user_state(
         state = await session.get(OpportunityUserState, opportunities[0].id)
         assert state is not None
         assert state.disposition == OpportunityDisposition.FAVORITE.value
+
+
+@pytest.mark.asyncio
+async def test_existing_duplicates_are_merged_when_first_candidate_is_distinct(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sqlite_session_factory() as session, session.begin():
+        sources = [
+            Source(
+                name=f"legacy_source_{index}",
+                display_name=f"Legacy Source {index}",
+                opportunity_kind=OpportunityKind.EMPLOYMENT.value,
+                enabled=True,
+            )
+            for index in range(3)
+        ]
+        session.add_all(sources)
+        await session.flush()
+        descriptions = (
+            "Develop Java mobile applications and maintain secure enterprise systems for clients.",
+            DEFAULT_LISTINGS[0]["description"],
+            DEFAULT_LISTINGS[0]["description"],
+        )
+        opportunities = [
+            Opportunity(
+                kind=OpportunityKind.EMPLOYMENT.value,
+                canonical_key=f"legacy-role-{index}",
+                title=DEFAULT_LISTINGS[0]["title"],
+                company=DEFAULT_LISTINGS[0]["company"],
+                description=description,
+                location_text=DEFAULT_LISTINGS[0]["location"],
+                work_mode="remote",
+                published_at=datetime.fromisoformat(DEFAULT_LISTINGS[0]["published_at"]),
+            )
+            for index, description in enumerate(descriptions)
+        ]
+        session.add_all(opportunities)
+        await session.flush()
+        session.add_all(
+            Listing(
+                source_id=source.id,
+                opportunity_id=opportunity.id,
+                external_id=f"legacy-listing-{index}",
+                source_url=f"https://legacy.example/jobs/{index}",
+                canonical_url=f"https://legacy.example/jobs/{index}",
+                content_hash=f"{index}" * 64,
+                raw_data={},
+            )
+            for index, (source, opportunity) in enumerate(zip(sources, opportunities, strict=True))
+        )
+        distinct_id = opportunities[0].id
+        duplicate_ids = {opportunity.id for opportunity in opportunities[1:]}
+
+    summary = await CrossSourceDeduplicationService(sqlite_session_factory).merge_existing()
+
+    assert summary.duplicate_groups == 1
+    assert summary.merged_opportunities == 1
+    async with sqlite_session_factory() as session:
+        remaining_ids = set(await session.scalars(select(Opportunity.id)))
+        assert remaining_ids == {distinct_id, min(duplicate_ids)}
+        listing_opportunity_ids = list(await session.scalars(select(Listing.opportunity_id)))
+        assert listing_opportunity_ids.count(min(duplicate_ids)) == 2
+
+
+@pytest.mark.parametrize(
+    "primary_status",
+    (
+        DeliveryStatus.QUEUED,
+        DeliveryStatus.SKIPPED_PAUSED,
+        DeliveryStatus.FAILED,
+    ),
+)
+@pytest.mark.asyncio
+async def test_duplicate_merge_preserves_retry_payload(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    primary_status: DeliveryStatus,
+) -> None:
+    retry_at = datetime.now(UTC) + timedelta(minutes=2)
+    async with sqlite_session_factory() as session, session.begin():
+        primary = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="primary-retry",
+            title="Python Developer",
+        )
+        duplicate = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="duplicate-retry",
+            title="Python Developer",
+        )
+        session.add_all((primary, duplicate))
+        await session.flush()
+        session.add_all(
+            (
+                NotificationDelivery(
+                    opportunity_id=primary.id,
+                    profile_id="test-profile",
+                    channel="telegram",
+                    event_key="same-event",
+                    status=primary_status.value,
+                ),
+                NotificationDelivery(
+                    opportunity_id=duplicate.id,
+                    profile_id="test-profile",
+                    channel="telegram",
+                    event_key="same-event",
+                    status=DeliveryStatus.FAILED.value,
+                    attempts=2,
+                    message_text="<b>Stored match</b>",
+                    source_url="https://example.invalid/job",
+                    next_attempt_at=retry_at,
+                ),
+            )
+        )
+        await session.flush()
+        await CrossSourceDeduplicationService._merge_deliveries(session, primary.id, duplicate.id)
+
+    async with sqlite_session_factory() as session:
+        deliveries = list(await session.scalars(select(NotificationDelivery)))
+        assert len(deliveries) == 1
+        delivery = deliveries[0]
+        assert delivery.opportunity_id == primary.id
+        assert delivery.status == DeliveryStatus.FAILED.value
+        assert delivery.attempts == 2
+        assert delivery.message_text == "<b>Stored match</b>"
+        assert delivery.source_url == "https://example.invalid/job"
+        assert delivery.next_attempt_at is not None
+        assert delivery.next_attempt_at.replace(tzinfo=UTC) == retry_at
+
+
+@pytest.mark.asyncio
+async def test_duplicate_merge_preserves_pending_message_link(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sqlite_session_factory() as session, session.begin():
+        primary = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="primary-pending",
+            title="Python Developer",
+        )
+        duplicate = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="duplicate-pending",
+            title="Python Developer",
+        )
+        session.add_all((primary, duplicate))
+        await session.flush()
+        primary_delivery = NotificationDelivery(
+            opportunity_id=primary.id,
+            profile_id="test-profile",
+            channel="telegram",
+            event_key="same-event",
+            status=DeliveryStatus.QUEUED.value,
+        )
+        duplicate_delivery = NotificationDelivery(
+            opportunity_id=duplicate.id,
+            profile_id="test-profile",
+            channel="telegram",
+            event_key="same-event",
+            status=DeliveryStatus.PENDING.value,
+            message_text="<b>Stored match</b>",
+            source_url="https://example.invalid/job",
+        )
+        session.add_all((primary_delivery, duplicate_delivery))
+        await session.flush()
+        session.add(
+            TelegramOpportunityMessage(
+                opportunity_id=duplicate.id,
+                telegram_message_id=42,
+                delivery_id=duplicate_delivery.id,
+            )
+        )
+        await session.flush()
+        await CrossSourceDeduplicationService._merge_deliveries(session, primary.id, duplicate.id)
+
+    async with sqlite_session_factory() as session:
+        delivery = await session.scalar(select(NotificationDelivery))
+        message = await session.scalar(select(TelegramOpportunityMessage))
+        assert delivery is not None
+        assert message is not None
+        assert delivery.status == DeliveryStatus.PENDING.value
+        assert delivery.message_text == "<b>Stored match</b>"
+        assert message.delivery_id == delivery.id
+
+
+@pytest.mark.asyncio
+async def test_existing_ambiguous_candidates_are_not_merged(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sqlite_session_factory() as session, session.begin():
+        session.add_all(
+            (
+                Opportunity(
+                    kind=OpportunityKind.EMPLOYMENT.value,
+                    canonical_key="first-role",
+                    title="Junior Python Developer",
+                    company="Example Labs",
+                    description="Build Python APIs and maintain Django services for remote teams.",
+                    location_text="Remote Europe",
+                    work_mode="remote",
+                    published_at=datetime(2026, 8, 1, tzinfo=UTC),
+                ),
+                Opportunity(
+                    kind=OpportunityKind.EMPLOYMENT.value,
+                    canonical_key="second-role",
+                    title="Junior Python Developer",
+                    company="Example Labs",
+                    description="Build Python APIs and maintain Django services for remote teams.",
+                    location_text="Remote Europe",
+                    work_mode="remote",
+                    published_at=datetime(2026, 9, 1, tzinfo=UTC),
+                ),
+            )
+        )
+
+    service = CrossSourceDeduplicationService(sqlite_session_factory)
+    audit = await service.audit_existing()
+    summary = await service.merge_existing()
+
+    assert audit.candidate_groups == 1
+    assert summary.duplicate_groups == 0
+    assert summary.merged_opportunities == 0
+    async with sqlite_session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2
 
 
 @pytest.mark.asyncio

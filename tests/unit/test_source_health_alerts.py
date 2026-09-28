@@ -71,6 +71,7 @@ async def _create_run(
     candidate_count: int = 0,
     discovered_count: int = 0,
     limit_reached: bool = False,
+    error_count: int = 0,
 ) -> int:
     async with session_factory() as session, session.begin():
         run = SourceRun(
@@ -82,13 +83,14 @@ async def _create_run(
             candidate_count=candidate_count,
             discovered_count=discovered_count,
             limit_reached=limit_reached,
+            error_count=error_count,
         )
         session.add(run)
         source = await session.get(Source, source_id)
         assert source is not None
         source.last_run_at = started_at
         source.last_error = error_message
-        if status is RunStatus.SUCCEEDED:
+        if status in {RunStatus.SUCCEEDED, RunStatus.PARTIAL}:
             source.last_success_at = started_at
         await session.flush()
         return run.id
@@ -157,6 +159,7 @@ async def test_source_health_alerts_after_two_failures_and_once_on_recovery(
         source = await session.get(Source, source_id)
         assert source is not None
         assert source.failure_alert_active is False
+        assert source.failure_alert_reason is None
 
 
 @pytest.mark.asyncio
@@ -190,6 +193,208 @@ async def test_failed_source_alert_delivery_is_retried(
     assert retry_result.event == "failure"
     assert retry_result.sent is True
     assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_latest_source_run_retries_alert_without_a_new_poll(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    for offset in range(2):
+        await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.FAILED,
+            started_at=started_at + timedelta(hours=offset),
+            error_message="Search page unavailable",
+        )
+    telegram = FailingOnceTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    first = await service.process_latest_runs()
+    second = await service.process_latest_runs()
+    third = await service.process_latest_runs()
+
+    assert [(result.event, result.sent) for result in first] == [("failure", False)]
+    assert [(result.event, result.sent) for result in second] == [("failure", True)]
+    assert [(result.event, result.sent) for result in third] == [(None, False)]
+    assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_source_health_alerts_after_two_partial_runs_and_once_on_recovery(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    telegram = RecordingTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    first_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.PARTIAL,
+        started_at=started_at,
+        error_message="Detail request failed",
+        error_count=1,
+    )
+    first_result = await service.process_run(first_run_id)
+    second_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.PARTIAL,
+        started_at=started_at + timedelta(hours=1),
+        error_message="Detail request failed",
+        error_count=2,
+    )
+    partial_result = await service.process_run(second_run_id)
+    duplicate_result = await service.process_run(second_run_id)
+
+    assert first_result.event is None
+    assert partial_result.event == "partial"
+    assert partial_result.sent is True
+    assert duplicate_result.event is None
+    assert len(telegram.messages) == 1
+    assert "Частичный сбор источника: Work.ua" in telegram.messages[0]
+    assert "Два последних запуска завершились частично." in telegram.messages[0]
+    assert "Ошибок в последнем запуске: 2." in telegram.messages[0]
+
+    recovery_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=started_at + timedelta(hours=2),
+        discovered_count=45,
+    )
+    recovery_result = await service.process_run(recovery_id)
+
+    assert recovery_result.event == "recovery"
+    assert recovery_result.sent is True
+    assert len(telegram.messages) == 2
+    assert "Источник восстановлен: Work.ua" in telegram.messages[1]
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
+        assert source.failure_alert_active is False
+        assert source.failure_alert_reason is None
+
+
+@pytest.mark.asyncio
+async def test_partial_alert_delivery_is_retried_without_duplicate_state(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    for offset in range(2):
+        run_id = await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.PARTIAL,
+            started_at=started_at + timedelta(hours=offset),
+            error_message="Detail request failed",
+            error_count=1,
+        )
+    telegram = FailingOnceTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    failed_result = await service.process_run(run_id)
+    retry_result = await service.process_run(run_id)
+
+    assert failed_result.event == "partial"
+    assert failed_result.sent is False
+    assert retry_result.event == "partial"
+    assert retry_result.sent is True
+    assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_run_does_not_clear_active_failure_alert(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    telegram = RecordingTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+    for offset in range(2):
+        failed_run_id = await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.FAILED,
+            started_at=started_at + timedelta(hours=offset),
+            error_message="Search page unavailable",
+        )
+        await service.process_run(failed_run_id)
+
+    partial_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.PARTIAL,
+        started_at=started_at + timedelta(hours=2),
+        error_message="Detail request failed",
+        error_count=1,
+    )
+    partial_result = await service.process_run(partial_run_id)
+
+    assert partial_result.event is None
+    assert len(telegram.messages) == 1
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
+        assert source.failure_alert_active is True
+        assert source.failure_alert_reason == "failed"
+
+
+@pytest.mark.asyncio
+async def test_partial_alert_escalates_after_two_failed_runs(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    telegram = RecordingTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    for offset in range(2):
+        partial_run_id = await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.PARTIAL,
+            started_at=started_at + timedelta(hours=offset),
+            error_message="Detail request failed",
+            error_count=1,
+        )
+        partial_result = await service.process_run(partial_run_id)
+
+    first_failure_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.FAILED,
+        started_at=started_at + timedelta(hours=2),
+        error_message="Search page unavailable",
+    )
+    first_failure_result = await service.process_run(first_failure_id)
+    second_failure_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.FAILED,
+        started_at=started_at + timedelta(hours=3),
+        error_message="Search page unavailable",
+    )
+    failure_result = await service.process_run(second_failure_id)
+    duplicate_result = await service.process_run(second_failure_id)
+
+    assert partial_result.event == "partial"
+    assert first_failure_result.event is None
+    assert failure_result.event == "failure"
+    assert failure_result.sent is True
+    assert duplicate_result.event is None
+    assert len(telegram.messages) == 2
+    assert "Проблема с источником: Work.ua" in telegram.messages[1]
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
+        assert source.failure_alert_active is True
+        assert source.failure_alert_reason == "failed"
 
 
 @pytest.mark.asyncio
@@ -253,6 +458,93 @@ async def test_source_health_alerts_on_new_repeated_limit_and_recovery(
         source = await session.get(Source, source_id)
         assert source is not None
         assert source.coverage_alert_active is False
+        assert source.coverage_alert_reason is None
+
+
+@pytest.mark.asyncio
+async def test_failed_coverage_alert_is_retried_on_next_affected_run(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=started_at)
+    telegram = FailingOnceTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    for offset in range(2):
+        run_id = await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.SUCCEEDED,
+            started_at=started_at + timedelta(hours=offset),
+            discovered_count=100,
+            limit_reached=True,
+        )
+        assert (await service.process_run(run_id)).event is None
+
+    failed_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=started_at + timedelta(hours=2),
+        discovered_count=100,
+        limit_reached=True,
+    )
+    failed = await service.process_run(failed_run_id)
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
+        assert source.coverage_alert_active is False
+        assert source.coverage_alert_reason == "repeated_limit"
+
+    retry_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=started_at + timedelta(hours=3),
+        discovered_count=100,
+        limit_reached=True,
+    )
+    retried = await service.process_run(retry_run_id)
+
+    assert failed.event == "coverage_issue"
+    assert failed.sent is False
+    assert retried.event == "coverage_issue"
+    assert retried.sent is True
+    assert len(telegram.messages) == 1
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
+        assert source.coverage_alert_active is True
+        assert source.coverage_alert_reason == "repeated_limit"
+
+
+@pytest.mark.asyncio
+async def test_resolved_coverage_issue_clears_failed_alert_retry_state(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=started_at)
+    async with sqlite_session_factory() as session, session.begin():
+        source = await session.get(Source, source_id)
+        assert source is not None
+        source.coverage_alert_reason = "repeated_limit"
+
+    healthy_run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=started_at + timedelta(hours=1),
+        discovered_count=50,
+    )
+    result = await SourceHealthAlertService(
+        sqlite_session_factory,
+        RecordingTelegramClient(),
+    ).process_run(healthy_run_id)
+
+    assert result.event is None
+    async with sqlite_session_factory() as session:
+        source = await session.get(Source, source_id)
+        assert source is not None
         assert source.coverage_alert_reason is None
 
 

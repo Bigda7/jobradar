@@ -9,6 +9,7 @@ from jobradar.domain.enums import OpportunityKind, OpportunityStatus, WorkMode
 from jobradar.ingestion.canonical import canonical_listing_order
 from jobradar.matching.profile import SearchProfile
 from jobradar.matching.scorer import MatchCandidate, score_candidate
+from jobradar.notifications.currency import ExchangeRateProvider, ExchangeRates
 
 
 @dataclass(slots=True)
@@ -18,8 +19,13 @@ class MatchingSummary:
 
 
 class MatchingService:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        rate_provider: ExchangeRateProvider | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._rate_provider = rate_provider
 
     async def evaluate(
         self,
@@ -28,6 +34,7 @@ class MatchingService:
         force: bool = False,
     ) -> MatchingSummary:
         summary = MatchingSummary()
+        rates = await self._rate_provider.fetch_rates() if self._rate_provider else None
         async with self._session_factory() as session:
             opportunity_ids = (
                 await session.scalars(
@@ -44,7 +51,9 @@ class MatchingService:
             ).all()
 
         for opportunity_id in opportunity_ids:
-            changed = await self._evaluate_opportunity(opportunity_id, profile, force=force)
+            changed = await self._evaluate_opportunity(
+                opportunity_id, profile, rates=rates, force=force
+            )
             if changed:
                 summary.evaluated += 1
             else:
@@ -56,6 +65,7 @@ class MatchingService:
         opportunity_id: int,
         profile: SearchProfile,
         *,
+        rates: ExchangeRates | None,
         force: bool = False,
     ) -> bool:
         async with self._session_factory() as session, session.begin():
@@ -72,6 +82,12 @@ class MatchingService:
             )
             if listing is None:
                 return False
+            rates_hash = (
+                rates.conversion_fingerprint(opportunity.salary_currency)
+                if rates is not None
+                and (opportunity.salary_min is not None or opportunity.salary_max is not None)
+                else None
+            )
             evaluation = await session.scalar(
                 select(MatchEvaluation).where(
                     MatchEvaluation.opportunity_id == opportunity_id,
@@ -83,6 +99,7 @@ class MatchingService:
                 not force
                 and evaluation is not None
                 and evaluation.listing_content_hash == listing.content_hash
+                and evaluation.exchange_rates_hash == rates_hash
             ):
                 return False
 
@@ -103,6 +120,7 @@ class MatchingService:
                     raw_data=listing.raw_data,
                 ),
                 profile,
+                rates,
             )
             if evaluation is None:
                 evaluation = MatchEvaluation(
@@ -110,6 +128,7 @@ class MatchingService:
                     profile_id=profile.profile_id,
                     rules_version=profile.rules_version,
                     listing_content_hash=listing.content_hash,
+                    exchange_rates_hash=rates_hash,
                     score=result.score,
                     reasons=list(result.reasons),
                     concerns=list(result.concerns),
@@ -118,6 +137,7 @@ class MatchingService:
                 session.add(evaluation)
             else:
                 evaluation.listing_content_hash = listing.content_hash
+                evaluation.exchange_rates_hash = rates_hash
                 evaluation.score = result.score
                 evaluation.reasons = list(result.reasons)
                 evaluation.concerns = list(result.concerns)

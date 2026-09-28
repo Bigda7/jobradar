@@ -65,6 +65,7 @@ if [[ ! -s "${temporary_path}" ]]; then
 fi
 
 docker compose exec -T db pg_restore --list <"${temporary_path}" >/dev/null
+bash "${project_dir}/scripts/verify_postgres_backup.sh" "${temporary_path}"
 mv "${temporary_path}" "${final_path}"
 trap - EXIT
 

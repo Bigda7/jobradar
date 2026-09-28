@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from typing import Any
 
@@ -15,7 +16,11 @@ from jobradar.notifications.currency import ExchangeRates
 from jobradar.notifications.messages import TelegramMessageRegistry
 from jobradar.notifications.preferences import NotificationPreferenceService
 from jobradar.notifications.service import NotificationService
-from jobradar.notifications.telegram import InlineKeyboardMarkup, TelegramClient
+from jobradar.notifications.telegram import (
+    InlineKeyboardMarkup,
+    TelegramClient,
+    TelegramDeliveryError,
+)
 from jobradar.opportunities.service import OpportunityStateService
 from jobradar.sources.mock import MockSource
 
@@ -109,6 +114,44 @@ async def _bot(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [TelegramDeliveryError, RuntimeError])
+async def test_polling_retries_failed_update_before_later_updates(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[Exception],
+) -> None:
+    bot, telegram, _, _ = await _bot(sqlite_session_factory)
+    stop_event = asyncio.Event()
+    offsets: list[int | None] = []
+    handled: list[int] = []
+    updates = [{"update_id": update_id} for update_id in (1, 2, 3)]
+
+    async def get_updates(offset: int | None, timeout_seconds: int) -> list[dict[str, Any]]:
+        offsets.append(offset)
+        return [update for update in updates if offset is None or update["update_id"] >= offset]
+
+    async def handle_update(update: dict[str, Any]) -> None:
+        update_id = update["update_id"]
+        handled.append(update_id)
+        if update_id == 2 and handled.count(2) == 1:
+            raise failure_type("Temporary update failure")
+        if update_id == 3:
+            stop_event.set()
+
+    async def skip_retry_delay(stop: asyncio.Event) -> None:
+        assert stop is stop_event
+
+    monkeypatch.setattr(telegram, "get_updates", get_updates)
+    monkeypatch.setattr(bot, "handle_update", handle_update)
+    monkeypatch.setattr("jobradar.bot._wait_for_retry", skip_retry_delay)
+
+    await bot.run(stop_event)
+
+    assert offsets == [None, 2]
+    assert handled == [1, 2, 2, 3]
+
+
+@pytest.mark.asyncio
 async def test_callbacks_persist_favorite_and_hidden_state(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -153,6 +196,37 @@ async def test_callbacks_persist_favorite_and_hidden_state(
     restored_buttons = telegram.edits[-1][2]["inline_keyboard"][0]
     assert restored_buttons[0]["callback_data"] == f"favorite:{opportunity_id}"
     assert restored_buttons[1]["callback_data"] == f"hide:{opportunity_id}"
+
+
+@pytest.mark.asyncio
+async def test_failed_favorite_feedback_does_not_retry_completed_toggle(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot, telegram, states, opportunity_ids = await _bot(sqlite_session_factory)
+    opportunity_id = opportunity_ids[0]
+
+    async def fail_markup(
+        chat_id: int,
+        message_id: int,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> None:
+        raise TelegramDeliveryError("Temporary markup failure")
+
+    monkeypatch.setattr(telegram, "edit_message_reply_markup", fail_markup)
+
+    await bot.handle_update(
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "callback-1",
+                "data": f"favorite:{opportunity_id}",
+                "message": {"message_id": 10, "chat": {"id": 123}},
+            },
+        }
+    )
+
+    assert await states.get_disposition(opportunity_id) is OpportunityDisposition.FAVORITE
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from jobradar.sources.detail_cache import (
     get_with_backoff,
     polite_delay,
 )
+from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://robota.ua"
@@ -98,6 +99,7 @@ class RobotaUaSource(BaseSource):
     name = "robota_ua"
     display_name = "Robota.ua"
     opportunity_kind = OpportunityKind.EMPLOYMENT
+    allowed_listing_hosts = SOURCE_LISTING_HOSTS["robota_ua"]
 
     def __init__(
         self,

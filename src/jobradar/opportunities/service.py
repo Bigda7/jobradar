@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from jobradar.db.models import Listing, MatchEvaluation, Opportunity, OpportunityUserState, Source
 from jobradar.domain.enums import OpportunityDisposition
 from jobradar.ingestion.canonical import canonical_source_link_order
+from jobradar.ingestion.link_filter import trusted_listing_condition
 from jobradar.matching.profile import SearchProfile
 
 
@@ -132,6 +133,7 @@ class OpportunityStateService:
                         Listing.opportunity_id == opportunity_id,
                         Listing.is_active.is_(True),
                         Source.enabled.is_(True),
+                        trusted_listing_condition(),
                     )
                     .order_by(*canonical_source_link_order())
                     .limit(1)
@@ -161,6 +163,7 @@ class OpportunityStateService:
                         Listing.opportunity_id == opportunity.id,
                         Listing.is_active.is_(True),
                         Source.enabled.is_(True),
+                        trusted_listing_condition(),
                     )
                     .order_by(*canonical_source_link_order())
                     .limit(1)

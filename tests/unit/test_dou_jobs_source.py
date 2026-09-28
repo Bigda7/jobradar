@@ -104,6 +104,27 @@ async def test_dou_jobs_source_rejects_xml_entities() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dou_jobs_skips_malformed_item_without_losing_valid_items() -> None:
+    malformed_item = """
+    <item>
+      <title>Remote Python Developer</title>
+      <link>javascript:invalid-link</link>
+      <description>Remote Python and Django work.</description>
+    </item>
+    """
+    rss = RSS.replace("<channel>", f"<channel>{malformed_item}", 1)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=rss))
+    ) as client:
+        source = DouJobsSource(client=client)
+        listings = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in listings] == ["370001", "370004"]
+    assert source.consume_warnings() == ("DOU Jobs skipped 1 malformed RSS items.",)
+    assert source.consume_run_metrics().filtered_count == 4
+
+
+@pytest.mark.asyncio
 async def test_dou_military_listing_reaches_shared_hard_rejection() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: httpx.Response(200, text=RSS))

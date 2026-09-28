@@ -12,7 +12,8 @@ from jobradar.ingestion.service import IngestionService
 from jobradar.logging_config import configure_logging
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
-from jobradar.notifications.currency import NbuExchangeRateClient
+from jobradar.notifications.currency import NbuExchangeRateClient, SnapshotExchangeRateProvider
+from jobradar.notifications.scan_cursor import NotificationScanCursorService
 from jobradar.notifications.service import NotificationService
 from jobradar.notifications.source_health import SourceHealthAlertService
 from jobradar.notifications.telegram import TelegramClient
@@ -30,12 +31,39 @@ class WorkerCycleLockUnavailable(RuntimeError):
 async def run_cycle(*, force_sources: bool = False) -> None:
     settings = get_settings()
     cycle_started_at = datetime.now(UTC)
+    notification_cursor: NotificationScanCursorService | None = None
+    minimum_first_seen_at: datetime | None = None
+    if settings.matching_enabled and settings.telegram_enabled:
+        notification_cursor = NotificationScanCursorService(session_factory)
+        minimum_first_seen_at = await notification_cursor.begin_cycle(
+            BOHDAN_PROFILE.profile_id, "telegram", cycle_started_at
+        )
+    telegram_client: TelegramClient | None = None
+    retried_sent = 0
+    if settings.telegram_enabled:
+        if settings.telegram_bot_token is None or settings.telegram_chat_id is None:
+            raise RuntimeError("Telegram is enabled without complete credentials.")
+        telegram_client = TelegramClient(
+            bot_token=settings.telegram_bot_token.get_secret_value(),
+            chat_id=settings.telegram_chat_id,
+            request_timeout_seconds=settings.telegram_request_timeout_seconds,
+        )
+        retry_summary = await NotificationService(session_factory, telegram_client).retry_due(
+            BOHDAN_PROFILE.profile_id, settings.telegram_max_messages_per_cycle
+        )
+        retried_sent = retry_summary.sent
+        logger.info(
+            "notification_retry_cycle_finished",
+            channel="telegram",
+            considered=retry_summary.considered,
+            sent=retry_summary.sent,
+            failed=retry_summary.failed,
+        )
     ingestion = IngestionService(
         session_factory,
         reconciliation_max_missing_ratio=settings.source_reconciliation_max_missing_ratio,
     )
     sources = build_source_registry(settings)
-    completed_run_ids: list[int] = []
     await ingestion.synchronize_enabled_sources(sources)
     for source in sources:
         poll_interval_seconds = settings.source_poll_interval_seconds(source.name)
@@ -45,8 +73,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
             jitter_ratio=settings.source_poll_jitter_ratio,
             now=cycle_started_at,
         ):
-            result = await ingestion.run_source(source)
-            completed_run_ids.append(result.run_id)
+            await ingestion.run_source(source)
         else:
             logger.info(
                 "source_run_skipped_not_due",
@@ -55,19 +82,9 @@ async def run_cycle(*, force_sources: bool = False) -> None:
                 jitter_ratio=settings.source_poll_jitter_ratio,
             )
 
-    telegram_client: TelegramClient | None = None
-    if settings.telegram_enabled:
-        if settings.telegram_bot_token is None or settings.telegram_chat_id is None:
-            raise RuntimeError("Telegram is enabled without complete credentials.")
-        telegram_client = TelegramClient(
-            bot_token=settings.telegram_bot_token.get_secret_value(),
-            chat_id=settings.telegram_chat_id,
-            request_timeout_seconds=settings.telegram_request_timeout_seconds,
-        )
-        if settings.telegram_source_health_alerts_enabled:
-            source_alerts = SourceHealthAlertService(session_factory, telegram_client)
-            for run_id in completed_run_ids:
-                await source_alerts.process_run(run_id)
+    if telegram_client is not None and settings.telegram_source_health_alerts_enabled:
+        source_alerts = SourceHealthAlertService(session_factory, telegram_client)
+        await source_alerts.process_latest_runs()
 
     expiration_summary = await StaleExpirationService(session_factory).expire_stale(
         employment_days=settings.employment_stale_after_days,
@@ -86,7 +103,14 @@ async def run_cycle(*, force_sources: bool = False) -> None:
 
     if not settings.matching_enabled:
         return
-    matching_summary = await MatchingService(session_factory).evaluate(BOHDAN_PROFILE)
+    exchange_rates = await NbuExchangeRateClient(
+        rates_url=settings.nbu_rates_url,
+        request_timeout_seconds=settings.nbu_request_timeout_seconds,
+    ).fetch_rates()
+    exchange_rate_provider = SnapshotExchangeRateProvider(exchange_rates)
+    matching_summary = await MatchingService(session_factory, exchange_rate_provider).evaluate(
+        BOHDAN_PROFILE
+    )
     logger.info(
         "matching_cycle_finished",
         profile=BOHDAN_PROFILE.profile_id,
@@ -100,16 +124,19 @@ async def run_cycle(*, force_sources: bool = False) -> None:
     notification_summary = await NotificationService(
         session_factory,
         telegram_client,
-        NbuExchangeRateClient(
-            rates_url=settings.nbu_rates_url,
-            request_timeout_seconds=settings.nbu_request_timeout_seconds,
-        ),
+        exchange_rate_provider,
     ).dispatch(
         profile=BOHDAN_PROFILE,
         minimum_score=settings.matching_min_score,
-        max_messages=settings.telegram_max_messages_per_cycle,
-        minimum_first_seen_at=(None if settings.telegram_notify_existing else cycle_started_at),
+        max_messages=max(0, settings.telegram_max_messages_per_cycle - retried_sent),
+        minimum_first_seen_at=(
+            None if settings.telegram_notify_existing else minimum_first_seen_at
+        ),
     )
+    if notification_cursor is not None:
+        await notification_cursor.complete_cycle(
+            BOHDAN_PROFILE.profile_id, "telegram", cycle_started_at
+        )
     logger.info(
         "notification_cycle_finished",
         channel="telegram",
@@ -119,6 +146,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         skipped_historical=notification_summary.skipped_historical,
         skipped_duplicate=notification_summary.skipped_duplicate,
         skipped_paused=notification_summary.skipped_paused,
+        retry_deferred=notification_summary.retry_deferred,
     )
 
 

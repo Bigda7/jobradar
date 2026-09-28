@@ -11,7 +11,13 @@ class TelegramMessageRegistry:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def record(self, opportunity_id: int, telegram_message_id: int) -> None:
+    async def record(
+        self,
+        opportunity_id: int,
+        telegram_message_id: int,
+        *,
+        delivery_id: int | None = None,
+    ) -> None:
         async with self._session_factory() as session, session.begin():
             message = await session.scalar(
                 select(TelegramOpportunityMessage).where(
@@ -23,10 +29,12 @@ class TelegramMessageRegistry:
                     TelegramOpportunityMessage(
                         opportunity_id=opportunity_id,
                         telegram_message_id=telegram_message_id,
+                        delivery_id=delivery_id,
                     )
                 )
                 return
             message.opportunity_id = opportunity_id
+            message.delivery_id = delivery_id
             message.deleted_at = None
 
     async def active_message_ids(self) -> list[int]:

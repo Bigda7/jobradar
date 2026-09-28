@@ -37,13 +37,14 @@ from jobradar.db.models import (
 from jobradar.db.session import engine, session_factory
 from jobradar.domain.enums import OpportunityDisposition, WorkMode
 from jobradar.ingestion.canonical import canonical_source_link_order
+from jobradar.ingestion.link_filter import trusted_listing_condition
 from jobradar.logging_config import configure_logging
 from jobradar.matching.profile import BOHDAN_PROFILE
-from jobradar.security import redact_sensitive_text
 
 MAX_PAGE_SIZE = 200
 MAX_OFFSET = 100_000
 MAX_SALARY_FILTER = Decimal("1000000000")
+PUBLIC_SOURCE_ISSUE_MESSAGE = "Source reported an issue. Details are available internally."
 EMPLOYMENT_TYPE_ALIASES = {
     "full_time": ("full_time", "fulltime", "fulltime_permanent", "full_time_permanent"),
     "part_time": ("part_time", "parttime"),
@@ -165,6 +166,10 @@ def create_app(
             Decimal | None,
             Query(alias="min_salary", ge=0, le=MAX_SALARY_FILTER),
         ] = None,
+        salary_currency: Annotated[
+            str,
+            Query(min_length=3, max_length=3, pattern=r"^[A-Za-z]{3}$"),
+        ] = "USD",
     ) -> JobListResponse:
         query = _normalize_optional_filter(query, "q")
         employment_type = _normalize_optional_filter(employment_type, "employment_type")
@@ -172,11 +177,7 @@ def create_app(
             exists(
                 select(Listing.id)
                 .join(Source, Source.id == Listing.source_id)
-                .where(
-                    Listing.opportunity_id == Opportunity.id,
-                    Listing.is_active.is_(True),
-                    Source.enabled.is_(True),
-                )
+                .where(*_active_listing_conditions(None))
             ),
             ~exists(
                 select(OpportunityUserState.opportunity_id).where(
@@ -221,7 +222,13 @@ def create_app(
                 )
             )
         if minimum_salary is not None:
-            filters.append(Opportunity.salary_max >= minimum_salary)
+            filters.extend(
+                (
+                    func.coalesce(Opportunity.salary_max, Opportunity.salary_min) >= minimum_salary,
+                    func.upper(Opportunity.salary_currency) == salary_currency.upper(),
+                    func.lower(Opportunity.salary_period) == "month",
+                )
+            )
 
         total = await session.scalar(select(func.count()).select_from(Opportunity).where(*filters))
         listing_url = _canonical_listing_url()
@@ -259,15 +266,23 @@ def create_app(
         session: Annotated[AsyncSession, Depends(request_session)],
         _: Annotated[None, Depends(require_api_access)],
     ) -> list[SourceResponse]:
-        sources = (await session.scalars(select(Source).order_by(Source.name))).all()
-        responses: list[SourceResponse] = []
-        for item in sources:
-            latest_run = await session.scalar(
-                select(SourceRun)
-                .where(SourceRun.source_id == item.id)
-                .order_by(SourceRun.started_at.desc(), SourceRun.id.desc())
-                .limit(1)
+        latest_run_id = (
+            select(SourceRun.id)
+            .where(SourceRun.source_id == Source.id)
+            .order_by(SourceRun.started_at.desc(), SourceRun.id.desc())
+            .limit(1)
+            .correlate(Source)
+            .scalar_subquery()
+        )
+        source_rows = (
+            await session.execute(
+                select(Source, SourceRun)
+                .outerjoin(SourceRun, SourceRun.id == latest_run_id)
+                .order_by(Source.name)
             )
+        ).all()
+        responses: list[SourceResponse] = []
+        for item, latest_run in source_rows:
             run_details = (
                 {
                     "last_run_status": latest_run.status,
@@ -292,7 +307,7 @@ def create_app(
             )
             response = SourceResponse.model_validate(item).model_copy(update=run_details)
             if response.last_error:
-                response.last_error = redact_sensitive_text(response.last_error)
+                response.last_error = PUBLIC_SOURCE_ISSUE_MESSAGE
             responses.append(response)
         return responses
 
@@ -455,6 +470,7 @@ def _active_listing_conditions(
         Listing.opportunity_id == opportunity_id,
         Listing.is_active.is_(True),
         Source.enabled.is_(True),
+        trusted_listing_condition(),
     ]
     if source_name is not None:
         conditions.append(Source.name == source_name)

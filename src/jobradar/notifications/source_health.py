@@ -17,11 +17,13 @@ logger = structlog.get_logger(__name__)
 
 type SourceHealthAlertEvent = Literal[
     "failure",
+    "partial",
     "recovery",
     "coverage_issue",
     "coverage_recovery",
 ]
 type CoverageIssueReason = Literal["repeated_limit", "discovered_drop"]
+type FailureAlertReason = Literal["failed", "partial"]
 
 LIMIT_STREAK = 3
 DROP_STREAK = 2
@@ -48,6 +50,7 @@ class _PendingAlert:
     source_id: int
     message: str
     failure_alert_active: bool | None = None
+    failure_alert_reason: FailureAlertReason | None = None
     coverage_alert_active: bool | None = None
     coverage_alert_reason: CoverageIssueReason | None = None
 
@@ -61,6 +64,25 @@ class SourceHealthAlertService:
         self._session_factory = session_factory
         self._telegram = telegram_client
 
+    async def process_latest_runs(self) -> list[SourceHealthAlertResult]:
+        async with self._session_factory() as session:
+            source_ids = list(
+                await session.scalars(select(Source.id).where(Source.enabled.is_(True)))
+            )
+            run_ids = [
+                await session.scalar(
+                    select(SourceRun.id)
+                    .where(
+                        SourceRun.source_id == source_id,
+                        SourceRun.finished_at.is_not(None),
+                    )
+                    .order_by(SourceRun.started_at.desc(), SourceRun.id.desc())
+                    .limit(1)
+                )
+                for source_id in source_ids
+            ]
+        return [await self.process_run(run_id) for run_id in run_ids if run_id is not None]
+
     async def process_run(self, run_id: int) -> SourceHealthAlertResult:
         alert = await self._load_alert(run_id)
         if alert is None:
@@ -69,6 +91,8 @@ class SourceHealthAlertService:
         try:
             await self._telegram.send_message(alert.message)
         except TelegramDeliveryError as error:
+            if alert.event == "coverage_issue":
+                await self._mark_coverage_pending(alert)
             logger.warning(
                 "source_health_alert_delivery_failed",
                 source_id=alert.source_id,
@@ -91,7 +115,7 @@ class SourceHealthAlertService:
         self,
         run_id: int,
     ) -> _PendingAlert | None:
-        async with self._session_factory() as session:
+        async with self._session_factory() as session, session.begin():
             row = (
                 await session.execute(
                     select(SourceRun, Source)
@@ -111,8 +135,11 @@ class SourceHealthAlertService:
                     failure_alert_active=False,
                 )
 
-            if run.status == RunStatus.FAILED.value:
-                if source.failure_alert_active:
+            if run.status in {RunStatus.FAILED.value, RunStatus.PARTIAL.value}:
+                if (
+                    source.failure_alert_active
+                    and (source.failure_alert_reason or RunStatus.FAILED.value) == run.status
+                ):
                     return None
                 recent_statuses = list(
                     await session.scalars(
@@ -123,14 +150,20 @@ class SourceHealthAlertService:
                     )
                 )
                 if len(recent_statuses) < 2 or any(
-                    status != RunStatus.FAILED.value for status in recent_statuses
+                    status != run.status for status in recent_statuses
                 ):
                     return None
+                is_partial = run.status == RunStatus.PARTIAL.value
                 return _PendingAlert(
-                    event="failure",
+                    event="partial" if is_partial else "failure",
                     source_id=source.id,
-                    message=_format_failure_message(source, run),
+                    message=(
+                        _format_partial_message(source, run)
+                        if is_partial
+                        else _format_failure_message(source, run)
+                    ),
                     failure_alert_active=True,
+                    failure_alert_reason="partial" if is_partial else "failed",
                 )
 
             if run.status != RunStatus.SUCCEEDED.value:
@@ -160,9 +193,15 @@ class SourceHealthAlertService:
                 )
 
             if issue is None:
+                if source.coverage_alert_reason is not None:
+                    source.coverage_alert_reason = None
                 return None
             previous_issue = _coverage_issue(successful_runs[1:])
-            if previous_issue is not None and previous_issue.reason == issue.reason:
+            if (
+                previous_issue is not None
+                and previous_issue.reason == issue.reason
+                and source.coverage_alert_reason != issue.reason
+            ):
                 return None
             return _PendingAlert(
                 event="coverage_issue",
@@ -172,6 +211,15 @@ class SourceHealthAlertService:
                 coverage_alert_reason=issue.reason,
             )
 
+    async def _mark_coverage_pending(self, alert: _PendingAlert) -> None:
+        async with self._session_factory() as session, session.begin():
+            source = await session.get(Source, alert.source_id)
+            if source is None:
+                raise RuntimeError(f"Source {alert.source_id} does not exist.")
+            if not source.coverage_alert_active:
+                # An inactive alert with a reason remains eligible for the next run.
+                source.coverage_alert_reason = alert.coverage_alert_reason
+
     async def _set_alert_state(self, alert: _PendingAlert) -> None:
         async with self._session_factory() as session, session.begin():
             source = await session.get(Source, alert.source_id)
@@ -179,6 +227,9 @@ class SourceHealthAlertService:
                 raise RuntimeError(f"Source {alert.source_id} does not exist.")
             if alert.failure_alert_active is not None:
                 source.failure_alert_active = alert.failure_alert_active
+                source.failure_alert_reason = (
+                    alert.failure_alert_reason if alert.failure_alert_active else None
+                )
             if alert.coverage_alert_active is not None:
                 source.coverage_alert_active = alert.coverage_alert_active
                 source.coverage_alert_reason = (
@@ -216,6 +267,19 @@ def _format_failure_message(source: Source, run: SourceRun) -> str:
             f"Последний успешный сбор: {_format_timestamp(source.last_success_at)}.",
             f"Причина: {escape(reason[:500])}",
             "Новые вакансии с этой площадки временно могут не поступать.",
+        )
+    )
+
+
+def _format_partial_message(source: Source, run: SourceRun) -> str:
+    reason = redact_sensitive_text(run.error_message or source.last_error or "Unknown error")
+    return "\n".join(
+        (
+            f"<b>Частичный сбор источника: {escape(source.display_name)}</b>",
+            "Два последних запуска завершились частично.",
+            f"Ошибок в последнем запуске: {run.error_count}.",
+            f"Причина: {escape(reason[:500])}",
+            "Часть вакансий с этой площадки может не поступать.",
         )
     )
 

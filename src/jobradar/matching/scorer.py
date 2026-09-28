@@ -13,6 +13,7 @@ from jobradar.matching.rejections import (
     required_experience_years,
 )
 from jobradar.matching.sanity import evaluate_sanity, monthly_salary_usd
+from jobradar.notifications.currency import ExchangeRates
 
 SENIOR_TITLE_TERMS = ("senior", "sr.", "lead", "principal", "staff", "head", "architect")
 JUNIOR_TITLE_TERMS = ("junior", "jr.", "trainee", "intern", "graduate", "entry level")
@@ -105,8 +106,12 @@ SUSPICIOUS_APPLICATION_URL_PATTERN = re.compile(
 )
 
 
-def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreResult:
-    sanity = evaluate_sanity(candidate, profile)
+def score_candidate(
+    candidate: MatchCandidate,
+    profile: SearchProfile,
+    rates: ExchangeRates | None = None,
+) -> ScoreResult:
+    sanity = evaluate_sanity(candidate, profile, rates)
     if sanity.rejection_concern is not None:
         return ScoreResult(score=0, reasons=(), concerns=(sanity.rejection_concern,))
 
@@ -190,7 +195,7 @@ def score_candidate(candidate: MatchCandidate, profile: SearchProfile) -> ScoreR
 
     score += sanity.score_adjustment
     score += _experience_adjustment(candidate, reasons, concerns)
-    score += _salary_adjustment(candidate, profile, reasons, concerns)
+    score += _salary_adjustment(candidate, profile, reasons, concerns, rates)
     score += _language_adjustment(searchable_text, profile, concerns)
     score += _backend_stack_adjustment(title, searchable_text, concerns)
     score += _application_flow_adjustment(candidate.raw_data, concerns)
@@ -291,8 +296,9 @@ def _salary_adjustment(
     profile: SearchProfile,
     reasons: list[str],
     concerns: list[str],
+    rates: ExchangeRates | None,
 ) -> int:
-    minimum_monthly_usd, maximum_monthly_usd = monthly_salary_usd(candidate)
+    minimum_monthly_usd, maximum_monthly_usd = monthly_salary_usd(candidate, rates)
     upper_bound = maximum_monthly_usd or minimum_monthly_usd
     if upper_bound is None:
         return 0

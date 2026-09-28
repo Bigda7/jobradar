@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.db.models import Listing, Opportunity, Source, SourceRun
@@ -23,6 +23,7 @@ from jobradar.ingestion.canonical import (
     normalized_snapshot,
     refresh_opportunity_from_best_listing,
 )
+from jobradar.ingestion.deduplication import is_confident_duplicate
 from jobradar.security import redact_sensitive_text
 from jobradar.sources.base import BaseSource, CachedListing
 
@@ -113,11 +114,23 @@ class IngestionService:
         )
         terminal_error: Exception | None = None
         seen_external_ids: set[str] = set()
+        rejected_links = 0
 
         try:
             async for raw_listing in adapter.fetch():
                 result.discovered += 1
                 seen_external_ids.add(raw_listing.external_id)
+                try:
+                    adapter.validate_listing_url(raw_listing)
+                except ValueError:
+                    rejected_links += 1
+                    result.errors += 1
+                    logger.warning(
+                        "source_listing_link_rejected",
+                        source=adapter.name,
+                        external_id=raw_listing.external_id,
+                    )
+                    continue
                 try:
                     normalized = adapter.normalize(raw_listing)
                 except Exception as error:
@@ -158,6 +171,10 @@ class IngestionService:
             )
 
         source_warnings = adapter.consume_warnings()
+        if rejected_links:
+            result.warnings.append(
+                f"Rejected {rejected_links} listing links outside allowed source domains."
+            )
         source_metrics = adapter.consume_run_metrics()
         result.candidates = max(source_metrics.candidate_count, result.discovered)
         result.filtered = source_metrics.filtered_count
@@ -280,7 +297,9 @@ class IngestionService:
             )
 
             if listing is None:
-                opportunity = await self._find_cross_source_duplicate(session, normalized)
+                opportunity = await self._find_cross_source_duplicate(
+                    session, source_id, normalized
+                )
                 is_cross_source_duplicate = opportunity is not None
                 if opportunity is None:
                     opportunity = self._new_opportunity(normalized, now)
@@ -383,6 +402,7 @@ class IngestionService:
     @staticmethod
     async def _find_cross_source_duplicate(
         session: AsyncSession,
+        source_id: int,
         normalized: NormalizedOpportunity,
     ) -> Opportunity | None:
         if normalized.kind.value != "employment" or not normalize_company_identity(
@@ -394,7 +414,17 @@ class IngestionService:
         candidates = (
             await session.scalars(
                 select(Opportunity)
-                .where(Opportunity.kind == normalized.kind.value)
+                .where(
+                    Opportunity.kind == normalized.kind.value,
+                    Opportunity.canonical_key == build_canonical_key(normalized),
+                    exists(
+                        select(Listing.id).where(
+                            Listing.opportunity_id == Opportunity.id,
+                            Listing.source_id != source_id,
+                            Listing.is_active.is_(True),
+                        )
+                    ),
+                )
                 .order_by(Opportunity.id.asc())
             )
         ).all()
@@ -404,6 +434,7 @@ class IngestionService:
                 for opportunity in candidates
                 if normalize_title_identity(opportunity.title) == title_key
                 and normalize_company_identity(opportunity.company) == company_key
+                and is_confident_duplicate(opportunity, normalized)
             ),
             None,
         )
