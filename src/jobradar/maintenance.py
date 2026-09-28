@@ -8,6 +8,7 @@ from jobradar.diagnostics import diagnose_sources, format_diagnostic_table
 from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
+from jobradar.notifications.currency import NbuExchangeRateClient
 from jobradar.opportunities.expiration import StaleExpirationService
 from jobradar.opportunities.service import OpportunityStateService
 from jobradar.sources.registry import build_source_registry
@@ -73,7 +74,12 @@ async def expire_stale() -> None:
 
 
 async def rescore_all() -> None:
-    summary = await MatchingService(session_factory).evaluate(BOHDAN_PROFILE, force=True)
+    settings = get_settings()
+    rates = NbuExchangeRateClient(
+        rates_url=settings.nbu_rates_url,
+        request_timeout_seconds=settings.nbu_request_timeout_seconds,
+    )
+    summary = await MatchingService(session_factory, rates).evaluate(BOHDAN_PROFILE, force=True)
     print(
         json.dumps(
             {

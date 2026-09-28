@@ -39,7 +39,7 @@ class SearchProfile:
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v13-language-profile",
+    rules_version="bohdan-multi-source-v14-live-exchange-rates",
     english_level="B2",
     czech_level="A2",
     notification_threshold=55,

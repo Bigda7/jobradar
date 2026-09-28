@@ -6,6 +6,7 @@ from jobradar.domain.enums import OpportunityKind
 from jobradar.domain.normalization import normalize_text
 from jobradar.matching.models import MatchCandidate
 from jobradar.matching.profile import SearchProfile
+from jobradar.notifications.currency import ExchangeRates
 
 RESTRICTED_REGIONS = {
     "США": r"(?:the\s+)?(?:u\.?s\.?(?:a\.?)?|united\s+states)",
@@ -26,18 +27,6 @@ TOXIC_MARKER_PATTERN = re.compile(
     r"(?<!\w)(?:rockstar\s+developer|code\s+ninja|10x\s+engineer)(?!\w)"
 )
 
-REFERENCE_USD_PER_CURRENCY = {
-    "USD": Decimal("1"),
-    "EUR": Decimal("1.17"),
-    "GBP": Decimal("1.35"),
-    "CZK": Decimal("0.048"),
-    "UAH": Decimal("0.024"),
-    "PLN": Decimal("0.275"),
-    "CAD": Decimal("0.72"),
-    "AUD": Decimal("0.65"),
-    "INR": Decimal("0.0114"),
-}
-
 
 @dataclass(frozen=True, slots=True)
 class SanityResult:
@@ -46,7 +35,11 @@ class SanityResult:
     concerns: tuple[str, ...] = ()
 
 
-def evaluate_sanity(candidate: MatchCandidate, profile: SearchProfile) -> SanityResult:
+def evaluate_sanity(
+    candidate: MatchCandidate,
+    profile: SearchProfile,
+    rates: ExchangeRates | None = None,
+) -> SanityResult:
     searchable_text = normalize_text(
         " ".join(
             value
@@ -78,7 +71,7 @@ def evaluate_sanity(candidate: MatchCandidate, profile: SearchProfile) -> Sanity
     adjustment = 0
     concerns: list[str] = []
     if candidate.kind is OpportunityKind.EMPLOYMENT:
-        salary_adjustment, salary_concerns = _salary_sanity(candidate, profile)
+        salary_adjustment, salary_concerns = _salary_sanity(candidate, profile, rates)
         adjustment += salary_adjustment
         concerns.extend(salary_concerns)
     if TOXIC_MARKER_PATTERN.search(searchable_text):
@@ -91,9 +84,15 @@ def evaluate_sanity(candidate: MatchCandidate, profile: SearchProfile) -> Sanity
 
 def monthly_salary_usd(
     candidate: MatchCandidate,
+    rates: ExchangeRates | None = None,
 ) -> tuple[Decimal | None, Decimal | None]:
     currency = (candidate.salary_currency or "").upper()
-    usd_rate = REFERENCE_USD_PER_CURRENCY.get(currency)
+    if currency == "USD":
+        usd_rate = Decimal("1")
+    elif rates is not None and currency in rates.uah_per_unit:
+        usd_rate = rates.convert(Decimal("1"), currency, "USD")
+    else:
+        usd_rate = None
     period_factor = _monthly_period_factor(candidate.salary_period)
     if usd_rate is None or period_factor is None:
         return None, None
@@ -113,8 +112,9 @@ def monthly_salary_usd(
 def _salary_sanity(
     candidate: MatchCandidate,
     profile: SearchProfile,
+    rates: ExchangeRates | None,
 ) -> tuple[int, tuple[str, ...]]:
-    minimum, maximum = monthly_salary_usd(candidate)
+    minimum, maximum = monthly_salary_usd(candidate, rates)
     base_salary = minimum if minimum is not None else maximum
     upper_salary = maximum if maximum is not None else minimum
     if base_salary is not None and base_salary > profile.maximum_junior_monthly_salary_usd:

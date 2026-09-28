@@ -29,6 +29,7 @@ class RunStatus(StrEnum):
 
 
 class DeliveryStatus(StrEnum):
+    QUEUED = "queued"
     PENDING = "pending"
     SENT = "sent"
     FAILED = "failed"

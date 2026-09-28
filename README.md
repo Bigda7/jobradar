@@ -71,6 +71,16 @@ The production registry intentionally enables only four sources used in the curr
 | DOU Jobs | RSS | employment |
 
 The source registry contains only these adapters.
+Work.ua is currently implemented and enabled, but its third-party reader and public display of
+vacancy descriptions have not been cleared with Work.ua. The current engineering decision and
+the options for a further public rollout are recorded in
+[`docs/source-access-policy.md`](docs/source-access-policy.md); documentation alone does not
+change the running source.
+Listing links from these sources must use HTTPS on the source's expected host. Unexpected links
+are rejected before ingestion and recorded as a partial source run; Work.ua links are checked
+before fetching vacancy details. API and Telegram selections also ignore older stored links that
+do not match the expected source host. The host allowlists are defined in
+`src/jobradar/sources/link_policy.py`.
 
 ## Security model
 
@@ -214,9 +224,12 @@ source limits or enabling an adapter in a public or commercial deployment.
 
 ## Database backups
 
-`scripts/backup_postgres.sh` creates a compressed PostgreSQL dump, validates it with
-`pg_restore --list`, and retains local backups for 14 days by default. The systemd timer in
-`deploy/systemd/` runs the script daily at `03:15 UTC`.
+`scripts/backup_postgres.sh` creates a compressed PostgreSQL dump, validates its archive,
+restores it into a disposable network-isolated PostgreSQL container, checks the migration and
+core data tables, and retains local backups for 14 days by default. A failed restore prevents
+the new dump from being retained or uploaded. The systemd timer in
+`deploy/systemd/` runs the script daily at `03:15 UTC`. To verify an existing local dump without
+contacting the live database, run `bash scripts/verify_postgres_backup.sh /path/to/backup.dump`.
 
 For off-site S3 backups, install AWS CLI v2, attach a least-privilege IAM role to the instance, and
 create `/etc/jobradar/backup.env`:
@@ -240,16 +253,32 @@ retention independently with an S3 lifecycle rule.
 | `GET` | `/matches` | active deterministic matches with scores and canonical links |
 | `GET` | `/sources` | source health and collection timestamps |
 
-`GET /jobs` supports `q`, `work_mode`, `employment_type`, `min_salary`, `limit`, and `offset`.
+`GET /jobs` supports `q`, `work_mode`, `employment_type`, `min_salary`, `salary_currency`,
+`limit`, and `offset`. `min_salary` compares monthly salary in the selected currency
+(`USD` by default); jobs paid in another currency or period are excluded.
 `GET /matches` supports `min_score`, `source`, `sort`, `limit`, and `offset`. The optional `source`
 filter uses the registered source name and returns that source's active listing URL. OpenAPI documentation is available at
 `/docs` and `/openapi.json` outside production. `/health` and `/ready` are public for platform
 health checks; the three data endpoints require `Authorization: Bearer <token>` when a token is
 configured.
 
+The worker fetches one NBU exchange-rate snapshot per matching cycle and uses that same
+snapshot for salary scoring and Telegram formatting. A changed USD conversion rate
+re-evaluates only affected foreign-currency opportunities. If the rate request fails,
+the cycle retries automatically without writing incomplete match evaluations or
+dispatching match notifications. A persisted notification scan cursor keeps newly
+collected vacancies eligible after an outage or worker restart without resending
+delivered messages. USD salaries do not require conversion; unsupported
+currencies receive no salary-based score adjustment.
+
+The portfolio frontend is intentionally public and calls these read-only endpoints through a
+server-side proxy that keeps the bearer token out of the browser. Public source responses expose
+status and coverage metrics but replace detailed source error text with a generic issue message;
+the original diagnostic remains available internally.
+
 ## Safe production rollout
 
-1. Back up PostgreSQL and verify that the dump can be read before applying migrations.
+1. Back up PostgreSQL and verify that the dump restores in an isolated container before applying migrations.
 2. Set `APP_ENV=production`, unique database credentials, a random API bearer token, and exact
    public host allowlists in the deployment secret store.
 3. Terminate TLS at a maintained reverse proxy and expose only that proxy to the internet.
@@ -261,6 +290,12 @@ Never copy `.env` into an image, repository, workflow, issue, or build log. Rota
 immediately if it may have been exposed.
 
 ## Telegram bot
+
+Interrupted match deliveries recover automatically during the next unpaused notification cycle.
+If a Telegram message ID was saved, the delivery is marked sent without resending. Otherwise the
+worker retries it, counting the interrupted attempt toward the three-attempt limit. A rare
+duplicate remains possible if Telegram accepted a message but the worker stopped before saving
+its ID; the Bot API cannot confirm that outgoing message from chat history afterward.
 
 When Telegram polling is enabled, the bot supports `/latest`, `/all`, `/favorites`, `/stats`,
 `/clear`, `/pause`, and `/resume`. Inline actions support favorite, hide, restore, and source-link

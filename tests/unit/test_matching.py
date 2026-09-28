@@ -1,3 +1,4 @@
+from copy import deepcopy
 from decimal import Decimal
 
 import pytest
@@ -11,7 +12,8 @@ from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.sanity import evaluate_sanity, monthly_salary_usd
 from jobradar.matching.scorer import MatchCandidate, score_candidate
 from jobradar.matching.service import MatchingService
-from jobradar.sources.mock import MockSource
+from jobradar.notifications.currency import CurrencyConversionError, ExchangeRates
+from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
 
 
 def _candidate(**changes: object) -> MatchCandidate:
@@ -630,6 +632,7 @@ def test_sanity_check_penalizes_excessive_base_salary(
     currency: str,
     period: str,
 ) -> None:
+    rates = ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2")})
     sanity = evaluate_sanity(
         _candidate(
             salary_min=Decimal(minimum),
@@ -638,6 +641,7 @@ def test_sanity_check_penalizes_excessive_base_salary(
             salary_period=period,
         ),
         BOHDAN_PROFILE,
+        rates,
     )
 
     assert sanity.score_adjustment == -20
@@ -744,6 +748,20 @@ def test_monthly_salary_normalization_multiplies_hourly_rate_by_160() -> None:
 
     assert minimum == Decimal("2000.0")
     assert maximum == Decimal("3200")
+
+
+def test_monthly_salary_uses_current_exchange_snapshot_without_static_fallback() -> None:
+    candidate = _candidate(
+        salary_min=Decimal("40000"),
+        salary_max=Decimal("50000"),
+        salary_currency="CZK",
+    )
+    earlier = ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2")})
+    later = ExchangeRates({"USD": Decimal("50"), "CZK": Decimal("2")})
+
+    assert monthly_salary_usd(candidate, earlier) == (Decimal("2000.00"), Decimal("2500.00"))
+    assert monthly_salary_usd(candidate, later) == (Decimal("1600.00"), Decimal("2000.00"))
+    assert monthly_salary_usd(candidate) == (None, None)
 
 
 def test_freelance_profile_scores_relevant_project_highly() -> None:
@@ -947,3 +965,64 @@ async def test_matching_service_is_idempotent_for_unchanged_content(
     assert second.unchanged == 2
     async with sqlite_session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(MatchEvaluation)) == 2
+
+
+class MutableExchangeRateProvider:
+    def __init__(self, rates: ExchangeRates) -> None:
+        self.rates = rates
+        self.available = True
+
+    async def fetch_rates(self) -> ExchangeRates:
+        if not self.available:
+            raise CurrencyConversionError("NBU is unavailable")
+        return self.rates
+
+
+@pytest.mark.asyncio
+async def test_matching_recalculates_when_exchange_rates_change(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    listings = deepcopy(DEFAULT_LISTINGS)
+    listings[0]["salary_min"] = "30000"
+    listings[0]["salary_max"] = "35000"
+    listings[0]["salary_currency"] = "CZK"
+    await IngestionService(sqlite_session_factory).run_source(MockSource(listings))
+    provider = MutableExchangeRateProvider(
+        ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2")})
+    )
+    service = MatchingService(sqlite_session_factory, provider)
+
+    first = await service.evaluate(BOHDAN_PROFILE)
+    unchanged = await service.evaluate(BOHDAN_PROFILE)
+    provider.rates = ExchangeRates({"USD": Decimal("41"), "CZK": Decimal("2")})
+    changed = await service.evaluate(BOHDAN_PROFILE)
+
+    assert first.evaluated == 2
+    assert unchanged.unchanged == 2
+    assert changed.evaluated == 1
+    assert changed.unchanged == 1
+    async with sqlite_session_factory() as session:
+        hashes = set(await session.scalars(select(MatchEvaluation.exchange_rates_hash)))
+    assert hashes == {provider.rates.conversion_fingerprint("CZK"), None}
+
+
+@pytest.mark.asyncio
+async def test_matching_does_not_change_evaluations_when_rates_unavailable(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    provider = MutableExchangeRateProvider(
+        ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2")})
+    )
+    service = MatchingService(sqlite_session_factory, provider)
+    await service.evaluate(BOHDAN_PROFILE)
+    async with sqlite_session_factory() as session:
+        before = list(await session.scalars(select(MatchEvaluation.exchange_rates_hash)))
+
+    provider.available = False
+    with pytest.raises(CurrencyConversionError, match="NBU is unavailable"):
+        await service.evaluate(BOHDAN_PROFILE)
+
+    async with sqlite_session_factory() as session:
+        after = list(await session.scalars(select(MatchEvaluation.exchange_rates_hash)))
+    assert after == before

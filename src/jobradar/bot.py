@@ -76,16 +76,12 @@ class TelegramBotService:
                 updates = await self._telegram.get_updates(offset, self._poll_timeout_seconds)
             except TelegramDeliveryError as error:
                 logger.warning("telegram_polling_failed", error=str(error))
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=2)
-                except TimeoutError:
-                    continue
-                break
+                await _wait_for_retry(stop_event)
+                continue
 
+            failed_update = False
             for update in updates:
                 update_id = update.get("update_id")
-                if isinstance(update_id, int):
-                    offset = max(offset or 0, update_id + 1)
                 try:
                     await self.handle_update(update)
                 except TelegramDeliveryError as error:
@@ -94,12 +90,21 @@ class TelegramBotService:
                         update_id=update_id,
                         error=str(error),
                     )
+                    failed_update = True
+                    break
                 except Exception as error:
                     logger.exception(
                         "telegram_update_failed",
                         update_id=update_id,
                         error=str(error),
                     )
+                    failed_update = True
+                    break
+                if isinstance(update_id, int):
+                    offset = max(offset or 0, update_id + 1)
+
+            if failed_update:
+                await _wait_for_retry(stop_event)
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         callback = update.get("callback_query")
@@ -169,17 +174,25 @@ class TelegramBotService:
                 await self._telegram.answer_callback_query(callback_id, "Вакансия не найдена.")
                 return
             is_favorite = disposition is OpportunityDisposition.FAVORITE
-            await self._telegram.edit_message_reply_markup(
-                chat_id,
-                message_id,
-                opportunity_keyboard(
-                    opportunity_id,
-                    source_url,
-                    is_favorite=is_favorite,
-                ),
-            )
             answer = "Добавлено в избранное." if is_favorite else "Удалено из избранного."
-            await self._telegram.answer_callback_query(callback_id, answer)
+            try:
+                await self._telegram.edit_message_reply_markup(
+                    chat_id,
+                    message_id,
+                    opportunity_keyboard(
+                        opportunity_id,
+                        source_url,
+                        is_favorite=is_favorite,
+                    ),
+                )
+                await self._telegram.answer_callback_query(callback_id, answer)
+            except TelegramDeliveryError as error:
+                logger.warning(
+                    "telegram_favorite_feedback_failed",
+                    callback_id=callback_id,
+                    opportunity_id=opportunity_id,
+                    error=str(error),
+                )
             return
 
         if action == "restore":
@@ -413,6 +426,13 @@ def _message_chat_id(message: dict[str, Any]) -> int | None:
         return None
     chat_id = chat.get("id")
     return chat_id if isinstance(chat_id, int) else None
+
+
+async def _wait_for_retry(stop_event: asyncio.Event) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=2)
+    except TimeoutError:
+        pass
 
 
 def _parse_callback_data(value: str) -> tuple[str | None, int | None]:

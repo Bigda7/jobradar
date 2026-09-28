@@ -9,6 +9,7 @@ from jobradar.notifications.currency import (
     NbuExchangeRateClient,
     format_converted_range,
     format_original_range,
+    parse_nbu_exchange_rates,
 )
 
 
@@ -61,6 +62,32 @@ def test_unknown_source_currency_is_rejected() -> None:
 
     with pytest.raises(CurrencyConversionError, match="GBP"):
         rates.convert(Decimal("100"), "GBP", "USD")
+
+
+def test_exchange_rate_fingerprint_ignores_payload_order_but_detects_rate_change() -> None:
+    first = ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2")})
+    reordered = ExchangeRates({"CZK": Decimal("2"), "USD": Decimal("40")})
+    changed = ExchangeRates({"USD": Decimal("41"), "CZK": Decimal("2")})
+
+    assert first.fingerprint == reordered.fingerprint
+    assert first.fingerprint != changed.fingerprint
+    assert first.conversion_fingerprint("CZK") == reordered.conversion_fingerprint("CZK")
+    assert first.conversion_fingerprint("CZK") != changed.conversion_fingerprint("CZK")
+    assert first.conversion_fingerprint("USD") is None
+
+
+def test_non_finite_exchange_rates_are_rejected_or_ignored() -> None:
+    with pytest.raises(CurrencyConversionError, match="EUR"):
+        ExchangeRates({"USD": Decimal("40"), "CZK": Decimal("2"), "EUR": Decimal("NaN")})
+
+    rates = parse_nbu_exchange_rates(
+        [
+            {"cc": "USD", "rate": "40"},
+            {"cc": "CZK", "rate": "2"},
+            {"cc": "EUR", "rate": "NaN"},
+        ]
+    )
+    assert "EUR" not in rates.uah_per_unit
 
 
 def test_original_range_preserves_amount_currency_and_period() -> None:

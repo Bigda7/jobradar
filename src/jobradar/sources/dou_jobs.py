@@ -16,6 +16,7 @@ from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
 from jobradar.domain.normalization import normalize_text
 from jobradar.sources.base import BaseSource
+from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_FEED_URL = "https://jobs.dou.ua/vacancies/feeds/?remote"
@@ -63,6 +64,7 @@ class DouJobsSource(BaseSource):
     name = "dou_jobs"
     display_name = "DOU Jobs"
     opportunity_kind = OpportunityKind.EMPLOYMENT
+    allowed_listing_hosts = SOURCE_LISTING_HOSTS["dou_jobs"]
     deactivate_missing_listings = False
 
     def __init__(
@@ -127,6 +129,7 @@ class DouJobsSource(BaseSource):
         self.record_candidates(len(items))
         seen: set[str] = set()
         yielded = 0
+        malformed = 0
         for item in items:
             payload = {child.tag: child.text or "" for child in item}
             headline = _decode_html(_optional_string(payload.get("title")) or "")
@@ -140,20 +143,30 @@ class DouJobsSource(BaseSource):
             if source_url is None:
                 self.record_filtered()
                 continue
-            external_id = _external_id(source_url)
+            try:
+                external_id = _external_id(source_url)
+                raw_listing = RawListing(
+                    external_id=external_id,
+                    source_url=source_url,
+                    payload=payload,
+                )
+            except ValueError:
+                malformed += 1
+                self.record_filtered()
+                continue
             if external_id in seen:
                 self.record_filtered()
                 continue
             seen.add(external_id)
-            yield RawListing(
-                external_id=external_id,
-                source_url=source_url,
-                payload=payload,
-            )
+            yield raw_listing
             yielded += 1
             if yielded >= self._max_items:
                 self.mark_limit_reached()
+                if malformed:
+                    self.report_warning(f"DOU Jobs skipped {malformed} malformed RSS items.")
                 return
+        if malformed:
+            self.report_warning(f"DOU Jobs skipped {malformed} malformed RSS items.")
 
 
 def parse_dou_headline(value: str) -> tuple[str, str | None, str | None]:

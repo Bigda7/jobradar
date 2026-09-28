@@ -2,10 +2,11 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from jobradar.domain.enums import OpportunityKind
 from jobradar.domain.models import NormalizedOpportunity, RawListing
+from jobradar.sources.link_policy import is_trusted_source_link
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,13 @@ class BaseSource(ABC):
     display_name: str
     opportunity_kind: OpportunityKind
     deactivate_missing_listings: bool = False
+    allowed_listing_hosts: ClassVar[frozenset[str]] = frozenset()
+
+    def validate_listing_url(self, raw_listing: RawListing) -> None:
+        if self.allowed_listing_hosts and not is_trusted_source_link(
+            str(raw_listing.source_url), self.allowed_listing_hosts
+        ):
+            raise ValueError(f"Unexpected listing URL for {self.name}.")
 
     def begin_run(self) -> None:
         self._run_warnings: list[str] = []

@@ -1,4 +1,6 @@
+import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -12,11 +14,19 @@ from jobradar.db.models import (
     TelegramOpportunityMessage,
 )
 from jobradar.domain.enums import DeliveryStatus, OpportunityDisposition, OpportunityKind
+from jobradar.domain.models import NormalizedOpportunity
 from jobradar.domain.normalization import (
     normalize_company_identity,
+    normalize_text,
     normalize_title_identity,
 )
 from jobradar.ingestion.canonical import refresh_opportunity_from_best_listing
+
+MAX_PUBLICATION_GAP = timedelta(days=7)
+MIN_DESCRIPTION_LENGTH = 40
+MIN_DESCRIPTION_TERMS = 8
+MAX_DESCRIPTION_LENGTH_RATIO = 1.5
+MIN_SHARED_TERM_RATIO = 0.8
 
 
 @dataclass(slots=True)
@@ -47,6 +57,71 @@ class DeduplicationAudit:
         return sum(len(group.opportunity_ids) for group in self.groups)
 
 
+def is_confident_duplicate(
+    left: Opportunity | NormalizedOpportunity,
+    right: Opportunity | NormalizedOpportunity,
+) -> bool:
+    """Only merge cross-postings with corroborating vacancy details."""
+    title = normalize_title_identity(left.title)
+    company = normalize_company_identity(left.company)
+    if not title or not company:
+        return False
+    if title != normalize_title_identity(right.title) or company != normalize_company_identity(
+        right.company
+    ):
+        return False
+
+    location = normalize_text(left.location_text)
+    if not location or location != normalize_text(right.location_text):
+        return False
+    if str(left.work_mode) == "unknown" or str(left.work_mode) != str(right.work_mode):
+        return False
+    if left.published_at is None or right.published_at is None:
+        return False
+    if abs(_as_utc(left.published_at) - _as_utc(right.published_at)) > MAX_PUBLICATION_GAP:
+        return False
+
+    left_description = normalize_text(left.description)
+    right_description = normalize_text(right.description)
+    if min(len(left_description), len(right_description)) < MIN_DESCRIPTION_LENGTH:
+        return False
+    if max(len(left_description), len(right_description)) > MAX_DESCRIPTION_LENGTH_RATIO * min(
+        len(left_description), len(right_description)
+    ):
+        return False
+    left_terms = set(re.findall(r"\w+", left_description))
+    right_terms = set(re.findall(r"\w+", right_description))
+    if min(len(left_terms), len(right_terms)) < MIN_DESCRIPTION_TERMS:
+        return False
+    if (
+        len(left_terms & right_terms) / min(len(left_terms), len(right_terms))
+        < MIN_SHARED_TERM_RATIO
+    ):
+        return False
+
+    if left.salary_currency and right.salary_currency:
+        if left.salary_currency.casefold() != right.salary_currency.casefold():
+            return False
+    if left.salary_period and right.salary_period:
+        if left.salary_period.casefold() != right.salary_period.casefold():
+            return False
+    if (
+        left.salary_min is not None
+        and right.salary_max is not None
+        and left.salary_min > right.salary_max
+    ) or (
+        right.salary_min is not None
+        and left.salary_max is not None
+        and right.salary_min > left.salary_max
+    ):
+        return False
+    return True
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 class CrossSourceDeduplicationService:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -61,6 +136,12 @@ class CrossSourceDeduplicationService:
                     .order_by(Opportunity.id.asc())
                 )
             ).all()
+            listing_rows = (
+                await session.execute(select(Listing.opportunity_id, Listing.source_id))
+            ).all()
+            source_ids_by_opportunity: dict[int, set[int]] = {}
+            for opportunity_id, source_id in listing_rows:
+                source_ids_by_opportunity.setdefault(opportunity_id, set()).add(source_id)
             groups: dict[tuple[str, str], list[Opportunity]] = {}
             for opportunity in opportunities:
                 title_key = normalize_title_identity(opportunity.title)
@@ -72,11 +153,30 @@ class CrossSourceDeduplicationService:
             for group in groups.values():
                 if len(group) < 2:
                     continue
-                summary.duplicate_groups += 1
-                primary = group[0]
-                for duplicate in group[1:]:
-                    await self._merge_opportunity(session, primary, duplicate)
-                    summary.merged_opportunities += 1
+                merged_group = False
+                merged_ids: set[int] = set()
+                for index, primary in enumerate(group):
+                    if primary.id in merged_ids:
+                        continue
+                    for duplicate in group[index + 1 :]:
+                        if duplicate.id in merged_ids:
+                            continue
+                        primary_sources = source_ids_by_opportunity.get(primary.id, set())
+                        duplicate_sources = source_ids_by_opportunity.get(duplicate.id, set())
+                        if (
+                            not primary_sources
+                            or not duplicate_sources
+                            or not primary_sources.isdisjoint(duplicate_sources)
+                            or not is_confident_duplicate(primary, duplicate)
+                        ):
+                            continue
+                        await self._merge_opportunity(session, primary, duplicate)
+                        primary_sources.update(duplicate_sources)
+                        merged_ids.add(duplicate.id)
+                        summary.merged_opportunities += 1
+                        merged_group = True
+                if merged_group:
+                    summary.duplicate_groups += 1
         return summary
 
     async def audit_existing(self) -> DeduplicationAudit:

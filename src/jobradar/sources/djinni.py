@@ -9,6 +9,7 @@ import httpx
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
 from jobradar.sources.base import BaseSource
+from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
 from jobradar.sources.structured_data import parse_job_postings
 
 DEFAULT_JOBS_URL = "https://djinni.co/jobs/l-nonhr/remote/"
@@ -23,6 +24,7 @@ class DjinniSource(BaseSource):
     name = "djinni"
     display_name = "Djinni"
     opportunity_kind = OpportunityKind.EMPLOYMENT
+    allowed_listing_hosts = SOURCE_LISTING_HOSTS["djinni"]
 
     def __init__(
         self,
@@ -42,6 +44,7 @@ class DjinniSource(BaseSource):
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         yielded = 0
+        malformed = 0
         seen_ids: set[str] = set()
         for page_number in range(1, self._max_pages + 1):
             self.record_page()
@@ -55,7 +58,12 @@ class DjinniSource(BaseSource):
 
             new_ids = 0
             for posting in postings:
-                raw_listing = _to_raw_listing(posting)
+                try:
+                    raw_listing = _to_raw_listing(posting)
+                except (DjinniSourceError, ValueError):
+                    malformed += 1
+                    self.record_filtered()
+                    continue
                 if raw_listing.external_id in seen_ids:
                     continue
                 seen_ids.add(raw_listing.external_id)
@@ -67,10 +75,16 @@ class DjinniSource(BaseSource):
                 yielded += 1
                 if yielded >= self._max_items:
                     self.mark_limit_reached()
+                    if malformed:
+                        self.report_warning(
+                            f"Djinni skipped {malformed} malformed JobPosting items."
+                        )
                     return
 
             if new_ids == 0:
                 break
+        if malformed:
+            self.report_warning(f"Djinni skipped {malformed} malformed JobPosting items.")
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         posting = raw_listing.payload

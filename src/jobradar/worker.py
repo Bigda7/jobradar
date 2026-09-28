@@ -12,7 +12,8 @@ from jobradar.ingestion.service import IngestionService
 from jobradar.logging_config import configure_logging
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
-from jobradar.notifications.currency import NbuExchangeRateClient
+from jobradar.notifications.currency import NbuExchangeRateClient, SnapshotExchangeRateProvider
+from jobradar.notifications.scan_cursor import NotificationScanCursorService
 from jobradar.notifications.service import NotificationService
 from jobradar.notifications.source_health import SourceHealthAlertService
 from jobradar.notifications.telegram import TelegramClient
@@ -30,6 +31,13 @@ class WorkerCycleLockUnavailable(RuntimeError):
 async def run_cycle(*, force_sources: bool = False) -> None:
     settings = get_settings()
     cycle_started_at = datetime.now(UTC)
+    notification_cursor: NotificationScanCursorService | None = None
+    minimum_first_seen_at: datetime | None = None
+    if settings.matching_enabled and settings.telegram_enabled:
+        notification_cursor = NotificationScanCursorService(session_factory)
+        minimum_first_seen_at = await notification_cursor.begin_cycle(
+            BOHDAN_PROFILE.profile_id, "telegram", cycle_started_at
+        )
     ingestion = IngestionService(
         session_factory,
         reconciliation_max_missing_ratio=settings.source_reconciliation_max_missing_ratio,
@@ -86,7 +94,14 @@ async def run_cycle(*, force_sources: bool = False) -> None:
 
     if not settings.matching_enabled:
         return
-    matching_summary = await MatchingService(session_factory).evaluate(BOHDAN_PROFILE)
+    exchange_rates = await NbuExchangeRateClient(
+        rates_url=settings.nbu_rates_url,
+        request_timeout_seconds=settings.nbu_request_timeout_seconds,
+    ).fetch_rates()
+    exchange_rate_provider = SnapshotExchangeRateProvider(exchange_rates)
+    matching_summary = await MatchingService(session_factory, exchange_rate_provider).evaluate(
+        BOHDAN_PROFILE
+    )
     logger.info(
         "matching_cycle_finished",
         profile=BOHDAN_PROFILE.profile_id,
@@ -100,16 +115,19 @@ async def run_cycle(*, force_sources: bool = False) -> None:
     notification_summary = await NotificationService(
         session_factory,
         telegram_client,
-        NbuExchangeRateClient(
-            rates_url=settings.nbu_rates_url,
-            request_timeout_seconds=settings.nbu_request_timeout_seconds,
-        ),
+        exchange_rate_provider,
     ).dispatch(
         profile=BOHDAN_PROFILE,
         minimum_score=settings.matching_min_score,
         max_messages=settings.telegram_max_messages_per_cycle,
-        minimum_first_seen_at=(None if settings.telegram_notify_existing else cycle_started_at),
+        minimum_first_seen_at=(
+            None if settings.telegram_notify_existing else minimum_first_seen_at
+        ),
     )
+    if notification_cursor is not None:
+        await notification_cursor.complete_cycle(
+            BOHDAN_PROFILE.profile_id, "telegram", cycle_started_at
+        )
     logger.info(
         "notification_cycle_finished",
         channel="telegram",

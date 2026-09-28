@@ -19,6 +19,7 @@ from jobradar.sources.detail_cache import (
     get_with_backoff,
     polite_delay,
 )
+from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://www.work.ua"
 DEFAULT_SEARCH_URLS = (
@@ -79,6 +80,7 @@ class WorkUaSource(BaseSource):
     name = "workua"
     display_name = "Work.ua"
     opportunity_kind = OpportunityKind.EMPLOYMENT
+    allowed_listing_hosts = SOURCE_LISTING_HOSTS["workua"]
 
     def __init__(
         self,
@@ -143,6 +145,12 @@ class WorkUaSource(BaseSource):
                 if card.external_id in seen:
                     continue
                 seen.add(card.external_id)
+                if not is_trusted_source_link(card.url, self.allowed_listing_hosts):
+                    self.record_filtered()
+                    self.report_warning(
+                        f"Work.ua skipped vacancy {card.external_id} with an unexpected URL."
+                    )
+                    continue
                 if self._remote_only and not _is_remote(card.location_text):
                     self.record_filtered()
                     continue
@@ -441,6 +449,7 @@ class _WorkUaCardParser(HTMLParser):
         match = JOB_PATH_PATTERN.search(href)
         if match is None:
             return
+        source_url = urljoin("https://www.work.ua", href)
         location = (
             "Remote"
             if any(re.search(r"\bremote\b", part, flags=re.IGNORECASE) for part in self._all_parts)
@@ -449,7 +458,7 @@ class _WorkUaCardParser(HTMLParser):
         self.cards.append(
             WorkUaCard(
                 external_id=match.group("id"),
-                url=urljoin("https://www.work.ua", href),
+                url=source_url,
                 title=title,
                 company=_join_parts(self._company_parts) or None,
                 description=_join_parts(self._description_parts) or None,
@@ -501,6 +510,7 @@ def parse_workua_markdown_cards(markdown: str) -> list[WorkUaCard]:
     matches = list(MARKDOWN_CARD_PATTERN.finditer(markdown))
     cards: list[WorkUaCard] = []
     for index, match in enumerate(matches):
+        source_url = match.group("url").replace("http://", "https://", 1)
         end = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
         block = markdown[match.end() : end]
         lines = [_markdown_text(line) for line in block.splitlines()]
@@ -545,7 +555,7 @@ def parse_workua_markdown_cards(markdown: str) -> list[WorkUaCard]:
         cards.append(
             WorkUaCard(
                 external_id=match.group("id"),
-                url=match.group("url").replace("http://", "https://", 1),
+                url=source_url,
                 title=_markdown_text(match.group("title")),
                 company=company,
                 description=description,

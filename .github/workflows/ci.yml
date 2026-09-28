@@ -68,6 +68,31 @@ jobs:
       - name: Verify migrations
         run: uv run alembic upgrade head
 
+      - name: Verify PostgreSQL backup restoration
+        run: |
+          backup_file="$(mktemp --suffix=.dump)"
+          trap 'rm -f "$backup_file"' EXIT
+          docker run --rm --network host --env PGPASSWORD=ci_only_password \
+            postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 \
+            psql --host=localhost --username=jobradar --dbname=jobradar_test \
+            --set ON_ERROR_STOP=1 \
+            --command "INSERT INTO sources (name, display_name, opportunity_kind, enabled, failure_alert_active, coverage_alert_active, created_at, updated_at) VALUES ('restore-fixture', 'Restore Fixture', 'employment', true, false, false, now(), now())" \
+            --command "WITH restored_opportunity AS (INSERT INTO opportunities (kind, status, canonical_key, title, work_mode, first_seen_at, last_seen_at, created_at, updated_at) VALUES ('employment', 'active', 'restore-fixture', 'Restore fixture', 'remote', now(), now(), now(), now()) RETURNING id) INSERT INTO listings (source_id, opportunity_id, external_id, source_url, canonical_url, content_hash, raw_data, quality_score, first_seen_at, last_seen_at, is_active, created_at, updated_at) SELECT sources.id, restored_opportunity.id, 'restore-1', 'https://example.invalid/restore-1', 'https://example.invalid/restore-1', 'fixture-hash', '{}'::jsonb, 0, now(), now(), true, now(), now() FROM sources CROSS JOIN restored_opportunity WHERE sources.name = 'restore-fixture'"
+          docker run --rm --network host --env PGPASSWORD=ci_only_password \
+            postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 \
+            pg_dump --host=localhost --username=jobradar --dbname=jobradar_test \
+            --format=custom --compress=6 >"$backup_file"
+          restore_output="$(bash scripts/verify_postgres_backup.sh "$backup_file")"
+          printf '%s\n' "$restore_output"
+          grep -Fxq 'sources=1' <<<"$restore_output"
+          grep -Fxq 'opportunities=1' <<<"$restore_output"
+          grep -Fxq 'listings=1' <<<"$restore_output"
+          printf 'not a PostgreSQL archive' >"$backup_file"
+          if bash scripts/verify_postgres_backup.sh "$backup_file"; then
+            printf 'Corrupt backup was accepted.\n' >&2
+            exit 1
+          fi
+
       - name: Run tests
         run: uv run pytest
 

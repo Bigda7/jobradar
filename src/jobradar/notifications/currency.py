@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from hashlib import sha256
 from typing import Any, Protocol
 
 import httpx
@@ -24,11 +25,19 @@ class ExchangeRates:
     effective_date: str | None = None
 
     def __post_init__(self) -> None:
-        normalized = {code.upper(): Decimal(str(rate)) for code, rate in self.uah_per_unit.items()}
+        normalized: dict[str, Decimal] = {}
+        for code, value in self.uah_per_unit.items():
+            try:
+                rate = Decimal(str(value))
+            except (InvalidOperation, ValueError) as error:
+                raise CurrencyConversionError(f"Exchange rate for {code} is invalid.") from error
+            if not rate.is_finite() or rate <= 0:
+                raise CurrencyConversionError(f"Exchange rate for {code} is invalid.")
+            normalized[code.upper()] = rate
         normalized["UAH"] = Decimal("1")
         for code in TARGET_CURRENCIES:
-            rate = normalized.get(code)
-            if rate is None or rate <= 0:
+            target_rate = normalized.get(code)
+            if target_rate is None or target_rate <= 0:
                 raise CurrencyConversionError(f"Exchange rate for {code} is missing or invalid.")
         object.__setattr__(self, "uah_per_unit", normalized)
 
@@ -42,6 +51,31 @@ class ExchangeRates:
         if target_rate is None or target_rate <= 0:
             raise CurrencyConversionError(f"Exchange rate for {target} is unavailable.")
         return amount * source_rate / target_rate
+
+    @property
+    def fingerprint(self) -> str:
+        values = "\n".join(
+            f"{code}={format(rate, 'f')}" for code, rate in sorted(self.uah_per_unit.items())
+        )
+        return sha256(values.encode("utf-8")).hexdigest()
+
+    def conversion_fingerprint(self, source_currency: str | None) -> str | None:
+        source = (source_currency or "").upper()
+        if source == "USD" or source not in self.uah_per_unit:
+            return None
+        values = (
+            f"USD={format(self.uah_per_unit['USD'], 'f')}\n"
+            f"{source}={format(self.uah_per_unit[source], 'f')}"
+        )
+        return sha256(values.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotExchangeRateProvider:
+    rates: ExchangeRates
+
+    async def fetch_rates(self) -> ExchangeRates:
+        return self.rates
 
 
 class NbuExchangeRateClient:
@@ -94,7 +128,7 @@ def parse_nbu_exchange_rates(payload: Any) -> ExchangeRates:
             rate = Decimal(str(value))
         except (InvalidOperation, ValueError):
             continue
-        if rate <= 0:
+        if not rate.is_finite() or rate <= 0:
             continue
         rates[code.upper()] = rate
         date_value = item.get("exchangedate")

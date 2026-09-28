@@ -141,7 +141,7 @@ async def test_expiration_archives_all_opportunities_at_the_configured_age(
 
 
 @pytest.mark.asyncio
-async def test_expiration_promotes_fresh_cross_source_duplicate(
+async def test_expiration_preserves_fresh_role_separate_from_old_same_title_role(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     now = datetime(2026, 8, 23, 12, tzinfo=UTC)
@@ -173,13 +173,14 @@ async def test_expiration_promotes_fresh_cross_source_duplicate(
 
     assert summary.expired_employment == 1
     async with sqlite_session_factory() as session:
-        opportunity = await session.scalar(select(Opportunity))
+        opportunities = list(await session.scalars(select(Opportunity).order_by(Opportunity.id)))
         listings = {
             listing.external_id: listing for listing in await session.scalars(select(Listing))
         }
-        assert opportunity is not None
-        assert opportunity.description == "Fresh React role."
-        assert opportunity.status == OpportunityStatus.ACTIVE.value
+        assert len(opportunities) == 2
+        assert opportunities[0].status == OpportunityStatus.STALE.value
+        assert opportunities[1].description == "Fresh React role."
+        assert opportunities[1].status == OpportunityStatus.ACTIVE.value
         assert listings["old-rich"].is_active is False
         assert listings["fresh-sparse"].is_active is True
 

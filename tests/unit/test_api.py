@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime
 
 import pytest
@@ -9,11 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.api.app import create_app
 from jobradar.config import Settings
-from jobradar.db.models import Listing, MatchEvaluation, Opportunity, Source
+from jobradar.db.models import Listing, MatchEvaluation, Opportunity, Source, SourceRun
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
-from jobradar.sources.mock import MockSource
+from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
 
 
 @pytest.mark.asyncio
@@ -78,6 +79,124 @@ async def test_health_and_read_only_endpoints(
 
 
 @pytest.mark.asyncio
+async def test_public_sources_hide_diagnostics_but_preserve_issue_metrics(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    diagnostic = "Reader failed at internal.example/private-path with unrecognized credential text."
+    async with sqlite_session_factory() as session, session.begin():
+        source = Source(
+            name="test_source",
+            display_name="Test Source",
+            enabled=True,
+            last_error=diagnostic,
+        )
+        session.add(source)
+        await session.flush()
+        session.add(
+            SourceRun(
+                source_id=source.id,
+                status="partial",
+                started_at=datetime(2026, 9, 28, tzinfo=UTC),
+                discovered_count=1,
+                error_count=1,
+                error_message=diagnostic,
+            )
+        )
+
+    application = create_app(sqlite_session_factory)
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/sources")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    public_source = response.json()[0]
+    assert public_source["last_error"] == (
+        "Source reported an issue. Details are available internally."
+    )
+    assert diagnostic not in response.text
+    assert public_source["last_run_status"] == "partial"
+    assert public_source["last_discovered_count"] == 1
+    assert public_source["last_error_count"] == 1
+    async with sqlite_session_factory() as session:
+        stored_source = await session.scalar(select(Source).where(Source.name == "test_source"))
+        stored_run = await session.scalar(select(SourceRun))
+        assert stored_source is not None
+        assert stored_source.last_error == diagnostic
+        assert stored_run is not None
+        assert stored_run.error_message == diagnostic
+
+
+@pytest.mark.asyncio
+async def test_minimum_salary_only_compares_monthly_amounts_in_selected_currency(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    usd_monthly = deepcopy(DEFAULT_LISTINGS[0])
+    uah_monthly = deepcopy(usd_monthly)
+    uah_monthly.update(
+        {
+            "id": "uah-monthly",
+            "url": "https://example.com/jobs/uah-monthly",
+            "title": "UAH Monthly Developer",
+            "company": "Another Company",
+            "salary_min": "50000",
+            "salary_max": "70000",
+            "salary_currency": "UAH",
+        }
+    )
+    usd_hourly = deepcopy(usd_monthly)
+    usd_hourly.update(
+        {
+            "id": "usd-hourly",
+            "url": "https://example.com/jobs/usd-hourly",
+            "title": "USD Hourly Developer",
+            "company": "Hourly Company",
+            "salary_min": "2000",
+            "salary_max": "3000",
+            "salary_period": "hour",
+        }
+    )
+    usd_from = deepcopy(usd_monthly)
+    usd_from.update(
+        {
+            "id": "usd-from",
+            "url": "https://example.com/jobs/usd-from",
+            "title": "USD From Developer",
+            "company": "From Company",
+            "salary_min": "1600",
+            "salary_max": None,
+        }
+    )
+    await IngestionService(sqlite_session_factory).run_source(
+        MockSource((usd_monthly, uah_monthly, usd_hourly, usd_from))
+    )
+    application = create_app(sqlite_session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        usd_response = await client.get("/jobs", params={"min_salary": "1500"})
+        uah_response = await client.get(
+            "/jobs", params={"min_salary": "50000", "salary_currency": "UAH"}
+        )
+        invalid_currency = await client.get(
+            "/jobs", params={"min_salary": "1000", "salary_currency": "invalid"}
+        )
+
+    assert usd_response.status_code == 200
+    assert {job["title"] for job in usd_response.json()["items"]} == {
+        "Junior Full-Stack Developer",
+        "USD From Developer",
+    }
+    assert uah_response.status_code == 200
+    assert [job["title"] for job in uah_response.json()["items"]] == ["UAH Monthly Developer"]
+    assert invalid_currency.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_jobs_employment_type_filter_matches_a_value_in_a_combined_field(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -127,8 +246,8 @@ async def test_matches_filter_uses_the_selected_source_listing(
         assert opportunity is not None
 
         alternate_source = Source(
-            name="alternate",
-            display_name="Alternate Jobs",
+            name="djinni",
+            display_name="Djinni",
             enabled=True,
         )
         session.add(alternate_source)
@@ -138,12 +257,33 @@ async def test_matches_filter_uses_the_selected_source_listing(
                 source_id=alternate_source.id,
                 opportunity_id=opportunity.id,
                 external_id="alternate-1",
-                source_url="https://alternate.example/jobs/1",
-                canonical_url="https://alternate.example/jobs/1",
+                source_url="https://djinni.co/jobs/1/",
+                canonical_url="https://djinni.co/jobs/1/",
                 content_hash="alternate-content-hash",
                 raw_data={},
                 normalized_data={},
                 quality_score=100,
+                is_active=True,
+            )
+        )
+        unsafe_source = Source(
+            name="dou_jobs",
+            display_name="DOU Jobs",
+            enabled=True,
+        )
+        session.add(unsafe_source)
+        await session.flush()
+        session.add(
+            Listing(
+                source_id=unsafe_source.id,
+                opportunity_id=opportunity.id,
+                external_id="unsafe-1",
+                source_url="https://jobs.dou.ua.evil.test/vacancies/1/",
+                canonical_url="https://jobs.dou.ua.evil.test/vacancies/1/",
+                content_hash="unsafe-content-hash",
+                raw_data={},
+                normalized_data={},
+                quality_score=100000,
                 is_active=True,
             )
         )
@@ -156,22 +296,30 @@ async def test_matches_filter_uses_the_selected_source_listing(
     ) as client:
         filtered_response = await client.get(
             "/matches",
-            params={"source": " ALTERNATE "},
+            params={"source": " DJINNI "},
         )
         missing_response = await client.get(
             "/matches",
             params={"source": "missing"},
         )
+        unsafe_response = await client.get(
+            "/matches",
+            params={"source": "dou_jobs"},
+        )
+        jobs_response = await client.get("/jobs")
 
     assert filtered_response.status_code == 200
     assert filtered_response.json()["total"] == 1
     assert len(filtered_response.json()["items"]) == 1
-    assert filtered_response.json()["items"][0]["source_name"] == "alternate"
-    assert filtered_response.json()["items"][0]["source_display_name"] == "Alternate Jobs"
-    assert filtered_response.json()["items"][0]["source_url"] == "https://alternate.example/jobs/1"
+    assert filtered_response.json()["items"][0]["source_name"] == "djinni"
+    assert filtered_response.json()["items"][0]["source_display_name"] == "Djinni"
+    assert filtered_response.json()["items"][0]["source_url"] == "https://djinni.co/jobs/1/"
     assert missing_response.status_code == 200
     assert missing_response.json()["total"] == 0
     assert missing_response.json()["items"] == []
+    assert unsafe_response.json()["total"] == 0
+    assert unsafe_response.json()["items"] == []
+    assert all("evil.test" not in item["source_url"] for item in jobs_response.json()["items"])
 
 
 @pytest.mark.asyncio

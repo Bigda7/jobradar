@@ -7,6 +7,7 @@ from jobradar.domain.enums import WorkMode
 from jobradar.sources.base import CachedListing
 from jobradar.sources.workua import (
     WorkUaSource,
+    WorkUaSourceError,
     is_workua_challenge,
     parse_salary,
     parse_workua_cards,
@@ -101,6 +102,32 @@ def test_workua_html_parser_extracts_cards() -> None:
     assert cards[0].location_text == "Remote"
 
 
+@pytest.mark.asyncio
+async def test_workua_rejects_external_card_link_before_detail_request() -> None:
+    search_page = SEARCH_PAGE.replace(
+        'href="/en/jobs/8441545/"',
+        'href="https://www.work.ua.evil.example/en/jobs/8441545/"',
+    )
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(200, text=search_page)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert listings == []
+    assert requested_paths == ["/en/jobs-remote-python/"]
+    assert source.consume_warnings() == ("Work.ua skipped vacancy 8441545 with an unexpected URL.",)
+
+
 def test_workua_salary_parser_handles_grouped_uah_range() -> None:
     assert parse_salary("55 000 - 60 000 UAH") == (
         Decimal("55000"),
@@ -172,6 +199,33 @@ async def test_workua_source_falls_back_to_uncached_markdown_after_challenge() -
         "true",
     ) in requests
     assert ("/en/jobs/8441545/", "markdown", "true") in requests
+
+
+@pytest.mark.asyncio
+async def test_workua_rejects_external_markdown_link_before_detail_request() -> None:
+    search_page = MARKDOWN_SEARCH_PAGE.replace(
+        "http://www.work.ua/en/jobs/8441545/",
+        "https://www.work.ua.evil.example/en/jobs/8441545/",
+    )
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.headers["X-Return-Format"] == "html":
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        return httpx.Response(200, text=search_page)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        with pytest.raises(WorkUaSourceError, match="no vacancy cards"):
+            _ = [listing async for listing in source.fetch()]
+
+    assert requested_paths == ["/en/jobs-remote-python/", "/en/jobs-remote-python/"]
 
 
 @pytest.mark.asyncio
