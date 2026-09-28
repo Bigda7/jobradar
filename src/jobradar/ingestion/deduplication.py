@@ -297,15 +297,37 @@ class CrossSourceDeduplicationService:
                 existing.attempts = max(existing.attempts, delivery.attempts)
                 existing.last_error = delivery.last_error
                 existing.sent_at = delivery.sent_at
+                existing.message_text = delivery.message_text
+                existing.source_url = delivery.source_url
+                existing.next_attempt_at = delivery.next_attempt_at
+            elif (
+                delivery.status == existing.status
+                and delivery.status in {DeliveryStatus.QUEUED.value, DeliveryStatus.FAILED.value}
+                and existing.message_text is None
+                and existing.source_url is None
+                and delivery.message_text is not None
+                and delivery.source_url is not None
+            ):
+                existing.message_text = delivery.message_text
+                existing.source_url = delivery.source_url
+                existing.next_attempt_at = delivery.next_attempt_at
+                existing.attempts = max(existing.attempts, delivery.attempts)
+                existing.last_error = delivery.last_error
+            await session.execute(
+                update(TelegramOpportunityMessage)
+                .where(TelegramOpportunityMessage.delivery_id == delivery.id)
+                .values(delivery_id=existing.id)
+            )
             await session.delete(delivery)
         await session.flush()
 
 
 def _delivery_priority(status: str) -> int:
     priorities = {
-        DeliveryStatus.SENT.value: 4,
-        DeliveryStatus.SKIPPED_PAUSED.value: 3,
-        DeliveryStatus.FAILED.value: 2,
-        DeliveryStatus.PENDING.value: 1,
+        DeliveryStatus.SENT.value: 5,
+        DeliveryStatus.PENDING.value: 4,
+        DeliveryStatus.FAILED.value: 3,
+        DeliveryStatus.QUEUED.value: 2,
+        DeliveryStatus.SKIPPED_PAUSED.value: 1,
     }
     return priorities.get(status, 0)

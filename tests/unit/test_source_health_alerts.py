@@ -196,6 +196,33 @@ async def test_failed_source_alert_delivery_is_retried(
 
 
 @pytest.mark.asyncio
+async def test_latest_source_run_retries_alert_without_a_new_poll(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 9, 5, 8, tzinfo=UTC)
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    for offset in range(2):
+        await _create_run(
+            sqlite_session_factory,
+            source_id=source_id,
+            status=RunStatus.FAILED,
+            started_at=started_at + timedelta(hours=offset),
+            error_message="Search page unavailable",
+        )
+    telegram = FailingOnceTelegramClient()
+    service = SourceHealthAlertService(sqlite_session_factory, telegram)
+
+    first = await service.process_latest_runs()
+    second = await service.process_latest_runs()
+    third = await service.process_latest_runs()
+
+    assert [(result.event, result.sent) for result in first] == [("failure", False)]
+    assert [(result.event, result.sent) for result in second] == [("failure", True)]
+    assert [(result.event, result.sent) for result in third] == [(None, False)]
+    assert len(telegram.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_source_health_alerts_after_two_partial_runs_and_once_on_recovery(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -301,6 +301,10 @@ stored message still require an eligible match. Retries require a running worker
 overcome a permanent Telegram outage. A rare
 duplicate remains possible if Telegram accepted a message but the worker stopped before saving
 its ID; the Bot API cannot confirm that outgoing message from chat history afterward.
+Queued matches also store their message, so a rate-limited batch can be delivered after a listing
+becomes inactive. Explicitly hidden queued matches are not sent. Pausing discards unsent queued
+matches but preserves failed attempts for retry after resuming. The latest completed source run is
+checked each worker cycle, so transiently failed source-health alerts do not wait for another poll.
 
 When Telegram polling is enabled, the bot supports `/latest`, `/all`, `/favorites`, `/stats`,
 `/clear`, `/pause`, and `/resume`. Inline actions support favorite, hide, restore, and source-link

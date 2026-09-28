@@ -5,7 +5,7 @@ from html import escape
 from typing import cast
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.db.models import (
@@ -120,20 +120,10 @@ class NotificationService:
                     summary.skipped_paused += 1
                 else:
                     summary.skipped_duplicate += 1
+            summary.skipped_paused += await self._discard_queued_while_paused(profile.profile_id)
             return summary
 
         await self._recover_pending_deliveries()
-
-        for candidate in candidates:
-            if minimum_first_seen_at is not None and _as_utc(candidate.first_seen_at) < _as_utc(
-                minimum_first_seen_at
-            ):
-                continue
-            await self._queue_delivery(
-                candidate.opportunity_id,
-                profile,
-                _event_key(profile.rules_version, candidate.content_hash),
-            )
 
         rates: ExchangeRates | None = None
         if any(_has_published_amount(candidate) for candidate in candidates):
@@ -147,6 +137,28 @@ class NotificationService:
                     candidates=min(len(candidates), max_messages),
                     error=str(error),
                 )
+        unqueueable_ids: set[int] = set()
+        for candidate in candidates:
+            if minimum_first_seen_at is not None and _as_utc(candidate.first_seen_at) < _as_utc(
+                minimum_first_seen_at
+            ):
+                continue
+            try:
+                await self._queue_delivery(
+                    candidate,
+                    profile,
+                    _event_key(profile.rules_version, candidate.content_hash),
+                    rates,
+                )
+            except CurrencyConversionError as error:
+                summary.failed += 1
+                unqueueable_ids.add(candidate.opportunity_id)
+                logger.warning(
+                    "currency_conversion_failed",
+                    opportunity_id=candidate.opportunity_id,
+                    currency=candidate.salary_currency,
+                    error=str(error),
+                )
         prioritized_candidates = sorted(
             candidates,
             key=lambda candidate: (
@@ -157,6 +169,8 @@ class NotificationService:
         for candidate in prioritized_candidates:
             if summary.sent >= max_messages:
                 break
+            if candidate.opportunity_id in unqueueable_ids:
+                continue
             summary.considered += 1
             event_key = _event_key(profile.rules_version, candidate.content_hash)
             delivery = await self._get_delivery(candidate.opportunity_id, profile, event_key)
@@ -182,7 +196,7 @@ class NotificationService:
 
             if (
                 delivery is not None
-                and delivery.status == DeliveryStatus.FAILED.value
+                and delivery.status in {DeliveryStatus.FAILED.value, DeliveryStatus.QUEUED.value}
                 and delivery.message_text is not None
                 and delivery.source_url is not None
             ):
@@ -231,21 +245,34 @@ class NotificationService:
 
         await self._recover_pending_deliveries()
         async with self._session_factory() as session:
+            hidden_state = select(OpportunityUserState.opportunity_id).where(
+                OpportunityUserState.opportunity_id == NotificationDelivery.opportunity_id,
+                OpportunityUserState.disposition == OpportunityDisposition.HIDDEN.value,
+            )
             due_ids = list(
                 await session.scalars(
                     select(NotificationDelivery.id)
                     .where(
                         NotificationDelivery.profile_id == profile_id,
                         NotificationDelivery.channel == "telegram",
-                        NotificationDelivery.status == DeliveryStatus.FAILED.value,
+                        NotificationDelivery.status.in_(
+                            (DeliveryStatus.QUEUED.value, DeliveryStatus.FAILED.value)
+                        ),
                         NotificationDelivery.message_text.is_not(None),
                         NotificationDelivery.source_url.is_not(None),
+                        or_(
+                            NotificationDelivery.status == DeliveryStatus.FAILED.value,
+                            ~hidden_state.exists(),
+                        ),
                         or_(
                             NotificationDelivery.next_attempt_at.is_(None),
                             NotificationDelivery.next_attempt_at <= datetime.now(UTC),
                         ),
                     )
                     .order_by(
+                        case(
+                            (NotificationDelivery.status == DeliveryStatus.FAILED.value, 0), else_=1
+                        ),
                         NotificationDelivery.next_attempt_at,
                         NotificationDelivery.id,
                     )
@@ -458,13 +485,15 @@ class NotificationService:
 
     async def _queue_delivery(
         self,
-        opportunity_id: int,
+        candidate: NotificationCandidate,
         profile: SearchProfile,
         event_key: str,
+        rates: ExchangeRates | None,
     ) -> None:
+        opportunity_id = candidate.opportunity_id
         async with self._session_factory() as session, session.begin():
             existing = await session.scalar(
-                select(NotificationDelivery.id).where(
+                select(NotificationDelivery).where(
                     NotificationDelivery.opportunity_id == opportunity_id,
                     NotificationDelivery.profile_id == profile.profile_id,
                     NotificationDelivery.channel == "telegram",
@@ -472,6 +501,9 @@ class NotificationService:
                 )
             )
             if existing is not None:
+                if existing.status == DeliveryStatus.QUEUED.value:
+                    existing.message_text = format_match_message(candidate, rates)
+                    existing.source_url = candidate.source_url
                 return
             pending = await session.scalar(
                 select(NotificationDelivery.id).where(
@@ -492,7 +524,10 @@ class NotificationService:
                 )
             )
             if queued is not None:
+                message = format_match_message(candidate, rates)
                 queued.event_key = event_key
+                queued.message_text = message
+                queued.source_url = candidate.source_url
                 return
             failed = await session.scalar(
                 select(NotificationDelivery)
@@ -522,6 +557,7 @@ class NotificationService:
                 )
             )
             if handled is None:
+                message = format_match_message(candidate, rates)
                 session.add(
                     NotificationDelivery(
                         opportunity_id=opportunity_id,
@@ -529,6 +565,8 @@ class NotificationService:
                         channel="telegram",
                         event_key=event_key,
                         status=DeliveryStatus.QUEUED.value,
+                        message_text=message,
+                        source_url=candidate.source_url,
                     )
                 )
 
@@ -627,7 +665,7 @@ class NotificationService:
             delivery = await session.get(NotificationDelivery, delivery_id)
             if (
                 delivery is None
-                or delivery.status != DeliveryStatus.FAILED.value
+                or delivery.status not in {DeliveryStatus.QUEUED.value, DeliveryStatus.FAILED.value}
                 or delivery.message_text is None
                 or delivery.source_url is None
                 or (
@@ -636,6 +674,10 @@ class NotificationService:
                 )
             ):
                 return None
+            if delivery.status == DeliveryStatus.QUEUED.value:
+                state = await session.get(OpportunityUserState, delivery.opportunity_id)
+                if state is not None and state.disposition == OpportunityDisposition.HIDDEN.value:
+                    return None
             delivery.status = DeliveryStatus.PENDING.value
             delivery.last_error = None
             delivery.next_attempt_at = None
@@ -718,6 +760,7 @@ class NotificationService:
                 DeliveryStatus.PENDING.value,
                 DeliveryStatus.SENT.value,
                 DeliveryStatus.SKIPPED_PAUSED.value,
+                DeliveryStatus.FAILED.value,
             }:
                 return False
             delivery.status = DeliveryStatus.SKIPPED_PAUSED.value
@@ -725,6 +768,22 @@ class NotificationService:
             delivery.sent_at = None
             delivery.next_attempt_at = None
             return True
+
+    async def _discard_queued_while_paused(self, profile_id: str) -> int:
+        async with self._session_factory() as session, session.begin():
+            queued = list(
+                await session.scalars(
+                    select(NotificationDelivery).where(
+                        NotificationDelivery.profile_id == profile_id,
+                        NotificationDelivery.channel == "telegram",
+                        NotificationDelivery.status == DeliveryStatus.QUEUED.value,
+                    )
+                )
+            )
+            for delivery in queued:
+                delivery.status = DeliveryStatus.SKIPPED_PAUSED.value
+                delivery.next_attempt_at = None
+            return len(queued)
 
 
 def format_match_message(

@@ -82,8 +82,10 @@ async def test_postgres_only_recovers_pending_delivery_from_its_own_message(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", (DeliveryStatus.FAILED, DeliveryStatus.QUEUED))
 async def test_postgres_retries_stored_message_without_active_listing(
     postgres_session_factory: async_sessionmaker[AsyncSession],
+    status: DeliveryStatus,
 ) -> None:
     await IngestionService(postgres_session_factory).run_source(MockSource())
     async with postgres_session_factory() as session, session.begin():
@@ -94,9 +96,13 @@ async def test_postgres_retries_stored_message_without_active_listing(
             profile_id="test-profile",
             channel="telegram",
             event_key="stored-event",
-            status=DeliveryStatus.FAILED.value,
-            attempts=3,
-            next_attempt_at=datetime.now(UTC) - timedelta(minutes=1),
+            status=status.value,
+            attempts=3 if status == DeliveryStatus.FAILED else 0,
+            next_attempt_at=(
+                datetime.now(UTC) - timedelta(minutes=1)
+                if status == DeliveryStatus.FAILED
+                else None
+            ),
             message_text="Stored message",
             source_url="https://example.invalid/job",
         )
@@ -121,5 +127,5 @@ async def test_postgres_retries_stored_message_without_active_listing(
         recovered = await session.get(NotificationDelivery, delivery_id)
         assert recovered is not None
         assert recovered.status == DeliveryStatus.SENT.value
-        assert recovered.attempts == 4
+        assert recovered.attempts == (4 if status == DeliveryStatus.FAILED else 1)
         assert recovered.next_attempt_at is None

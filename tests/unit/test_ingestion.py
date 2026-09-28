@@ -8,12 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from jobradar.db.models import (
     Listing,
     MatchEvaluation,
+    NotificationDelivery,
     Opportunity,
     OpportunityUserState,
     Source,
     SourceRun,
+    TelegramOpportunityMessage,
 )
-from jobradar.domain.enums import OpportunityDisposition, OpportunityKind, RunStatus
+from jobradar.domain.enums import DeliveryStatus, OpportunityDisposition, OpportunityKind, RunStatus
 from jobradar.ingestion.deduplication import CrossSourceDeduplicationService
 from jobradar.ingestion.service import IngestionService, jittered_poll_interval_seconds
 from jobradar.matching.profile import BOHDAN_PROFILE
@@ -830,6 +832,126 @@ async def test_existing_duplicates_are_merged_when_first_candidate_is_distinct(
         assert remaining_ids == {distinct_id, min(duplicate_ids)}
         listing_opportunity_ids = list(await session.scalars(select(Listing.opportunity_id)))
         assert listing_opportunity_ids.count(min(duplicate_ids)) == 2
+
+
+@pytest.mark.parametrize(
+    "primary_status",
+    (
+        DeliveryStatus.QUEUED,
+        DeliveryStatus.SKIPPED_PAUSED,
+        DeliveryStatus.FAILED,
+    ),
+)
+@pytest.mark.asyncio
+async def test_duplicate_merge_preserves_retry_payload(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    primary_status: DeliveryStatus,
+) -> None:
+    retry_at = datetime.now(UTC) + timedelta(minutes=2)
+    async with sqlite_session_factory() as session, session.begin():
+        primary = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="primary-retry",
+            title="Python Developer",
+        )
+        duplicate = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="duplicate-retry",
+            title="Python Developer",
+        )
+        session.add_all((primary, duplicate))
+        await session.flush()
+        session.add_all(
+            (
+                NotificationDelivery(
+                    opportunity_id=primary.id,
+                    profile_id="test-profile",
+                    channel="telegram",
+                    event_key="same-event",
+                    status=primary_status.value,
+                ),
+                NotificationDelivery(
+                    opportunity_id=duplicate.id,
+                    profile_id="test-profile",
+                    channel="telegram",
+                    event_key="same-event",
+                    status=DeliveryStatus.FAILED.value,
+                    attempts=2,
+                    message_text="<b>Stored match</b>",
+                    source_url="https://example.invalid/job",
+                    next_attempt_at=retry_at,
+                ),
+            )
+        )
+        await session.flush()
+        await CrossSourceDeduplicationService._merge_deliveries(session, primary.id, duplicate.id)
+
+    async with sqlite_session_factory() as session:
+        deliveries = list(await session.scalars(select(NotificationDelivery)))
+        assert len(deliveries) == 1
+        delivery = deliveries[0]
+        assert delivery.opportunity_id == primary.id
+        assert delivery.status == DeliveryStatus.FAILED.value
+        assert delivery.attempts == 2
+        assert delivery.message_text == "<b>Stored match</b>"
+        assert delivery.source_url == "https://example.invalid/job"
+        assert delivery.next_attempt_at is not None
+        assert delivery.next_attempt_at.replace(tzinfo=UTC) == retry_at
+
+
+@pytest.mark.asyncio
+async def test_duplicate_merge_preserves_pending_message_link(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sqlite_session_factory() as session, session.begin():
+        primary = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="primary-pending",
+            title="Python Developer",
+        )
+        duplicate = Opportunity(
+            kind=OpportunityKind.EMPLOYMENT.value,
+            canonical_key="duplicate-pending",
+            title="Python Developer",
+        )
+        session.add_all((primary, duplicate))
+        await session.flush()
+        primary_delivery = NotificationDelivery(
+            opportunity_id=primary.id,
+            profile_id="test-profile",
+            channel="telegram",
+            event_key="same-event",
+            status=DeliveryStatus.QUEUED.value,
+        )
+        duplicate_delivery = NotificationDelivery(
+            opportunity_id=duplicate.id,
+            profile_id="test-profile",
+            channel="telegram",
+            event_key="same-event",
+            status=DeliveryStatus.PENDING.value,
+            message_text="<b>Stored match</b>",
+            source_url="https://example.invalid/job",
+        )
+        session.add_all((primary_delivery, duplicate_delivery))
+        await session.flush()
+        session.add(
+            TelegramOpportunityMessage(
+                opportunity_id=duplicate.id,
+                telegram_message_id=42,
+                delivery_id=duplicate_delivery.id,
+            )
+        )
+        await session.flush()
+        await CrossSourceDeduplicationService._merge_deliveries(session, primary.id, duplicate.id)
+
+    async with sqlite_session_factory() as session:
+        delivery = await session.scalar(select(NotificationDelivery))
+        message = await session.scalar(select(TelegramOpportunityMessage))
+        assert delivery is not None
+        assert message is not None
+        assert delivery.status == DeliveryStatus.PENDING.value
+        assert delivery.message_text == "<b>Stored match</b>"
+        assert message.delivery_id == delivery.id
 
 
 @pytest.mark.asyncio

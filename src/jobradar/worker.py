@@ -64,7 +64,6 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         reconciliation_max_missing_ratio=settings.source_reconciliation_max_missing_ratio,
     )
     sources = build_source_registry(settings)
-    completed_run_ids: list[int] = []
     await ingestion.synchronize_enabled_sources(sources)
     for source in sources:
         poll_interval_seconds = settings.source_poll_interval_seconds(source.name)
@@ -74,8 +73,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
             jitter_ratio=settings.source_poll_jitter_ratio,
             now=cycle_started_at,
         ):
-            result = await ingestion.run_source(source)
-            completed_run_ids.append(result.run_id)
+            await ingestion.run_source(source)
         else:
             logger.info(
                 "source_run_skipped_not_due",
@@ -86,8 +84,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
 
     if telegram_client is not None and settings.telegram_source_health_alerts_enabled:
         source_alerts = SourceHealthAlertService(session_factory, telegram_client)
-        for run_id in completed_run_ids:
-            await source_alerts.process_run(run_id)
+        await source_alerts.process_latest_runs()
 
     expiration_summary = await StaleExpirationService(session_factory).expire_stale(
         employment_days=settings.employment_stale_after_days,

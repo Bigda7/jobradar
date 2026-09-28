@@ -64,6 +64,25 @@ class SourceHealthAlertService:
         self._session_factory = session_factory
         self._telegram = telegram_client
 
+    async def process_latest_runs(self) -> list[SourceHealthAlertResult]:
+        async with self._session_factory() as session:
+            source_ids = list(
+                await session.scalars(select(Source.id).where(Source.enabled.is_(True)))
+            )
+            run_ids = [
+                await session.scalar(
+                    select(SourceRun.id)
+                    .where(
+                        SourceRun.source_id == source_id,
+                        SourceRun.finished_at.is_not(None),
+                    )
+                    .order_by(SourceRun.started_at.desc(), SourceRun.id.desc())
+                    .limit(1)
+                )
+                for source_id in source_ids
+            ]
+        return [await self.process_run(run_id) for run_id in run_ids if run_id is not None]
+
     async def process_run(self, run_id: int) -> SourceHealthAlertResult:
         alert = await self._load_alert(run_id)
         if alert is None:

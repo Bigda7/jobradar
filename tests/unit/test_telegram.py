@@ -7,8 +7,14 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from jobradar.db.models import Listing, NotificationDelivery, TelegramOpportunityMessage
-from jobradar.domain.enums import DeliveryStatus, OpportunityKind
+from jobradar.db.models import (
+    Listing,
+    MatchEvaluation,
+    NotificationDelivery,
+    OpportunityUserState,
+    TelegramOpportunityMessage,
+)
+from jobradar.domain.enums import DeliveryStatus, OpportunityDisposition, OpportunityKind
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
@@ -631,6 +637,50 @@ async def test_stored_delivery_survives_inactive_listing_and_respects_pause(
 
 
 @pytest.mark.asyncio
+async def test_failed_delivery_survives_reevaluation_while_paused(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource(DEFAULT_LISTINGS[:1]))
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecoveringTelegramClient(failures=1)
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+    preferences = NotificationPreferenceService(sqlite_session_factory)
+
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
+    assert first.failed == 1
+    await preferences.set_paused(BOHDAN_PROFILE.profile_id, "telegram", True)
+    async with sqlite_session_factory() as session, session.begin():
+        evaluation = await session.scalar(select(MatchEvaluation))
+        assert evaluation is not None
+        evaluation.evaluated_at = datetime.now(UTC) + timedelta(seconds=1)
+
+    paused = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
+    assert paused.sent == 0
+    assert paused.skipped_paused == 0
+    async with sqlite_session_factory() as session:
+        delivery = await session.scalar(select(NotificationDelivery))
+        assert delivery is not None
+        assert delivery.status == DeliveryStatus.FAILED.value
+        delivery_id = delivery.id
+
+    await preferences.set_paused(BOHDAN_PROFILE.profile_id, "telegram", False)
+    await _allow_retry_now(sqlite_session_factory, delivery_id)
+    retried = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=1)
+    assert retried.sent == 1
+    assert len(client.messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_notification_limit_preserves_queued_matches_for_next_cycle(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -669,6 +719,136 @@ async def test_notification_limit_preserves_queued_matches_for_next_cycle(
     assert second.sent == 1
     assert third.sent == 0
     assert len(client.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_queued_match_is_sent_after_listing_disappears(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecordingTelegramClient()
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
+    assert first.sent == 1
+    async with sqlite_session_factory() as session, session.begin():
+        queued = await session.scalar(
+            select(NotificationDelivery).where(
+                NotificationDelivery.status == DeliveryStatus.QUEUED.value
+            )
+        )
+        assert queued is not None
+        assert queued.message_text is not None
+        assert queued.source_url is not None
+        queued_id = queued.id
+        listings = list(
+            await session.scalars(
+                select(Listing).where(Listing.opportunity_id == queued.opportunity_id)
+            )
+        )
+        assert listings
+        for listing in listings:
+            listing.is_active = False
+
+    retried = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=1)
+    assert retried.sent == 1
+    assert len(client.messages) == 2
+    async with sqlite_session_factory() as session:
+        queued = await session.get(NotificationDelivery, queued_id)
+        assert queued is not None
+        assert queued.status == DeliveryStatus.SENT.value
+
+
+@pytest.mark.asyncio
+async def test_pausing_discards_queued_match_after_listing_disappears(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecordingTelegramClient()
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+    preferences = NotificationPreferenceService(sqlite_session_factory)
+
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
+    assert first.sent == 1
+    async with sqlite_session_factory() as session, session.begin():
+        queued = await session.scalar(
+            select(NotificationDelivery).where(
+                NotificationDelivery.status == DeliveryStatus.QUEUED.value
+            )
+        )
+        assert queued is not None
+        queued_id = queued.id
+        listings = list(
+            await session.scalars(
+                select(Listing).where(Listing.opportunity_id == queued.opportunity_id)
+            )
+        )
+        for listing in listings:
+            listing.is_active = False
+
+    await preferences.set_paused(BOHDAN_PROFILE.profile_id, "telegram", True)
+    paused = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
+    await preferences.set_paused(BOHDAN_PROFILE.profile_id, "telegram", False)
+    retried = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=1)
+
+    assert paused.skipped_paused == 1
+    assert retried.sent == 0
+    assert len(client.messages) == 1
+    async with sqlite_session_factory() as session:
+        queued = await session.get(NotificationDelivery, queued_id)
+        assert queued is not None
+        assert queued.status == DeliveryStatus.SKIPPED_PAUSED.value
+
+
+@pytest.mark.asyncio
+async def test_queued_match_respects_explicit_hidden_state(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecordingTelegramClient()
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
+    assert first.sent == 1
+    async with sqlite_session_factory() as session, session.begin():
+        queued = await session.scalar(
+            select(NotificationDelivery).where(
+                NotificationDelivery.status == DeliveryStatus.QUEUED.value
+            )
+        )
+        assert queued is not None
+        session.add(
+            OpportunityUserState(
+                opportunity_id=queued.opportunity_id,
+                disposition=OpportunityDisposition.HIDDEN.value,
+            )
+        )
+
+    hidden = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=1)
+    assert hidden.sent == 0
+    assert len(client.messages) == 1
 
 
 @pytest.mark.asyncio
