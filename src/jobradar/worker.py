@@ -38,6 +38,27 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         minimum_first_seen_at = await notification_cursor.begin_cycle(
             BOHDAN_PROFILE.profile_id, "telegram", cycle_started_at
         )
+    telegram_client: TelegramClient | None = None
+    retried_sent = 0
+    if settings.telegram_enabled:
+        if settings.telegram_bot_token is None or settings.telegram_chat_id is None:
+            raise RuntimeError("Telegram is enabled without complete credentials.")
+        telegram_client = TelegramClient(
+            bot_token=settings.telegram_bot_token.get_secret_value(),
+            chat_id=settings.telegram_chat_id,
+            request_timeout_seconds=settings.telegram_request_timeout_seconds,
+        )
+        retry_summary = await NotificationService(session_factory, telegram_client).retry_due(
+            BOHDAN_PROFILE.profile_id, settings.telegram_max_messages_per_cycle
+        )
+        retried_sent = retry_summary.sent
+        logger.info(
+            "notification_retry_cycle_finished",
+            channel="telegram",
+            considered=retry_summary.considered,
+            sent=retry_summary.sent,
+            failed=retry_summary.failed,
+        )
     ingestion = IngestionService(
         session_factory,
         reconciliation_max_missing_ratio=settings.source_reconciliation_max_missing_ratio,
@@ -63,19 +84,10 @@ async def run_cycle(*, force_sources: bool = False) -> None:
                 jitter_ratio=settings.source_poll_jitter_ratio,
             )
 
-    telegram_client: TelegramClient | None = None
-    if settings.telegram_enabled:
-        if settings.telegram_bot_token is None or settings.telegram_chat_id is None:
-            raise RuntimeError("Telegram is enabled without complete credentials.")
-        telegram_client = TelegramClient(
-            bot_token=settings.telegram_bot_token.get_secret_value(),
-            chat_id=settings.telegram_chat_id,
-            request_timeout_seconds=settings.telegram_request_timeout_seconds,
-        )
-        if settings.telegram_source_health_alerts_enabled:
-            source_alerts = SourceHealthAlertService(session_factory, telegram_client)
-            for run_id in completed_run_ids:
-                await source_alerts.process_run(run_id)
+    if telegram_client is not None and settings.telegram_source_health_alerts_enabled:
+        source_alerts = SourceHealthAlertService(session_factory, telegram_client)
+        for run_id in completed_run_ids:
+            await source_alerts.process_run(run_id)
 
     expiration_summary = await StaleExpirationService(session_factory).expire_stale(
         employment_days=settings.employment_stale_after_days,
@@ -119,7 +131,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
     ).dispatch(
         profile=BOHDAN_PROFILE,
         minimum_score=settings.matching_min_score,
-        max_messages=settings.telegram_max_messages_per_cycle,
+        max_messages=max(0, settings.telegram_max_messages_per_cycle - retried_sent),
         minimum_first_seen_at=(
             None if settings.telegram_notify_existing else minimum_first_seen_at
         ),
@@ -137,6 +149,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         skipped_historical=notification_summary.skipped_historical,
         skipped_duplicate=notification_summary.skipped_duplicate,
         skipped_paused=notification_summary.skipped_paused,
+        retry_deferred=notification_summary.retry_deferred,
     )
 
 

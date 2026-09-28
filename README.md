@@ -293,7 +293,12 @@ immediately if it may have been exposed.
 
 Interrupted match deliveries recover automatically during the next unpaused notification cycle.
 If a Telegram message ID was saved, the delivery is marked sent without resending. Otherwise the
-worker retries it, counting the interrupted attempt toward the three-attempt limit. A rare
+worker schedules another attempt. Before the first send, the message and source link are stored
+with the delivery. Failed sends and interrupted attempts use an increasing retry delay capped at
+one hour, with no fixed attempt limit. Stored deliveries are retried before source ingestion and
+matching, even if the original listing is no longer active. Legacy failed deliveries without a
+stored message still require an eligible match. Retries require a running worker and cannot
+overcome a permanent Telegram outage. A rare
 duplicate remains possible if Telegram accepted a message but the worker stopped before saving
 its ID; the Bot API cannot confirm that outgoing message from chat history afterward.
 

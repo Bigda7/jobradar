@@ -17,9 +17,14 @@ from jobradar.notifications.preferences import NotificationPreferenceService
 from jobradar.notifications.service import (
     NotificationCandidate,
     NotificationService,
+    _retry_delay,
     format_match_message,
 )
-from jobradar.notifications.telegram import InlineKeyboardMarkup, TelegramClient
+from jobradar.notifications.telegram import (
+    InlineKeyboardMarkup,
+    TelegramClient,
+    TelegramDeliveryError,
+)
 from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
 
 
@@ -45,6 +50,24 @@ class RecordingTelegramClient(TelegramClient):
         return len(self.messages)
 
 
+class RecoveringTelegramClient(RecordingTelegramClient):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+        self.attempts = 0
+
+    async def send_message(
+        self,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        chat_id: int | None = None,
+    ) -> int:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise TelegramDeliveryError("Simulated Telegram outage.")
+        return await super().send_message(text, reply_markup, chat_id)
+
+
 TEST_RATES = ExchangeRates(
     {
         "USD": Decimal("40"),
@@ -63,6 +86,24 @@ class FixedExchangeRateProvider:
 class FailingExchangeRateProvider:
     async def fetch_rates(self) -> ExchangeRates:
         raise CurrencyConversionError("NBU is unavailable")
+
+
+async def _allow_retry_now(
+    session_factory: async_sessionmaker[AsyncSession], delivery_id: int
+) -> None:
+    async with session_factory() as session, session.begin():
+        delivery = await session.get(NotificationDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.next_attempt_at is not None
+        delivery.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+
+
+@pytest.mark.parametrize(
+    ("attempts", "delay_seconds"),
+    ((1, 60), (2, 120), (3, 240), (7, 3600), (100, 3600)),
+)
+def test_telegram_retry_delay_is_bounded(attempts: int, delay_seconds: int) -> None:
+    assert _retry_delay(attempts) == timedelta(seconds=delay_seconds)
 
 
 @pytest.mark.asyncio
@@ -203,9 +244,19 @@ async def test_pending_delivery_is_retried_automatically_when_unconfirmed(
         max_messages=5,
         minimum_first_seen_at=None,
     )
+    await _allow_retry_now(sqlite_session_factory, pending_id)
+    third = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
 
-    assert first.sent == 2
+    assert first.sent == 1
+    assert first.retry_deferred == 1
     assert second.sent == 0
+    assert second.retry_deferred == 1
+    assert third.sent == 1
     assert len(client.messages) == 2
     assert sum(pending.title in message for message in client.messages) == 1
     async with sqlite_session_factory() as session:
@@ -267,6 +318,13 @@ async def test_pending_delivery_is_not_confirmed_by_manual_message(
     assert pending_id is not None
     await service._message_registry.record(pending.opportunity_id, 42)
 
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
+    await _allow_retry_now(sqlite_session_factory, pending_id)
     result = await service.dispatch(
         profile=BOHDAN_PROFILE,
         minimum_score=BOHDAN_PROFILE.notification_threshold,
@@ -274,7 +332,9 @@ async def test_pending_delivery_is_not_confirmed_by_manual_message(
         minimum_first_seen_at=None,
     )
 
-    assert result.sent == 2
+    assert first.sent == 1
+    assert first.retry_deferred == 1
+    assert result.sent == 1
     assert sum(pending.title in message for message in client.messages) == 1
     async with sqlite_session_factory() as session:
         delivery = await session.get(NotificationDelivery, pending_id)
@@ -312,6 +372,13 @@ async def test_pending_delivery_with_updated_content_is_retried_once(
     await IngestionService(sqlite_session_factory).run_source(MockSource(updated_listings))
     await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
 
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    await _allow_retry_now(sqlite_session_factory, pending_id)
     result = await service.dispatch(
         profile=BOHDAN_PROFILE,
         minimum_score=BOHDAN_PROFILE.notification_threshold,
@@ -319,6 +386,8 @@ async def test_pending_delivery_with_updated_content_is_retried_once(
         minimum_first_seen_at=datetime.now(UTC) + timedelta(seconds=1),
     )
 
+    assert first.sent == 0
+    assert first.retry_deferred == 1
     assert result.sent == 1
     assert len(client.messages) == 1
     assert sum(pending.title in message for message in client.messages) == 1
@@ -373,14 +442,23 @@ async def test_pending_delivery_waits_while_paused_and_recovers_after_resume(
         max_messages=1,
         minimum_first_seen_at=None,
     )
+    await _allow_retry_now(sqlite_session_factory, pending_id)
+    retried = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=1,
+        minimum_first_seen_at=None,
+    )
 
     assert resumed.sent == 1
-    assert len(client.messages) == 1
-    assert pending.title in client.messages[0]
+    assert resumed.retry_deferred == 1
+    assert retried.sent == 1
+    assert len(client.messages) == 2
+    assert sum(pending.title in message for message in client.messages) == 1
 
 
 @pytest.mark.asyncio
-async def test_pending_delivery_stops_after_three_interrupted_attempts(
+async def test_pending_delivery_retries_after_three_interrupted_attempts(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await IngestionService(sqlite_session_factory).run_source(MockSource())
@@ -411,12 +489,145 @@ async def test_pending_delivery_stops_after_three_interrupted_attempts(
     )
 
     assert result.sent == 0
+    assert result.retry_deferred == 1
     assert client.messages == []
     async with sqlite_session_factory() as session:
         delivery = await session.get(NotificationDelivery, pending_id)
         assert delivery is not None
         assert delivery.status == DeliveryStatus.FAILED.value
         assert delivery.attempts == 3
+        assert delivery.next_attempt_at is not None
+
+    await _allow_retry_now(sqlite_session_factory, pending_id)
+    retried = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    assert retried.sent == 1
+    assert len(client.messages) == 1
+    async with sqlite_session_factory() as session:
+        delivery = await session.get(NotificationDelivery, pending_id)
+        assert delivery is not None
+        assert delivery.status == DeliveryStatus.SENT.value
+        assert delivery.attempts == 4
+        assert delivery.next_attempt_at is None
+
+
+@pytest.mark.asyncio
+async def test_telegram_outage_retries_until_delivery_succeeds(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource(DEFAULT_LISTINGS[:1]))
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecoveringTelegramClient(failures=4)
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+    candidates = await service.load_candidates(
+        BOHDAN_PROFILE, BOHDAN_PROFILE.notification_threshold
+    )
+    assert len(candidates) == 1
+
+    for attempt in range(1, 5):
+        result = await service.dispatch(
+            profile=BOHDAN_PROFILE,
+            minimum_score=BOHDAN_PROFILE.notification_threshold,
+            max_messages=5,
+            minimum_first_seen_at=None,
+        )
+        assert result.failed == 1
+        assert result.sent == 0
+        assert client.attempts == attempt
+        async with sqlite_session_factory() as session:
+            delivery = await session.scalar(select(NotificationDelivery))
+            assert delivery is not None
+            assert delivery.status == DeliveryStatus.FAILED.value
+            assert delivery.attempts == attempt
+            assert delivery.next_attempt_at is not None
+            delivery_id = delivery.id
+
+        deferred = await service.dispatch(
+            profile=BOHDAN_PROFILE,
+            minimum_score=BOHDAN_PROFILE.notification_threshold,
+            max_messages=5,
+            minimum_first_seen_at=datetime.now(UTC) + timedelta(seconds=1),
+        )
+        assert deferred.retry_deferred == 1
+        assert client.attempts == attempt
+        await _allow_retry_now(sqlite_session_factory, delivery_id)
+
+    recovered = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    duplicate = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
+    assert recovered.sent == 1
+    assert duplicate.sent == 0
+    assert client.attempts == 5
+    assert len(client.messages) == 1
+    async with sqlite_session_factory() as session:
+        delivery = await session.get(NotificationDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.status == DeliveryStatus.SENT.value
+        assert delivery.attempts == 5
+        assert delivery.next_attempt_at is None
+
+
+@pytest.mark.asyncio
+async def test_stored_delivery_survives_inactive_listing_and_respects_pause(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource(DEFAULT_LISTINGS[:1]))
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    client = RecoveringTelegramClient(failures=1)
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+
+    first = await service.dispatch(
+        profile=BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
+    assert first.failed == 1
+    async with sqlite_session_factory() as session, session.begin():
+        delivery = await session.scalar(select(NotificationDelivery))
+        listing = await session.scalar(select(Listing))
+        assert delivery is not None
+        assert listing is not None
+        assert delivery.message_text is not None
+        assert delivery.source_url == listing.source_url
+        delivery_id = delivery.id
+        listing.is_active = False
+
+    assert (
+        await service.load_candidates(BOHDAN_PROFILE, BOHDAN_PROFILE.notification_threshold) == []
+    )
+    await _allow_retry_now(sqlite_session_factory, delivery_id)
+    preferences = NotificationPreferenceService(sqlite_session_factory)
+    await preferences.set_paused(BOHDAN_PROFILE.profile_id, "telegram", True)
+    paused = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=5)
+    assert paused.sent == 0
+    assert client.attempts == 1
+
+    await preferences.set_paused(BOHDAN_PROFILE.profile_id, "telegram", False)
+    retried = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=5)
+    duplicate = await service.retry_due(BOHDAN_PROFILE.profile_id, max_messages=5)
+    assert retried.sent == 1
+    assert duplicate.sent == 0
+    assert client.attempts == 2
+    assert len(client.messages) == 1
+    async with sqlite_session_factory() as session:
+        delivery = await session.get(NotificationDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.status == DeliveryStatus.SENT.value
+        assert delivery.next_attempt_at is None
 
 
 @pytest.mark.asyncio

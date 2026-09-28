@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from typing import cast
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.db.models import (
@@ -71,6 +71,7 @@ class NotificationSummary:
     skipped_historical: int = 0
     skipped_duplicate: int = 0
     skipped_paused: int = 0
+    retry_deferred: int = 0
 
 
 class NotificationService:
@@ -78,7 +79,7 @@ class NotificationService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         telegram_client: TelegramClient,
-        exchange_rate_provider: ExchangeRateProvider,
+        exchange_rate_provider: ExchangeRateProvider | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._telegram_client = telegram_client
@@ -136,6 +137,8 @@ class NotificationService:
 
         rates: ExchangeRates | None = None
         if any(_has_published_amount(candidate) for candidate in candidates):
+            if self._exchange_rate_provider is None:
+                raise RuntimeError("Exchange rate provider is required for match dispatch.")
             try:
                 rates = await self._exchange_rate_provider.fetch_rates()
             except CurrencyConversionError as error:
@@ -168,50 +171,134 @@ class NotificationService:
             ):
                 summary.skipped_historical += 1
                 continue
-
-            try:
-                message = format_match_message(candidate, rates)
-            except CurrencyConversionError as error:
-                summary.failed += 1
-                logger.warning(
-                    "currency_conversion_failed",
-                    opportunity_id=candidate.opportunity_id,
-                    currency=candidate.salary_currency,
-                    error=str(error),
-                )
+            if (
+                delivery is not None
+                and delivery.status == DeliveryStatus.FAILED.value
+                and delivery.next_attempt_at is not None
+                and _as_utc(delivery.next_attempt_at) > datetime.now(UTC)
+            ):
+                summary.retry_deferred += 1
                 continue
+
+            if (
+                delivery is not None
+                and delivery.status == DeliveryStatus.FAILED.value
+                and delivery.message_text is not None
+                and delivery.source_url is not None
+            ):
+                message = delivery.message_text
+                source_url = delivery.source_url
+            else:
+                try:
+                    message = format_match_message(candidate, rates)
+                except CurrencyConversionError as error:
+                    summary.failed += 1
+                    logger.warning(
+                        "currency_conversion_failed",
+                        opportunity_id=candidate.opportunity_id,
+                        currency=candidate.salary_currency,
+                        error=str(error),
+                    )
+                    continue
+                source_url = candidate.source_url
 
             delivery_id = await self._claim_delivery(
                 candidate.opportunity_id,
                 profile,
                 event_key,
+                message_text=message,
+                source_url=source_url,
             )
             if delivery_id is None:
                 summary.skipped_duplicate += 1
                 continue
 
-            try:
-                message_id = await self._telegram_client.send_message(
-                    message,
-                    reply_markup=opportunity_keyboard(
-                        candidate.opportunity_id, candidate.source_url
-                    ),
-                )
-                await self._message_registry.record(
-                    candidate.opportunity_id, message_id, delivery_id=delivery_id
-                )
-            except TelegramDeliveryError as error:
-                await self._finish_delivery(delivery_id, sent=False, error=str(error))
-                summary.failed += 1
-                logger.warning(
-                    "telegram_delivery_failed",
-                    opportunity_id=candidate.opportunity_id,
-                    error=str(error),
-                )
-            else:
-                await self._finish_delivery(delivery_id, sent=True, error=None)
+            if await self._send_claimed_delivery(
+                delivery_id, candidate.opportunity_id, message, source_url
+            ):
                 summary.sent += 1
+            else:
+                summary.failed += 1
         return summary
+
+    async def retry_due(self, profile_id: str, max_messages: int) -> NotificationSummary:
+        summary = NotificationSummary()
+        if max_messages <= 0:
+            return summary
+        pause_state = await self._preferences.get_state(profile_id, "telegram")
+        if pause_state.is_paused:
+            return summary
+
+        await self._recover_pending_deliveries()
+        async with self._session_factory() as session:
+            due_ids = list(
+                await session.scalars(
+                    select(NotificationDelivery.id)
+                    .where(
+                        NotificationDelivery.profile_id == profile_id,
+                        NotificationDelivery.channel == "telegram",
+                        NotificationDelivery.status == DeliveryStatus.FAILED.value,
+                        NotificationDelivery.message_text.is_not(None),
+                        NotificationDelivery.source_url.is_not(None),
+                        or_(
+                            NotificationDelivery.next_attempt_at.is_(None),
+                            NotificationDelivery.next_attempt_at <= datetime.now(UTC),
+                        ),
+                    )
+                    .order_by(
+                        NotificationDelivery.next_attempt_at,
+                        NotificationDelivery.id,
+                    )
+                    .limit(max_messages)
+                )
+            )
+
+        for delivery_id in due_ids:
+            claimed = await self._claim_stored_delivery(delivery_id)
+            if claimed is None:
+                continue
+            opportunity_id, message, source_url = claimed
+            summary.considered += 1
+            if await self._send_claimed_delivery(delivery_id, opportunity_id, message, source_url):
+                summary.sent += 1
+            else:
+                summary.failed += 1
+        return summary
+
+    async def _send_claimed_delivery(
+        self,
+        delivery_id: int,
+        opportunity_id: int,
+        message: str,
+        source_url: str,
+    ) -> bool:
+        try:
+            message_id = await self._telegram_client.send_message(
+                message,
+                reply_markup=opportunity_keyboard(opportunity_id, source_url),
+            )
+            await self._message_registry.record(opportunity_id, message_id, delivery_id=delivery_id)
+        except TelegramDeliveryError as error:
+            attempts, next_attempt_at = await self._finish_delivery(
+                delivery_id, sent=False, error=str(error)
+            )
+            logger.warning(
+                "telegram_delivery_failed",
+                opportunity_id=opportunity_id,
+                attempts=attempts,
+                next_attempt_at=next_attempt_at,
+                error=str(error),
+            )
+            if attempts >= 3:
+                logger.error(
+                    "telegram_delivery_repeated_failure",
+                    opportunity_id=opportunity_id,
+                    attempts=attempts,
+                    next_attempt_at=next_attempt_at,
+                )
+            return False
+        await self._finish_delivery(delivery_id, sent=True, error=None)
+        return True
 
     async def _recover_pending_deliveries(self) -> None:
         recorded_message_at = (
@@ -234,27 +321,25 @@ class NotificationService:
             ).all()
             recovered_sent = 0
             retry_scheduled = 0
-            exhausted = 0
+            recovered_at = datetime.now(UTC)
             for delivery, message_created_at in rows:
                 delivery.attempts += 1
                 if message_created_at is not None:
                     delivery.status = DeliveryStatus.SENT.value
                     delivery.sent_at = message_created_at
                     delivery.last_error = None
+                    delivery.next_attempt_at = None
                     recovered_sent += 1
                 else:
                     delivery.status = DeliveryStatus.FAILED.value
                     delivery.last_error = "Interrupted before delivery confirmation."
-                    if delivery.attempts < 3:
-                        retry_scheduled += 1
-                    else:
-                        exhausted += 1
-        if recovered_sent or retry_scheduled or exhausted:
+                    delivery.next_attempt_at = recovered_at + _retry_delay(delivery.attempts)
+                    retry_scheduled += 1
+        if recovered_sent or retry_scheduled:
             logger.warning(
                 "pending_telegram_deliveries_recovered",
                 confirmed_sent=recovered_sent,
                 retry_scheduled=retry_scheduled,
-                attempts_exhausted=exhausted,
             )
 
     async def load_candidates(
@@ -421,8 +506,7 @@ class NotificationService:
                 .limit(1)
             )
             if failed is not None:
-                if failed.attempts < 3:
-                    failed.event_key = event_key
+                failed.event_key = event_key
                 return
             handled = await session.scalar(
                 select(NotificationDelivery.id).where(
@@ -453,6 +537,8 @@ class NotificationService:
         opportunity_id: int,
         profile: SearchProfile,
         event_key: str,
+        message_text: str | None = None,
+        source_url: str | None = None,
     ) -> int | None:
         async with self._session_factory() as session, session.begin():
             delivery = await session.scalar(
@@ -486,7 +572,7 @@ class NotificationService:
                     .order_by(NotificationDelivery.id.desc())
                     .limit(1)
                 )
-                if delivery is not None and delivery.attempts < 3:
+                if delivery is not None:
                     delivery.event_key = event_key
             handled_delivery_id = await session.scalar(
                 select(NotificationDelivery.id).where(
@@ -511,29 +597,56 @@ class NotificationService:
                     channel="telegram",
                     event_key=event_key,
                     status=DeliveryStatus.PENDING.value,
+                    message_text=message_text,
+                    source_url=source_url,
                 )
                 session.add(delivery)
                 await session.flush()
                 return delivery.id
+            if delivery.status not in {
+                DeliveryStatus.QUEUED.value,
+                DeliveryStatus.FAILED.value,
+            }:
+                return None
             if (
-                delivery.status
-                not in {
-                    DeliveryStatus.QUEUED.value,
-                    DeliveryStatus.FAILED.value,
-                }
-                or delivery.attempts >= 3
+                delivery.status == DeliveryStatus.FAILED.value
+                and delivery.next_attempt_at is not None
+                and _as_utc(delivery.next_attempt_at) > datetime.now(UTC)
             ):
                 return None
             delivery.status = DeliveryStatus.PENDING.value
             delivery.last_error = None
+            delivery.next_attempt_at = None
+            if delivery.message_text is None or delivery.source_url is None:
+                delivery.message_text = message_text
+                delivery.source_url = source_url
             return delivery.id
+
+    async def _claim_stored_delivery(self, delivery_id: int) -> tuple[int, str, str] | None:
+        async with self._session_factory() as session, session.begin():
+            delivery = await session.get(NotificationDelivery, delivery_id)
+            if (
+                delivery is None
+                or delivery.status != DeliveryStatus.FAILED.value
+                or delivery.message_text is None
+                or delivery.source_url is None
+                or (
+                    delivery.next_attempt_at is not None
+                    and _as_utc(delivery.next_attempt_at) > datetime.now(UTC)
+                )
+            ):
+                return None
+            delivery.status = DeliveryStatus.PENDING.value
+            delivery.last_error = None
+            delivery.next_attempt_at = None
+            return delivery.opportunity_id, delivery.message_text, delivery.source_url
 
     async def _finish_delivery(
         self,
         delivery_id: int,
         sent: bool,
         error: str | None,
-    ) -> None:
+    ) -> tuple[int, datetime | None]:
         async with self._session_factory() as session, session.begin():
             delivery = await session.get(NotificationDelivery, delivery_id)
             if delivery is None:
@@ -541,7 +654,12 @@ class NotificationService:
             delivery.attempts += 1
             delivery.status = DeliveryStatus.SENT.value if sent else DeliveryStatus.FAILED.value
             delivery.last_error = error[:2000] if error else None
-            delivery.sent_at = datetime.now(UTC) if sent else None
+            finished_at = datetime.now(UTC)
+            delivery.sent_at = finished_at if sent else None
+            delivery.next_attempt_at = (
+                None if sent else finished_at + _retry_delay(delivery.attempts)
+            )
+            return delivery.attempts, delivery.next_attempt_at
 
     async def _mark_skipped_paused(
         self,
@@ -605,6 +723,7 @@ class NotificationService:
             delivery.status = DeliveryStatus.SKIPPED_PAUSED.value
             delivery.last_error = None
             delivery.sent_at = None
+            delivery.next_attempt_at = None
             return True
 
 
@@ -818,6 +937,11 @@ def _employer_status(raw_data: dict[str, object]) -> str | None:
 
 def _event_key(rules_version: str, content_hash: str) -> str:
     return f"match:{rules_version}:{content_hash[:16]}"
+
+
+def _retry_delay(attempts: int) -> timedelta:
+    exponent = min(6, max(0, attempts - 1))
+    return timedelta(seconds=min(3600, 60 * (2**exponent)))
 
 
 def _as_utc(value: datetime) -> datetime:
