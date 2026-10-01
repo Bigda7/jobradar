@@ -94,10 +94,16 @@ jobs:
           fi
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run python -m pytest
 
-      - name: Build runtime image
-        run: docker build --target runtime --tag jobradar:${{ github.sha }} .
+      - name: Build and verify attested runtime image
+        run: |
+          image_archive="${RUNNER_TEMP}/jobradar-runtime.oci.tar"
+          docker buildx create --name jobradar-ci --driver docker-container --use
+          docker buildx build --builder jobradar-ci --target runtime \
+            --provenance=mode=min --sbom=true \
+            --output "type=oci,dest=${image_archive}" .
+          python scripts/verify_image_attestations.py "${image_archive}"
 
       - name: Scan Git history for secrets
         run: >-

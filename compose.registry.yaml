@@ -1,0 +1,15 @@
+services:
+  api:
+    image: ${JOBRADAR_IMAGE:?Set JOBRADAR_IMAGE to a verified GHCR digest reference}
+    build: !reset null
+    pull_policy: always
+
+  worker:
+    image: ${JOBRADAR_IMAGE:?Set JOBRADAR_IMAGE to a verified GHCR digest reference}
+    build: !reset null
+    pull_policy: always
+
+  bot:
+    image: ${JOBRADAR_IMAGE:?Set JOBRADAR_IMAGE to a verified GHCR digest reference}
+    build: !reset null
+    pull_policy: always
