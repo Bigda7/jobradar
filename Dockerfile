@@ -21,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apk add --no-cache openssl=3.5.8-r0 sqlite-libs=3.53.4-r0 \
+RUN apk add --no-cache openssl=3.5.9-r0 sqlite-libs=3.53.4-r0 \
     && python -m pip uninstall --yes pip \
     && addgroup -S jobradar \
     && adduser -S -D -H -G jobradar jobradar

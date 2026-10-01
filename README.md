@@ -342,8 +342,10 @@ Run PostgreSQL integration tests in containers:
 CI also builds the runtime stage as a temporary OCI archive with SPDX SBOM and SLSA provenance
 attestations. `scripts/verify_image_attestations.py` checks that both statements are attached to
 each runnable image in the archive and that their blobs match their digests. The archive is not
-published or deployed; production Compose builds remain unchanged. This check does not resolve
-Docker Scout's separate copyleft-license policy finding.
+published or deployed; production Compose builds remain unchanged. A separate, manually triggered
+GHCR workflow and opt-in digest-pinned Compose override are documented in
+[`docs/registry-image-rollout.md`](docs/registry-image-rollout.md). Neither changes production
+automatically. These checks do not resolve Docker Scout's separate copyleft-license policy finding.
 
 ## Project layout
 
