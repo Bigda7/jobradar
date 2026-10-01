@@ -117,7 +117,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://jobradar:jobradar@db-test:5432/jobradar_test
       TEST_DATABASE_URL: postgresql+psycopg://jobradar:jobradar@db-test:5432/jobradar_test
-    command: ["sh", "-c", "python tests/reset_test_database.py && alembic upgrade head && pytest -o cache_dir=/tmp/pytest_cache -m integration"]
+    command: ["sh", "-c", "python tests/reset_test_database.py && alembic upgrade head && python -m pytest -o cache_dir=/tmp/pytest_cache -m integration"]
     depends_on:
       db-test:
         condition: service_healthy

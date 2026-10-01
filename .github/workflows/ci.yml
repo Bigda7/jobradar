@@ -94,7 +94,7 @@ jobs:
           fi
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run python -m pytest
 
       - name: Build and verify attested runtime image
         run: |

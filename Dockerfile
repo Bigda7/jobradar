@@ -42,4 +42,5 @@ FROM runtime AS test
 
 COPY --from=test-builder --chown=jobradar:jobradar /app/.venv /app/.venv
 COPY --chown=jobradar:jobradar pyproject.toml ./
+COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py ./scripts/
 COPY --chown=jobradar:jobradar tests ./tests

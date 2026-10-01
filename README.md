@@ -327,7 +327,7 @@ uv sync --extra dev
 Run unit tests and static checks:
 
 ```powershell
-uv run pytest -m "not integration"
+uv run python -m pytest -m "not integration"
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src
