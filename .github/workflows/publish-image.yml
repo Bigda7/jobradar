@@ -9,7 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -40,8 +40,8 @@ jobs:
           git fetch origin main
           git merge-base --is-ancestor "$release_sha" origin/main
           git switch --detach "$release_sha"
-          if [[ ! -f scripts/verify_registry_image.py ]]; then
-            echo 'Release commit does not contain the registry verifier.' >&2
+          if [[ ! -f scripts/verify_registry_image.py || ! -f scripts/prepare_runtime_sources.py || ! -f docs/runtime-native-sources.json || ! -f docs/runtime-package-review.json ]]; then
+            echo 'Release commit does not contain the registry and source verification package.' >&2
             exit 1
           fi
           project_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
@@ -53,6 +53,81 @@ jobs:
           echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
 
+      - name: Enable containerd image storage for attested OCI import
+        run: |
+          set -euo pipefail
+          sudo python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/etc/docker/daemon.json')
+          config = json.loads(path.read_text()) if path.exists() else {}
+          config.setdefault('features', {})['containerd-snapshotter'] = True
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(config))
+          PY
+          sudo systemctl restart docker
+          docker info --format '{{json .DriverStatus}}' | grep -Fq io.containerd.snapshotter.v1
+
+      - name: Build and verify ARM64 OCI candidate before publication
+        id: candidate
+        env:
+          IMAGE_NAME: ${{ steps.release.outputs.image_name }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          source_asset="runtime-sources-${RELEASE_TAG}-linux-arm64.zip"
+          source_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${source_asset}"
+          docker buildx create --name jobradar-release --driver docker-container --use --bootstrap
+          docker buildx build --builder jobradar-release --platform linux/arm64 --target runtime \
+            --attest type=provenance,mode=min,version=v1 --sbom=true \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${RELEASE_SHA}" \
+            --label "io.jobradar.corresponding-source=${source_url}" \
+            --metadata-file "${RUNNER_TEMP}/image-metadata.json" \
+            --tag "${IMAGE_NAME}:${RELEASE_TAG}" \
+            --output "type=oci,dest=${RUNNER_TEMP}/runtime.oci.tar" .
+          python scripts/verify_image_attestations.py "${RUNNER_TEMP}/runtime.oci.tar"
+          docker image load --input "${RUNNER_TEMP}/runtime.oci.tar"
+          image_id="$(docker image inspect --format '{{.Id}}' "${IMAGE_NAME}:${RELEASE_TAG}")"
+          python - "$RUNNER_TEMP/image-metadata.json" "$image_id" <<'PY'
+          import json, sys
+          metadata = json.load(open(sys.argv[1], encoding='utf-8'))
+          if metadata['containerimage.config.digest'] != sys.argv[2]:
+              raise SystemExit('Imported image differs from the verified build.')
+          PY
+          image_digest="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/image-metadata.json")"
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_NAME}@${image_digest}" >> "$GITHUB_OUTPUT"
+          echo "source_asset=$source_asset" >> "$GITHUB_OUTPUT"
+          echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare and verify corresponding sources before publication
+        env:
+          IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
+          IMAGE_REF: ${{ steps.candidate.outputs.image_ref }}
+          SOURCE_ASSET: ${{ steps.candidate.outputs.source_asset }}
+        run: |
+          set -euo pipefail
+          source_directory="${RUNNER_TEMP}/${SOURCE_ASSET%.zip}"
+          python scripts/prepare_runtime_sources.py --image "$IMAGE_ID" \
+            --registry-reference "$IMAGE_REF" --output "$source_directory"
+          python scripts/prepare_runtime_sources.py --verify --image "$IMAGE_ID" \
+            --registry-reference "$IMAGE_REF" --output "$source_directory"
+          cd "$RUNNER_TEMP"
+          sha256sum "$SOURCE_ASSET" > "${SOURCE_ASSET}.sha256"
+
+      - name: Publish verified sources on the existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_ASSET: ${{ steps.candidate.outputs.source_asset }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "${RUNNER_TEMP}/${SOURCE_ASSET}" "${RUNNER_TEMP}/${SOURCE_ASSET}.sha256" \
+            --repo "$GITHUB_REPOSITORY"
+
       - name: Log in to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,20 +135,13 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Build and publish ARM64 runtime image
+      - name: Publish the already verified image without rebuilding
         env:
           IMAGE_NAME: ${{ steps.release.outputs.image_name }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          docker buildx create --name jobradar-release --driver docker-container --use --bootstrap
-          docker buildx build --builder jobradar-release --platform linux/arm64 --target runtime \
-            --attest type=provenance,mode=min,version=v1 --sbom=true \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${RELEASE_SHA}" \
-            --metadata-file "${RUNNER_TEMP}/image-metadata.json" \
-            --tag "${IMAGE_NAME}:${RELEASE_TAG}" --push .
+          docker image push "${IMAGE_NAME}:${RELEASE_TAG}"
 
       - name: Inspect published digest and attestations
         id: verified

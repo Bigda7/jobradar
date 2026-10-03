@@ -347,6 +347,20 @@ GHCR workflow and opt-in digest-pinned Compose override are documented in
 [`docs/registry-image-rollout.md`](docs/registry-image-rollout.md). Neither changes production
 automatically. These checks do not resolve Docker Scout's separate copyleft-license policy finding.
 
+The runtime build also preserves the project's license text and verifies that the installed
+JobRadar package includes the same text. The current third-party package findings, source
+distribution requirements, and unresolved work are documented in
+[`docs/runtime-license-review.md`](docs/runtime-license-review.md). This packaging check is not
+a certification of third-party license compliance.
+
+Runtime builds automatically preserve installed Python/CPython notice texts and an inventory at
+`/usr/local/share/licenses/jobradar/third-party`. Missing dependency notices fail the build.
+The offline container audit and version/checksum-pinned source-evidence collector are documented in
+[`docs/runtime-source-bundle.md`](docs/runtime-source-bundle.md). The publication workflow verifies
+reviewed source coverage before uploading release assets or the runtime image. Version/license
+changes and unknown native-library hashes require a new review. This local workflow change and
+its source bundle have not yet been published; the old v1.2.12 image still lacks its own notice.
+
 ## Project layout
 
 ```text
