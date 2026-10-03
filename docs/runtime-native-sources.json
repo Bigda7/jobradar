@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "platform": "linux/arm64",
+  "groups": {
+    "gcc-alpine": {"origin": "gcc", "commit": "fbf60319be3bbaf6dd32ef55cc6fb7189e05c266", "branch": "v3.22", "license": "GPL-3.0-or-later WITH GCC-exception-3.1"},
+    "openssl": {"origin": "openssl", "commit": "81040d484e5a8a7a515452ecd02abdefd14d566a", "branch": "v3.22", "license": "Apache-2.0"},
+    "krb5": {"origin": "krb5", "commit": "4c87a3702ac5bc277f8b438835645c78090c2f3a", "branch": "v3.22", "license": "MIT and upstream component notices"},
+    "cyrus-sasl": {"origin": "cyrus-sasl", "commit": "0ba5902c3e39ed5dab7e5afc9a41ad3e2ff88f15", "branch": "v3.22", "license": "BSD-3-Clause-Attribution AND BSD-4-Clause"},
+    "e2fsprogs": {"origin": "e2fsprogs", "commit": "13f83cd1a99fa6ea58c6f8c3538971f2fb9ac634", "branch": "v3.22", "license": "MIT for libcom_err; preserve full origin notices"},
+    "openldap": {"origin": "openldap", "commit": "589dff3eb85bad239ee31625443e785cb88d03d9", "branch": "v3.22", "license": "OLDAP-2.8"},
+    "keyutils": {"origin": "keyutils", "commit": "8bac74716d06c84627ab02d101fd9d2bafd0a34c", "branch": "v3.22", "license": "LGPL-2.0-or-later for the library"},
+    "postgres": {
+      "license": "PostgreSQL",
+      "archives": [{"name": "postgres-18.0.tar.gz", "url": "https://codeload.github.com/postgres/postgres/tar.gz/3d6a828938a5fa0444275d3d2f67b64ec3199eb7", "sha256": "b90e598761827cee3477a6159653914a7fbf02602767ea7122762fa59611513a"}],
+      "build_dependency": "python/psycopg-binary-3.3.4/83f110367cdd249cc0a352e2246ecea9e878e5a0"
+    },
+    "gcc-cross": {
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "archives": [
+        {"name": "gcc-12.4.0.tar.xz", "url": "https://ftp.gnu.org/gnu/gcc/gcc-12.4.0/gcc-12.4.0.tar.xz", "sha256": "704f652604ccbccb14bdabf3478c9511c89788b12cb3bbffded37341916a9175"},
+        {"name": "musl-cross-make.tar.gz", "url": "https://codeload.github.com/richfelker/musl-cross-make/tar.gz/227df8b99103f9c59f6570babf892978e293082f", "sha256": "bb3fc7851088e1e5e1274ee56a0ab6ae176043d160fdf0b71027934b091f208a"},
+        {"name": "rust-musl-cross.tar.gz", "url": "https://codeload.github.com/rust-cross/rust-musl-cross/tar.gz/80d14aebe943277b51552d65b289e49e922677d3", "sha256": "9485c76ff7d04ee5cc9dcff44dbb89233cba91b94135c22af30e42af51f9af63"}
+      ],
+      "reference_image": "ghcr.io/rust-cross/rust-musl-cross@sha256:c9403b20663fca32f703b4201672120d8a634d5ebcaf95d013f0140382432a17",
+      "reference_library_sha256": "0bf60adc8e990861bcc846bdb16ce7e31ba0d82c01be2d6338e41ff14a6b6b52",
+      "reference_text_sha256": "459600c9e6eb69cc91580f2aad1d0b295d90d44504ad24eb6e25da451772a0b9"
+    }
+  },
+  "files": [
+    {"package": "greenlet", "path": "greenlet.libs/libgcc_s-2d945d6c.so.1", "sha256": "767fb99107fa5e41168413b1eed9d73191c94126c37526263e1af1f1f898788f", "group": "gcc-alpine"},
+    {"package": "greenlet", "path": "greenlet.libs/libstdc++-85f2cd6d.so.6.0.33", "sha256": "74d419612500998317744231a2b322e296836f4a111fdb48196f136d17f0f030", "group": "gcc-alpine"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libcom_err-934f4c86.so.2.1", "sha256": "b3b1bb51424ad0731ab9f06b8b9f99e6a210b76682c4339699f0bb671d7bf5cc", "group": "e2fsprogs"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libcrypto-85ee27b2.so.3", "sha256": "cc4ca67876fe6f75016d8bd0d919922d709b2eda102ffa7d77fe79c6fbdd8320", "group": "openssl"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libgssapi_krb5-bd701c95.so.2.2", "sha256": "a58c5cd32b6ad2e9dbfd9d5505e5e1509e1cb6bd12eb3bc957ae936a64ff4a7b", "group": "krb5"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libk5crypto-95e68b98.so.3.1", "sha256": "65fbe6799e22110ccbabe54dc1389b0afb085c0fdbc5f0570246a41fb93de32c", "group": "krb5"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libkeyutils-6ce80ab8.so.1.10", "sha256": "160729ebbdbd4be5d7c26931b05ad6c3f8acb4e859971333762288341615a0a3", "group": "keyutils"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libkrb5-46c15cab.so.3.3", "sha256": "ea2873b9cb7940c4c58603c2fbe9342fb81a8acddbc7a51c9a01a15c0733a7ab", "group": "krb5"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libkrb5support-108576e7.so.0.1", "sha256": "c67847ba03abe1e212863e916967a359318081c801772f6f0b7b2f7d0f6d5236", "group": "krb5"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/liblber-3da4cb0c.so.2.0.200", "sha256": "2576e5ba92ce94b7547a7c2a1c131c9f874c3294f6cba158880c1b851c8e9c61", "group": "openldap"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libldap-a6923df4.so.2.0.200", "sha256": "6a498cf37968812c0111eef94603c34d51db4aaa7043c9a38c45ad0c252169a0", "group": "openldap"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libpq-f8ff58a6.so.5.18", "sha256": "b209afc2a5fab191729a3d1dcb0c19aa4c3c624e9ad59edb1ab116f1920d09c5", "group": "postgres"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libsasl2-b0635103.so.3.0.0", "sha256": "917cea344ae2649c630781faa30fa8cb965ac7c8891011d4d0cdfdcc18a96be5", "group": "cyrus-sasl"},
+    {"package": "psycopg-binary", "path": "psycopg_binary.libs/libssl-6228e41f.so.3", "sha256": "dfa7998381a5a0a29e4f35e5c485f50225cea04d53ec519126a0494f28ff5d10", "group": "openssl"},
+    {"package": "pydantic-core", "path": "pydantic_core.libs/libgcc_s-0bf60adc.so.1", "sha256": "f5f857e58a62c2d1ddb222cc2f3efb3f0f638c8106ae2b5e57b50e52baf0be99", "group": "gcc-cross"},
+    {"package": "watchfiles", "path": "watchfiles.libs/libgcc_s-0bf60adc.so.1", "sha256": "f5f857e58a62c2d1ddb222cc2f3efb3f0f638c8106ae2b5e57b50e52baf0be99", "group": "gcc-cross"}
+  ]
+}

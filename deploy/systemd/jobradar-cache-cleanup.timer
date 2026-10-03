@@ -1,0 +1,11 @@
+[Unit]
+Description=Check JobRadar build-cache headroom daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=jobradar-cache-cleanup.service
+
+[Install]
+WantedBy=timers.target

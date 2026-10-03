@@ -8,10 +8,13 @@ separate decisions.
 ## Publish a candidate
 
 1. Confirm the backend release commit is on `main`, CI passed for that commit,
-   and an existing `vX.Y.Z` tag matches `pyproject.toml`.
+   and an existing `vX.Y.Z` tag matches `pyproject.toml`. The release must already be
+   published (not a draft) in the public repository and contain the source-verification package.
 2. Manually start the `Publish verified runtime image` GitHub Actions workflow
-   with that tag. It builds only the Linux ARM64 runtime image, publishes it to
-   `ghcr.io/bigda7/jobradar`, and checks the registry copy for an attached SLSA
+   with that tag. It builds the Linux ARM64 runtime candidate locally on the runner,
+   verifies its attestations and reviewed corresponding-source coverage, and uploads a
+   source ZIP and SHA256 file to that release. Anonymous source access is checked before
+   publishing the same candidate to `ghcr.io/bigda7/jobradar`. It checks the registry copy for an attached SLSA
    provenance document and SPDX SBOM. It writes an `@sha256:...` reference to
    the workflow summary. Do not use the mutable `vX.Y.Z` tag for deployment.
 3. Confirm the GHCR package visibility and access permissions before any server
@@ -22,7 +25,11 @@ separate decisions.
    checks do not resolve the existing copyleft-license policy finding and do not
    imply that every dependency is safe.
 
-The workflow requires `packages: write` for its GitHub token. It does not
+The workflow requires `packages: write` and `contents: write` for its GitHub token.
+Source assets must remain available for their distributed image; do not delete them during
+routine cleanup. An existing asset is not overwritten on a retry. Source/notice obligations
+and evidence limits are documented in [runtime-source-bundle.md](runtime-source-bundle.md).
+The local workflow changes still require a separately approved first publication. It does not
 deploy, run migrations, send notifications, or change package visibility. A
 failed post-publication verification can leave a published tag in GHCR; it must
 not be deployed without a successful verification and explicit approval.

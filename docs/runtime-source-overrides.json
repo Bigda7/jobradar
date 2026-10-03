@@ -1,0 +1,9 @@
+{
+  "psycopg-binary@3.3.4": {
+    "url": "https://codeload.github.com/psycopg/psycopg/tar.gz/83f110367cdd249cc0a352e2246ecea9e878e5a0",
+    "hash": "sha256:814e5398a6d92bb7dfbae5bed63a5771f40a59c0cf850d9a95e25ca2f82ca010",
+    "revision": "83f110367cdd249cc0a352e2246ecea9e878e5a0",
+    "kind": "upstream-repository",
+    "note": "Exact Psycopg 3.3.4 repository including wheel build scripts. Bundled native-library sources require separate coverage."
+  }
+}

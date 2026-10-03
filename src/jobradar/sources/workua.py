@@ -12,7 +12,7 @@ import structlog
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
-from jobradar.sources.base import BaseSource
+from jobradar.sources.base import BaseSource, CachedListing
 from jobradar.sources.detail_cache import (
     can_reuse_detail,
     discovery_fingerprint,
@@ -61,7 +61,9 @@ logger = structlog.get_logger(__name__)
 
 
 class WorkUaSourceError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +126,7 @@ class WorkUaSource(BaseSource):
                         search_url=page_url,
                         error=str(error),
                     )
+                    self.report_warning(f"Work.ua search page unavailable: {page_url}.")
                     break
                 successful_search_pages += 1
                 self.record_candidates(len(cards))
@@ -157,20 +160,28 @@ class WorkUaSource(BaseSource):
                 discovery_payload = _card_payload(card)
                 fingerprint = discovery_fingerprint(discovery_payload)
                 cached = self.cached_listing(card.external_id)
+                cached_description = _cached_description(cached)
                 now = datetime.now(UTC)
-                if cached is not None and can_reuse_detail(
-                    cached,
-                    fingerprint=fingerprint,
-                    cached_fingerprint=(
-                        discovery_fingerprint(_discovery_payload(cached.payload))
-                        if cached is not None
-                        else None
-                    ),
-                    required_fields=("description",),
-                    ttl_seconds=self._detail_cache_ttl_seconds,
-                    now=now,
+                detail_status = "complete"
+                description: str | None
+                if (
+                    cached is not None
+                    and cached_description is not None
+                    and cached.payload.get("detail_status") not in ("cached", "summary")
+                    and can_reuse_detail(
+                        cached,
+                        fingerprint=fingerprint,
+                        cached_fingerprint=(
+                            discovery_fingerprint(_discovery_payload(cached.payload))
+                            if cached is not None
+                            else None
+                        ),
+                        required_fields=("description",),
+                        ttl_seconds=self._detail_cache_ttl_seconds,
+                        now=now,
+                    )
                 ):
-                    description = _optional_string(cached.payload.get("description"))
+                    description = cached_description
                     detail_fetched_at = cached.detail_fetched_at
                 else:
                     await polite_delay(self._detail_request_delay_seconds)
@@ -182,19 +193,37 @@ class WorkUaSource(BaseSource):
                             "workua_detail_fallback",
                             vacancy_url=card.url,
                             error=str(error),
+                            status_code=error.status_code,
                         )
                         self.record_detail_failure()
-                        description = card.description
+                        description = cached_description or card.description
+                        detail_status = "cached" if cached_description is not None else "summary"
+                        if cached_description is not None and cached is not None:
+                            detail_fetched_at = cached.detail_fetched_at
                     else:
                         if description is None:
+                            logger.warning(
+                                "workua_detail_fallback",
+                                vacancy_url=card.url,
+                                reason="missing_description",
+                            )
                             self.record_detail_failure()
-                            description = card.description
+                            description = cached_description or card.description
+                            detail_status = (
+                                "cached" if cached_description is not None else "summary"
+                            )
+                            if cached_description is not None and cached is not None:
+                                detail_fetched_at = cached.detail_fetched_at
                         else:
                             detail_fetched_at = datetime.now(UTC)
                 yield RawListing(
                     external_id=card.external_id,
                     source_url=card.url,
-                    payload={**discovery_payload, "description": description},
+                    payload={
+                        **discovery_payload,
+                        "description": description,
+                        "detail_status": detail_status,
+                    },
                     detail_fetched_at=detail_fetched_at,
                 )
                 yielded += 1
@@ -222,12 +251,7 @@ class WorkUaSource(BaseSource):
         return parse_workua_markdown_cards(markdown)
 
     async def _fetch_description(self, vacancy_url: str) -> str | None:
-        try:
-            html = await self._fetch_page(vacancy_url, response_format="html")
-        except WorkUaSourceError as error:
-            if "404" in str(error) or "410" in str(error):
-                return None
-            raise
+        html = await self._fetch_page(vacancy_url, response_format="html")
         if not is_workua_challenge(html):
             description = parse_workua_description(html)
             if description is not None:
@@ -310,8 +334,26 @@ class WorkUaSource(BaseSource):
             )
             response.raise_for_status()
         except httpx.HTTPError as error:
-            raise WorkUaSourceError(f"Work.ua reader request failed: {error}") from error
+            status_code = (
+                error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+            )
+            raise WorkUaSourceError(
+                f"Work.ua reader request failed: {error}", status_code=status_code
+            ) from error
         return response.text
+
+
+def _cached_description(cached: CachedListing | None) -> str | None:
+    if cached is None or cached.detail_fetched_at is None:
+        return None
+    description = _optional_string(cached.payload.get("description"))
+    status = cached.payload.get("detail_status")
+    if status == "summary":
+        return None
+    if status is None and description == _optional_string(cached.payload.get("summary")):
+        # Older fallback rows retained a successful timestamp after losing their full text.
+        return None
+    return description
 
 
 def _card_payload(card: WorkUaCard) -> dict[str, Any]:

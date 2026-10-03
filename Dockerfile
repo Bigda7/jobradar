@@ -8,7 +8,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 COPY --from=uv /uv /usr/local/bin/uv
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 
 RUN uv sync --frozen --no-dev --no-editable
@@ -27,6 +27,12 @@ RUN apk add --no-cache openssl=3.5.9-r0 sqlite-libs=3.53.4-r0 \
     && adduser -S -D -H -G jobradar jobradar
 
 COPY --from=builder --chown=jobradar:jobradar /app/.venv /app/.venv
+COPY --chown=jobradar:jobradar LICENSE /usr/local/share/licenses/jobradar/LICENSE
+COPY scripts/verify_runtime_license.py /usr/local/libexec/jobradar/verify_runtime_license.py
+RUN python /usr/local/libexec/jobradar/verify_runtime_license.py
+COPY scripts/collect_runtime_licenses.py /usr/local/libexec/jobradar/collect_runtime_licenses.py
+RUN python /usr/local/libexec/jobradar/collect_runtime_licenses.py \
+    --output /usr/local/share/licenses/jobradar/third-party
 COPY --chown=jobradar:jobradar alembic.ini ./
 COPY --chown=jobradar:jobradar alembic ./alembic
 
@@ -42,5 +48,9 @@ FROM runtime AS test
 
 COPY --from=test-builder --chown=jobradar:jobradar /app/.venv /app/.venv
 COPY --chown=jobradar:jobradar pyproject.toml ./
-COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py ./scripts/
+COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py scripts/verify_runtime_license.py scripts/collect_runtime_licenses.py scripts/prepare_runtime_sources.py ./scripts/
+COPY --chown=jobradar:jobradar scripts/verify_postgres_backup.sh scripts/cleanup_build_cache.sh ./scripts/
+COPY --chown=jobradar:jobradar Dockerfile ./
+COPY --chown=jobradar:jobradar docs/runtime-native-sources.json ./docs/runtime-native-sources.json
+COPY --chown=jobradar:jobradar .github/workflows/publish-image.yml .github/workflows/ci.yml ./.github/workflows/
 COPY --chown=jobradar:jobradar tests ./tests
