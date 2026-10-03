@@ -19,7 +19,8 @@ export POSTGRES_PASSWORD
 POSTGRES_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d '[:space:]')"
 
 cleanup() {
-  docker rm --force "${container_name}" >/dev/null 2>&1 || true
+  # Remove only this isolated container and its anonymous restore volume.
+  docker rm --force --volumes "${container_name}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

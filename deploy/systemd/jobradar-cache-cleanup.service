@@ -1,0 +1,16 @@
+[Unit]
+Description=Bound JobRadar's unused Docker build cache
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/jobradar/scripts/cleanup_build_cache.sh
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+SupplementaryGroups=docker
+WorkingDirectory=/opt/jobradar
+ExecStart=/usr/bin/bash /opt/jobradar/scripts/cleanup_build_cache.sh --apply
+UMask=0077
+Nice=10
+TimeoutStartSec=15min

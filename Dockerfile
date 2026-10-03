@@ -49,7 +49,8 @@ FROM runtime AS test
 COPY --from=test-builder --chown=jobradar:jobradar /app/.venv /app/.venv
 COPY --chown=jobradar:jobradar pyproject.toml ./
 COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py scripts/verify_runtime_license.py scripts/collect_runtime_licenses.py scripts/prepare_runtime_sources.py ./scripts/
+COPY --chown=jobradar:jobradar scripts/verify_postgres_backup.sh scripts/cleanup_build_cache.sh ./scripts/
 COPY --chown=jobradar:jobradar Dockerfile ./
 COPY --chown=jobradar:jobradar docs/runtime-native-sources.json ./docs/runtime-native-sources.json
-COPY --chown=jobradar:jobradar .github/workflows/publish-image.yml ./.github/workflows/publish-image.yml
+COPY --chown=jobradar:jobradar .github/workflows/publish-image.yml .github/workflows/ci.yml ./.github/workflows/
 COPY --chown=jobradar:jobradar tests ./tests

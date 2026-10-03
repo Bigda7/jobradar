@@ -59,6 +59,7 @@ jobs:
           uv run ruff check .
           uv run mypy src/jobradar
           uv run bandit -q -r src/jobradar
+          bash -n scripts/backup_postgres.sh scripts/verify_postgres_backup.sh scripts/cleanup_build_cache.sh
 
       - name: Audit Python dependencies
         run: |
@@ -70,6 +71,7 @@ jobs:
 
       - name: Verify PostgreSQL backup restoration
         run: |
+          initial_volumes="$(docker volume ls --quiet | sort)"
           backup_file="$(mktemp --suffix=.dump)"
           trap 'rm -f "$backup_file"' EXIT
           docker run --rm --network host --env PGPASSWORD=ci_only_password \
@@ -87,9 +89,17 @@ jobs:
           grep -Fxq 'sources=1' <<<"$restore_output"
           grep -Fxq 'opportunities=1' <<<"$restore_output"
           grep -Fxq 'listings=1' <<<"$restore_output"
+          if [[ "$(docker volume ls --quiet | sort)" != "$initial_volumes" ]]; then
+            printf 'Successful restore check left an unexpected Docker volume.\n' >&2
+            exit 1
+          fi
           printf 'not a PostgreSQL archive' >"$backup_file"
           if bash scripts/verify_postgres_backup.sh "$backup_file"; then
             printf 'Corrupt backup was accepted.\n' >&2
+            exit 1
+          fi
+          if [[ "$(docker volume ls --quiet | sort)" != "$initial_volumes" ]]; then
+            printf 'Failed restore check left an unexpected Docker volume.\n' >&2
             exit 1
           fi
 
