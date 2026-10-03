@@ -1,8 +1,10 @@
 """Regression tests for native source coverage and pre-publication gating."""
 
 import hashlib
+import io
 import json
 import struct
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,21 @@ import pytest
 import yaml
 from scripts import collect_runtime_licenses as collector
 from scripts import prepare_runtime_sources as sources
+
+
+def test_native_gpl_exception_and_postgres_copyright_are_preserved() -> None:
+    buffer = io.BytesIO()
+    notices = {
+        "gcc/COPYING3": b"GNU General Public License version 3",
+        "gcc/COPYING.RUNTIME": b"GCC Runtime Library Exception",
+        "postgres/COPYRIGHT": b"PostgreSQL License",
+    }
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, content in notices.items():
+            entry = tarfile.TarInfo(name)
+            entry.size = len(content)
+            archive.addfile(entry, io.BytesIO(content))
+    assert sources.archive_notices(buffer.getvalue()) == notices
 
 
 def _elf() -> bytes:

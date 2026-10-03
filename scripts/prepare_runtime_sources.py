@@ -119,7 +119,7 @@ def archive_notices(content: bytes) -> dict[str, bytes]:
         for member in archive:
             name = PurePosixPath(member.name).name
             if not member.isfile() or not re.match(
-                r"^(LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT)([._-]|$)", name, re.I
+                r"^(LICENSE|LICENCE|COPYING\d*|NOTICE|COPYRIGHT)([._-]|$)", name, re.I
             ):
                 continue
             if member.size > 2 * 1024 * 1024 or total + member.size > 20 * 1024 * 1024:
