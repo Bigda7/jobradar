@@ -1,9 +1,47 @@
 # Server Disk Maintenance Plan
 
-Reviewed on 2026-10-03. This plan and fixes are local; production deletion, script replacement,
-timer installation, image publication, and disk expansion have not been authorized or performed.
+Reviewed and executed on 2026-10-03 after the user explicitly approved the bounded server
+maintenance package. Application publication/deployment and paid disk expansion remain outside
+this approval. The sections below preserve the initial review and exact cleanup targets.
 
-## Read-Only Server Snapshot
+## Verified Execution
+
+- Installed the corrected backup verifier, the reviewed cache cleanup script, and its systemd
+  service/timer. The original verifier and before/after inventories are retained under
+  `/opt/jobradar/.deploy/disk-maintenance-20261003`; no secret configuration was copied.
+- Revalidated all seven exact volume IDs below: zero Docker/container references, anonymous
+  local volumes, PostgreSQL 17 layout, independent cluster identifiers different from the live
+  database, and creation/checkpoint dates matching the prior backup restore checks. Stale
+  `postmaster.pid` files and `in production` control state remained from forced test-container
+  removal; they did not represent running/referenced databases. Control metadata was read with
+  read-only mounts without starting those clusters or exposing application records.
+- Removed only those seven volumes with non-forced `docker volume rm`. Their exact data volumes
+  cannot be recovered after deletion; retained verified dump files remain the recovery source.
+  No broad volume/image/system pruning or manual containerd deletion was used.
+- One real service run pruned only old unused build cache and reported 1.973 GB reclaimed.
+  The combined measured filesystem improvement was 3,706,077,184 bytes (about 3.45 GiB).
+  Root usage fell from 79% to 64%; free capacity reached 9,035,988,992 bytes (about 8.42 GiB).
+  The prior 3.7-GiB cache candidate estimate was not guaranteed savings: the retention target
+  intentionally kept cache. A second service run skipped deletion with sufficient headroom.
+- The daily timer is enabled/active, next scheduled for 2026-10-04 04:00 UTC. Installed units
+  passed `systemd-analyze verify`; real service execution returned success/status 0. The first
+  calendar-triggered run has not occurred yet. The 03:15 UTC backup timer remains active.
+- The installed verifier restored the retained `jobradar-20261003T121005Z.dump` into an isolated
+  PostgreSQL container: migration `20260928_0019`, four sources, 8,010 opportunities, 8,827
+  listings, 136 notification deliveries. A generated corrupt archive was rejected as expected.
+  Docker volume inventories were unchanged after each test; the temporary corrupt fixture was
+  removed. The live production database was not restored or otherwise mutated by maintenance.
+- The four original application/database container IDs, start times, image IDs, and restart
+  counts remained unchanged. All 73 image IDs and 22 dump names/sizes/mtimes matched the baseline.
+  Only the live `jobradar_postgres_data` volume remains. API/database health stayed healthy;
+  normal-TLS origin and frontend-proxy health/readiness checks all returned HTTP 200.
+- No application rollout, source-policy change, notification send, GitHub push/release, S3/IAM
+  change, or disk expansion occurred. CI workflow changes remain local and remotely untested.
+
+Automatic cleanup targets cache only. Future database/backup/image growth can still require a
+separate capacity decision; this package does not promise unlimited disk headroom.
+
+## Initial Read-Only Server Snapshot
 
 - Root EBS device: 25 GiB, ext4 root partition about 24 GiB; no significant unused partition
   headroom was identified. Filesystem: 24,883,167,232 bytes total, 19,536,232,448 used,
@@ -32,34 +70,35 @@ The running server's backup verifier matches the reviewed repository script. It 
 isolated PostgreSQL container with `--rm`, then explicitly executes `docker rm --force`
 without `--volumes`. A local Docker experiment reproduced a surviving anonymous volume after
 that exact forced removal; repeating with `--volumes` removed the isolated test volume.
-Both empty local test containers/volumes were cleaned up; no production object was deleted.
+Both empty local test containers/volumes were cleaned up during the initial review; production
+deletion occurred only in the later approved execution recorded above.
 The local CI workflow now checks shell syntax and compares Docker volume inventory before
 and after both successful and rejected corrupt-backup restore checks. A leak fails CI.
 This remote CI change has not run yet; publication is still pending approval.
 
-The local fix adds `--volumes` only to removal of the uniquely named
+The installed fix adds `--volumes` only to removal of the uniquely named
 `jobradar-restore-check-*` temporary container. It does not enumerate or remove unrelated
 volumes, and the production database/container name is not passed to this cleanup.
-Deploying the fixed script should prevent this restore-check leak; it does not remove the
-seven old volumes already left on the server. No fresh production restore was forced here.
+The script prevents new restore-check leaks; historical volumes needed the separate approved
+exact-ID removal. Verification used an isolated restore, never restoration over the live database.
 
-## Prepared Automatic Cache Maintenance
+## Automatic Cache Maintenance
 
 `scripts/cleanup_build_cache.sh` defaults to a read-only dry run. The dry run and Bash syntax
-were checked against the real server without storing or installing the script there.
+were first checked against the real server without installation, before the approved execution.
 `--apply` explicitly opts into cleanup of unused build cache older than 168 hours, retaining
 2 GB of cache. The command fixes the local Unix Docker endpoint, skips while a backup is
 running, and does nothing when usage is below 75% and at least 6 GiB is free. Referenced layers
 remain protected by Docker. Recently used/in-use cache can exceed the retention target.
 
-The prepared systemd service/timer proposes a daily capacity check at 04:00 UTC, after the
-existing 03:15 backup schedule. The units are not installed or enabled, and their scheduled
-execution has not been verified. Images, containers, volumes, backups, secret configuration,
+The installed systemd service/timer runs a daily capacity check at 04:00 UTC, after the
+existing 03:15 backup schedule. The units are enabled; a real service run passed, but the first
+calendar-triggered execution has not occurred yet. Images, containers, volumes, backups, secret configuration,
 deployment archives, and the current/rollback releases are not automatic deletion targets.
 
-## Proposed Approval Package
+## Approved Package and Historical Targets
 
-Recommend safe retention before paid disk expansion:
+The user approved safe retention without paid disk expansion; all four steps were executed:
 
 1. Replace only `/opt/jobradar/scripts/verify_postgres_backup.sh` with the reviewed volume-cleanup
    fix, preserving ownership/mode and a rollback copy. No application restart or DB migration.
