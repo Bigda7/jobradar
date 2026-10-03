@@ -66,6 +66,11 @@ jobs:
           uv export --frozen --no-dev --no-emit-project --output-file requirements-audit.txt
           uv run pip-audit --strict --requirement requirements-audit.txt
 
+      - name: Audit development dependencies
+        run: |
+          uv export --frozen --extra dev --no-emit-project --output-file requirements-audit-dev.txt
+          uv run pip-audit --strict --requirement requirements-audit-dev.txt
+
       - name: Verify migrations
         run: uv run alembic upgrade head
 
