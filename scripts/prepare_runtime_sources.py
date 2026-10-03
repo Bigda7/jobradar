@@ -168,9 +168,16 @@ def collect_apk(
         checksums = apk_checksums(text)
     if cached_records:
         for name, expected in checksums.items():
-            with (root / prefix / name).open("rb") as stream:
-                if hashlib.file_digest(stream, "sha512").hexdigest() != expected:
-                    raise ValueError(f"Cached APK source checksum mismatch: {name}")
+            content = (root / prefix / name).read_bytes()
+            if hashlib.sha512(content).hexdigest() != expected:
+                raise ValueError(f"Cached APK source checksum mismatch: {name}")
+            source_url = next(
+                record["url"] for record in cached_records if record["path"] == f"{prefix}/{name}"
+            )
+            for index, (member, notice) in enumerate(sorted(archive_notices(content).items())):
+                record = preserve(root, f"{prefix}/notices/{name}-{index}.txt", notice, source_url)
+                record["archive_member"] = member
+                cached_records.append(record)
         return cached_records
     records = [preserve(root, f"{prefix}/APKBUILD", recipe, f"{base}/APKBUILD")]
     # Preserve installation helpers and other recipe-directory files as well as listed sources.
@@ -472,9 +479,8 @@ def seed_sources(seed: Path, root: Path, inventory: dict[str, Any]) -> list[dict
     records = []
     for artifact in manifest["artifacts"]:
         if artifact["path"].startswith(("alpine/", "python/", "cpython/")):
-            if artifact["path"].startswith("cpython/") and (
-                "/notices/" in artifact["path"]
-                or artifact["path"].endswith("image-build-history.json")
+            if "/notices/" in artifact["path"] or artifact["path"].endswith(
+                "image-build-history.json"
             ):
                 continue
             if artifact.get("collection_status"):

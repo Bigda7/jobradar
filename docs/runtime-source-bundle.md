@@ -74,8 +74,9 @@ The local `publish-image.yml` now builds an attested ARM64 OCI archive without p
 verifies attestations, and imports that exact image into containerd-backed Docker storage.
 It prepares sources for the immutable local image ID and binds the manifest to the intended
 public registry digest. Both checks must pass before any release asset or image is uploaded.
-The existing GitHub release receives a source ZIP and SHA256 file without overwriting assets;
-only then is the same verified image pushed without rebuilding. The image has an
+The existing, public, non-draft GitHub release receives a source ZIP and SHA256 file without
+overwriting assets. Their anonymous HTTPS availability is checked; only then is the same
+verified image pushed without rebuilding. The image has an
 `io.jobradar.corresponding-source` label pointing to its release asset. Old release commits
 without these scripts/mappings cannot pass the workflow's initial check.
 
@@ -106,3 +107,22 @@ can pass the readiness check. Publication of sources for the old digest still ne
 approval and an explicit historical-notice remedy; a new image does not alter old bytes.
 
 No source draft, notice image, release, or code changes were published or deployed in this work.
+
+## Verified Local Candidate
+
+The `.deploy/runtime-source-candidate-reviewed-20261003` directory and ZIP passed the complete
+gate with 535 checksummed artifacts, 78 third-party component coverage records, and all 16
+native file mappings. There were no collection issues. This candidate's actual source revision
+is `8368090d2e7074569b7662c440917ac01121b690`; later collector/workflow-only corrections do not
+change its application or runtime build inputs. The ARM64 OCI archive's SBOM/provenance were
+verified and its index digest survived Docker import unchanged:
+
+```text
+sha256:9162a58074fe862edbac3245d5db4fc3b0350448d65fbcedd7ad2eb5c784f24d
+```
+
+The ZIP is 440,505,541 bytes with SHA256
+`ede11aac10dd7848abf3e2a68b4af766bd10c218033da4be81d1adb38393ed90`.
+It is local audit evidence, not an uploaded release asset. The candidate's source URL label
+uses a non-published local-validation placeholder and must not be used for deployment.
+The release workflow generates the real URL for an approved tag and verifies access there.

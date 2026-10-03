@@ -165,12 +165,17 @@ def test_publication_cannot_precede_source_verification_and_delivery() -> None:
     build = names.index("Build and verify ARM64 OCI candidate before publication")
     verify = names.index("Prepare and verify corresponding sources before publication")
     sources_upload = names.index("Publish verified sources on the existing release")
+    delivery_check = names.index("Verify anonymous source availability before image publication")
     image_upload = names.index("Publish the already verified image without rebuilding")
-    assert build < verify < sources_upload < image_upload
+    assert names.index("Require a public published source release") < build
+    assert build < verify < sources_upload < delivery_check < image_upload
     assert "--push" not in steps[build]["run"]
+    assert "metadata['containerimage.digest'] != sys.argv[2]" in steps[build]["run"]
     assert "--verify --image" in steps[verify]["run"]
     assert "--registry-reference" in steps[verify]["run"]
     assert "gh release upload" in steps[sources_upload]["run"]
     assert "--clobber" not in steps[sources_upload]["run"]
+    assert "curl --fail" in steps[delivery_check]["run"]
+    assert "GH_TOKEN" not in steps[delivery_check].get("env", {})
     assert "buildx build" not in steps[image_upload]["run"]
     assert "docker image push" in steps[image_upload]["run"]

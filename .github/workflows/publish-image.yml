@@ -53,6 +53,19 @@ jobs:
           echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
 
+      - name: Require a public published source release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.visibility')"
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+          if [[ "$visibility" != public || "$is_draft" != false ]]; then
+            echo 'Corresponding sources require an existing public, non-draft release.' >&2
+            exit 1
+          fi
+
       - name: Enable containerd image storage for attested OCI import
         run: |
           set -euo pipefail
@@ -93,7 +106,7 @@ jobs:
           python - "$RUNNER_TEMP/image-metadata.json" "$image_id" <<'PY'
           import json, sys
           metadata = json.load(open(sys.argv[1], encoding='utf-8'))
-          if metadata['containerimage.config.digest'] != sys.argv[2]:
+          if metadata['containerimage.digest'] != sys.argv[2]:
               raise SystemExit('Imported image differs from the verified build.')
           PY
           image_digest="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$RUNNER_TEMP/image-metadata.json")"
@@ -127,6 +140,16 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             "${RUNNER_TEMP}/${SOURCE_ASSET}" "${RUNNER_TEMP}/${SOURCE_ASSET}.sha256" \
             --repo "$GITHUB_REPOSITORY"
+
+      - name: Verify anonymous source availability before image publication
+        env:
+          SOURCE_URL: ${{ steps.candidate.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --head \
+            --proto '=https' --proto-redir '=https' --max-time 120 "$SOURCE_URL" >/dev/null
+          curl --fail --silent --show-error --location --head \
+            --proto '=https' --proto-redir '=https' --max-time 120 "${SOURCE_URL}.sha256" >/dev/null
 
       - name: Log in to GitHub Container Registry
         env:
