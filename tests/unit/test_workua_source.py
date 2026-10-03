@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -354,7 +355,132 @@ async def test_workua_source_keeps_card_when_detail_is_blocked() -> None:
         "Full-time. We are also ready to hire a student. Build Django APIs."
     )
     assert listings[0].detail_fetched_at is None
+    assert listings[0].payload["detail_status"] == "summary"
     assert source.consume_run_metrics().detail_failure_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["challenge", "missing", "404", "410", "503", "timeout"])
+async def test_failed_refresh_preserves_full_text_and_retries_next_cycle(failure: str) -> None:
+    detail_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal detail_requests
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        detail_requests += 1
+        if failure == "timeout":
+            raise httpx.ReadTimeout("Timed out", request=request)
+        if failure.isdigit():
+            return httpx.Response(int(failure))
+        return httpx.Response(200, text=CHALLENGE_PAGE if failure == "challenge" else "No details")
+
+    fetched_at = datetime.now(UTC) - timedelta(days=2)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        source.prime_listing_cache(
+            {
+                "8441545": CachedListing(
+                    payload={"description": "Previously saved full description"},
+                    detail_fetched_at=fetched_at,
+                )
+            }
+        )
+        first = [listing async for listing in source.fetch()]
+        assert first[0].payload["description"] == "Previously saved full description"
+        assert first[0].payload["detail_status"] == "cached"
+        assert first[0].detail_fetched_at == fetched_at
+        source.prime_listing_cache(
+            {
+                "8441545": CachedListing(
+                    payload=first[0].payload, detail_fetched_at=datetime.now(UTC)
+                )
+            }
+        )
+        previous_requests = detail_requests
+        second = [listing async for listing in source.fetch()]
+        assert detail_requests > previous_requests
+        assert second[0].payload["description"] == first[0].payload["description"]
+        assert source.consume_run_metrics().detail_failure_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [None, "summary", "cached"])
+async def test_summary_with_old_success_timestamp_is_not_reused_as_full_detail(
+    status: str | None,
+) -> None:
+    detail_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal detail_requests
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        detail_requests += 1
+        return httpx.Response(200, text=DETAIL_PAGE)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        first = [listing async for listing in source.fetch()]
+        payload = {**first[0].payload, "description": first[0].payload["summary"]}
+        if status is None:
+            payload.pop("detail_status")
+        else:
+            payload["detail_status"] = status
+        source.prime_listing_cache(
+            {"8441545": CachedListing(payload=payload, detail_fetched_at=datetime.now(UTC))}
+        )
+        second = [listing async for listing in source.fetch()]
+
+    assert detail_requests == 2
+    assert second[0].payload["detail_status"] == "complete"
+    assert "Write tests" in second[0].payload["description"]
+
+
+@pytest.mark.asyncio
+async def test_http_status_is_not_inferred_from_vacancy_id() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(503))
+    ) as client:
+        source = WorkUaSource(reader_base_url="https://reader.test", client=client)
+        with pytest.raises(WorkUaSourceError) as failure:
+            await source._fetch_description("https://www.work.ua/en/jobs/404001/")
+    assert failure.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_unavailable_search_is_reported_without_discarding_other_results() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/en/jobs-remote-blocked/":
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        return httpx.Response(200, text=DETAIL_PAGE)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=(
+                "https://www.work.ua/en/jobs-remote-blocked/",
+                "https://www.work.ua/en/jobs-remote-python/",
+            ),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+    assert len(listings) == 1
+    assert source.consume_warnings() == (
+        "Work.ua search page unavailable: https://www.work.ua/en/jobs-remote-blocked/.",
+    )
 
 
 @pytest.mark.asyncio

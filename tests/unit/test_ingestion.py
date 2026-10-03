@@ -21,6 +21,65 @@ from jobradar.ingestion.service import IngestionService, jittered_poll_interval_
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
 from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
+from jobradar.sources.workua import WorkUaCard, WorkUaSource, WorkUaSourceError
+
+
+@pytest.mark.asyncio
+async def test_workua_failed_detail_refresh_preserves_stored_text_and_recovers(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class DetailRefreshSource(WorkUaSource):
+        failed = False
+        detail_requests = 0
+
+        async def _fetch_search_cards(self, search_url: str) -> list[WorkUaCard]:
+            return [
+                WorkUaCard(
+                    "123",
+                    "https://www.work.ua/en/jobs/123/",
+                    "Python Developer",
+                    "Example",
+                    "Short search summary",
+                    None,
+                    "Remote",
+                    None,
+                )
+            ]
+
+        async def _fetch_description(self, vacancy_url: str) -> str | None:
+            self.detail_requests += 1
+            if self.failed:
+                raise WorkUaSourceError("Simulated upstream challenge")
+            return "Full description with requirements and responsibilities"
+
+    source = DetailRefreshSource(
+        search_urls=("https://www.work.ua/en/jobs-remote-python/",), max_pages_per_search=1
+    )
+    service = IngestionService(sqlite_session_factory)
+    await service.run_source(source)
+    async with sqlite_session_factory() as session, session.begin():
+        listing = await session.scalar(select(Listing))
+        assert listing is not None
+        listing.detail_fetched_at = datetime.now(UTC) - timedelta(days=2)
+    source.failed = True
+    result = await service.run_source(source)
+    assert result.detail_failures == 1
+    async with sqlite_session_factory() as session, session.begin():
+        listing = await session.scalar(select(Listing))
+        opportunity = await session.scalar(select(Opportunity))
+        assert listing is not None and opportunity is not None
+        assert listing.raw_data["description"] == opportunity.description
+        assert "Full description" in opportunity.description
+        assert listing.raw_data["detail_status"] == "cached"
+        listing.detail_fetched_at = datetime.now(UTC)
+    source.failed = False
+    result = await service.run_source(source)
+    assert result.detail_failures == 0
+    assert source.detail_requests == 3
+    async with sqlite_session_factory() as session:
+        listing = await session.scalar(select(Listing))
+        assert listing is not None
+        assert listing.raw_data["detail_status"] == "complete"
 
 
 class AlternateMockSource(MockSource):
