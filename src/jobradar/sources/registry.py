@@ -13,6 +13,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
         sources.append(
             DjinniSource(
                 jobs_url=settings.djinni_jobs_url,
+                additional_feed_urls=settings.djinni_additional_urls,
                 remote_only=settings.djinni_remote_only,
                 request_timeout_seconds=settings.djinni_request_timeout_seconds,
                 max_items=settings.djinni_max_items,
@@ -20,6 +21,10 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 max_feed_requests=settings.djinni_max_feed_requests,
                 request_delay_seconds=settings.djinni_request_delay_seconds,
                 run_timeout_seconds=settings.djinni_run_timeout_seconds,
+                metadata_enabled=settings.djinni_metadata_enabled,
+                max_metadata_requests=settings.djinni_max_metadata_requests,
+                metadata_request_delay_seconds=settings.djinni_metadata_request_delay_seconds,
+                metadata_cache_seconds=settings.djinni_metadata_cache_seconds,
             )
         )
     if settings.workua_source_enabled:

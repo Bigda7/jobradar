@@ -26,7 +26,7 @@ def listing_quality_score(normalized: NormalizedOpportunity) -> int:
         normalized.contract_type,
         normalized.salary_currency,
         normalized.salary_period,
-        normalized.published_at,
+        normalized.published_at or normalized.source_updated_at,
     ):
         if value is not None:
             metadata_score += 100
@@ -89,3 +89,4 @@ def apply_normalized_opportunity(
     opportunity.salary_currency = normalized.salary_currency
     opportunity.salary_period = normalized.salary_period
     opportunity.published_at = normalized.published_at
+    opportunity.source_updated_at = normalized.source_updated_at

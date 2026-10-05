@@ -65,13 +65,13 @@ The production registry intentionally enables only four sources used in the curr
 
 | Source | Transport | Data type |
 | --- | --- | --- |
-| Djinni | official filtered RSS | employment |
+| Djinni | official filtered RSS with bounded public-page metadata enrichment | employment |
 | Work.ua | public pages through a read-only text reader | employment |
 | Robota.ua | public pages through a read-only text reader | employment |
 | DOU Jobs | RSS | employment |
 
 The source registry contains only these adapters.
-Djinni uses the provider-recommended RSS without HTML/JSON-LD fallback. The legacy
+Djinni uses the provider-recommended RSS for discovery, never HTML as an RSS failure fallback. The legacy
 `DJINNI_JOBS_URL` name remains compatible with the previous default search URL; it is converted
 to RSS with the same supported query filters and enforced remote filtering when enabled.
 `DJINNI_MAX_PAGES` is retained for configuration compatibility but no longer controls requests.
@@ -80,7 +80,26 @@ provider's category catalog, then experience and English filters as needed, with
 configured filters. Defaults are 10000 unique items, 512 requests, a 600-second traversal budget,
 and 0.8 seconds between requests. Unresolved saturation, failed partitions or safety-budget stops
 remain observable rather than being reported as complete coverage. Missing RSS metadata is
-preserved only for already-known listings, with its origin recorded; it may be stale.
+supplemented from the matching public JobPosting page under the provider's project-specific reply.
+Enrichment defaults to at most 100 pages per run, at least 2 seconds between page requests,
+and a 24-hour refresh eligibility threshold. These are local safety choices, not a provider HTML
+allowance. New records and bumped records precede routine refreshes; unsuccessful attempts do not
+starve other pending records. A large backlog can delay refresh beyond 24 hours. Network stages
+share the 600-second and 100-MB run ceilings; each HTML response is limited to 1 MB. Metadata errors
+retain RSS records and cached facts, remain visible, and never trigger a redirect/access bypass.
+RSS `pubDate` is `source_updated_at`, not first publication. Djinni `published_at` stays unknown;
+the frontend distinguishes updated, published, and first-seen dates. Migration `20261005_0020`
+repairs existing Djinni date snapshots without changing IDs, sent deliveries, or other-source dates.
+The owner confirmed residence in Prague, Czechia. Matching accepts remote employment from any
+employer country when explicit candidate-residence requirements include Czechia or Europe;
+known incompatible country restrictions reject the vacancy. Onsite/hybrid employment requires
+positive Prague workplace evidence, not merely a Czech country filter or employer headquarters.
+Missing, unrecognized, pending or bump-stale metadata is reported as uncertain, not verified
+eligibility. This does not establish citizenship, work authorization or contract compatibility.
+`DJINNI_ADDITIONAL_JOBS_URLS` adds the Czech-office RSS feed to remote discovery under the same
+whole-run budgets. Other source search filters and all polling intervals remain unchanged.
+The matching rule version is v15; sent-delivery protection and guaranteed queued retries are
+unchanged. Existing queued messages retain their original accepted snapshot across rule changes.
 See [`docs/djinni-rss-review.md`](docs/djinni-rss-review.md) for verification and limitations.
 Work.ua is currently implemented and enabled, but its third-party reader and public display of
 vacancy descriptions have not been cleared with Work.ua. The current engineering decision and

@@ -32,6 +32,7 @@ class JobResponse(BaseModel):
     salary_currency: str | None
     salary_period: str | None
     published_at: datetime | None
+    source_updated_at: datetime | None = None
     first_seen_at: datetime
     last_seen_at: datetime
     source_url: HttpUrl
@@ -40,6 +41,7 @@ class JobResponse(BaseModel):
 
     _normalize_datetimes = field_validator(
         "published_at",
+        "source_updated_at",
         "first_seen_at",
         "last_seen_at",
         mode="before",

@@ -250,12 +250,235 @@ def test_matching_profile_does_not_treat_plain_words_as_negative_technologies() 
     assert not any("технологии вне профиля" in concern for concern in result.concerns)
 
 
-def test_matching_profile_rejects_non_remote_role() -> None:
+def test_matching_profile_rejects_office_without_confirmed_prague_location() -> None:
     result = score_candidate(_candidate(work_mode=WorkMode.ONSITE), BOHDAN_PROFILE)
 
     assert result.score == 0
     assert result.reasons == ()
-    assert "не обозначена как удалённая" in result.concerns[0]
+    assert "confirmed workplace in Prague" in result.concerns[0]
+
+
+@pytest.mark.parametrize("country", ["CZ", "CZE", "Czechia", "Czech Republic"])
+def test_matching_accepts_remote_work_from_czechia(country: str) -> None:
+    result = score_candidate(
+        _candidate(
+            raw_data={"applicantLocationRequirements": {"address": {"addressCountry": country}}}
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score > 0
+
+
+@pytest.mark.parametrize("region", ["Europe", "EU", "EEA", "EMEA", "Worldwide"])
+def test_matching_accepts_remote_work_from_europe(region: str) -> None:
+    result = score_candidate(
+        _candidate(
+            raw_data={"applicantLocationRequirements": {"address": {"addressRegion": region}}}
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score > 0
+
+
+@pytest.mark.parametrize("country", ["UA", "UKR", "Ukraine", "ROU", "DE", "USA"])
+def test_matching_rejects_explicit_foreign_residence_requirements(country: str) -> None:
+    result = score_candidate(
+        _candidate(
+            raw_data={"applicantLocationRequirements": {"address": {"addressCountry": country}}}
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score == 0
+    assert "residence requirements" in result.concerns[0]
+
+
+def test_matching_accepts_country_objects_and_alternative_residence_locations() -> None:
+    result = score_candidate(
+        _candidate(
+            raw_data={
+                "applicantLocationRequirements": [
+                    {"@type": "Country", "name": "Ukraine"},
+                    {"address": {"addressCountry": [{"name": "CZE"}, {"name": "POL"}]}},
+                ]
+            }
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score > 0
+
+
+def test_matching_does_not_claim_unknown_residence_requirements_are_allowed() -> None:
+    result = score_candidate(
+        _candidate(
+            raw_data={
+                "applicantLocationRequirements": [
+                    {"@type": "Country", "name": "Ukraine"},
+                    {"name": "Unspecified region"},
+                ]
+            }
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score > 0
+    assert any("could not be verified" in concern for concern in result.concerns)
+
+
+def test_matching_does_not_treat_employer_country_as_remote_residence_requirement() -> None:
+    result = score_candidate(
+        _candidate(raw_data={"jobLocation": {"address": {"addressCountry": "USA"}}}), BOHDAN_PROFILE
+    )
+    assert result.score > 0
+
+
+@pytest.mark.parametrize("mode", [WorkMode.HYBRID, WorkMode.ONSITE])
+@pytest.mark.parametrize("city", ["Prague", "Praha", "Прага", "Prague 1"])
+def test_matching_accepts_confirmed_prague_office_or_hybrid(mode: WorkMode, city: str) -> None:
+    result = score_candidate(
+        _candidate(
+            work_mode=mode,
+            raw_data={
+                "jobLocation": {"address": {"addressCountry": "CZE", "addressLocality": city}}
+            },
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score > 0
+    assert any("Prague" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("city", ["Brno", "Berlin", "New Prague", ""])
+def test_matching_rejects_office_outside_prague_or_without_city(city: str) -> None:
+    result = score_candidate(
+        _candidate(
+            work_mode=WorkMode.ONSITE,
+            raw_data={
+                "jobLocation": {"address": {"addressCountry": "CZE", "addressLocality": city}}
+            },
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score == 0
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "No office in Prague.",
+        "Office in Prague is not available.",
+        "Our headquarters are in Prague.",
+        "We have an office in Prague and work in Berlin.",
+    ],
+)
+def test_matching_does_not_infer_workplace_from_negation_or_company_description(
+    description: str,
+) -> None:
+    result = score_candidate(
+        _candidate(
+            work_mode=WorkMode.ONSITE,
+            description=description,
+            raw_data={"jobLocation": {"address": {"addressCountry": "CZE"}}},
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score == 0
+
+
+def test_matching_accepts_explicit_prague_office_location_label() -> None:
+    result = score_candidate(
+        _candidate(
+            work_mode=WorkMode.HYBRID,
+            description="Build React and Django APIs.\nOffice location: Prague",
+            raw_data={"jobLocation": {"address": {"addressCountry": "CZE"}}},
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score > 0
+
+
+def test_matching_does_not_override_foreign_structured_office_with_description() -> None:
+    result = score_candidate(
+        _candidate(
+            work_mode=WorkMode.ONSITE,
+            description="Office in Prague",
+            raw_data={
+                "jobLocation": {"address": {"addressCountry": "DE", "addressLocality": "Berlin"}}
+            },
+        ),
+        BOHDAN_PROFILE,
+    )
+    assert result.score == 0
+
+
+@pytest.mark.parametrize("mode", [WorkMode.UNKNOWN, WorkMode.FLEXIBLE])
+def test_matching_requires_known_work_mode(mode: WorkMode) -> None:
+    assert score_candidate(_candidate(work_mode=mode), BOHDAN_PROFILE).score == 0
+
+
+@pytest.mark.parametrize("location", ["Prague, Czechia", "Praha 1, CZ"])
+def test_matching_accepts_explicit_prague_location_without_structured_metadata(
+    location: str,
+) -> None:
+    assert (
+        score_candidate(
+            _candidate(work_mode=WorkMode.HYBRID, location_text=location), BOHDAN_PROFILE
+        ).score
+        > 0
+    )
+
+
+def test_matching_does_not_confuse_new_prague_with_prague() -> None:
+    assert (
+        score_candidate(
+            _candidate(work_mode=WorkMode.ONSITE, location_text="New Prague"), BOHDAN_PROFILE
+        ).score
+        == 0
+    )
+
+
+def test_matching_handles_missing_office_description() -> None:
+    assert (
+        score_candidate(
+            _candidate(
+                work_mode=WorkMode.ONSITE,
+                description=None,
+                raw_data={"jobLocation": {"address": {"addressCountry": "CZE"}}},
+            ),
+            BOHDAN_PROFILE,
+        ).score
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_data,expected",
+    [
+        ({"rss": {}}, "pending"),
+        (
+            {
+                "rss": {},
+                "metadata_origin": "job_page",
+                "metadata_rss_updated_at": "old",
+                "sourceUpdatedAt": "new",
+            },
+            "stale",
+        ),
+        (
+            {
+                "rss": {},
+                "metadata_origin": "job_page",
+                "metadata_rss_updated_at": "same",
+                "sourceUpdatedAt": "same",
+            },
+            "uncertain",
+        ),
+    ],
+)
+def test_matching_exposes_missing_or_stale_residence_evidence(
+    raw_data: dict, expected: str
+) -> None:
+    result = score_candidate(_candidate(raw_data=raw_data), BOHDAN_PROFILE)
+    assert result.score > 0
+    assert any(expected in concern for concern in result.concerns)
 
 
 @pytest.mark.parametrize(

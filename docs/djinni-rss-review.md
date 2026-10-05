@@ -1,6 +1,20 @@
 # Djinni RSS Migration
 
-Reviewed: 2026-10-05. Implementation is local; publication and production rollout are separate.
+Reviewed: 2026-10-05. Initial adaptive RSS is deployed in v1.2.14; the approved enrichment/date
+follow-up is implemented locally and still needs separate publication/deployment approval.
+
+The historical RSS-only verification below is not evidence for the later enrichment stage.
+See [provider clarification and current implementation](djinni-provider-clarification-2026-10-05.md).
+
+Current local enrichment/date verification: 502 non-integration backend tests plus 16 isolated
+PostgreSQL tests passed, as did the full migration chain, model/schema parity, downgrade/upgrade,
+Ruff, mypy, Bandit, offline lock and Git whitespace checks. Frontend passed 79 tests, lint,
+TypeScript and production build. Live sample: three RSS records and three public pages,
+all enriched successfully, without persistence or notification delivery. Automatic residence-based
+eligibility is still pending owner country confirmation; production capacity and mobile/browser
+visual checks were not performed for this package. Production remains RSS-only v1.2.14.
+
+## Historical Initial RSS Migration
 
 ## Provider Reply
 
@@ -42,8 +56,8 @@ Bounded read-only checks on October 5 found:
   public jobs filter form for this implementation. The runtime adapter never fetches that HTML.
 
 The support reply's statement about more than 200 vacancies does not demonstrate that a
-single current feed returns more than 100. RSS `pubDate` is provider-reported data, not an
-independently verified original publication timestamp. The feed is rolling, not a full
+single current feed returns more than 100. A subsequent provider clarification confirms that
+RSS `pubDate` is update/bump time, not original publication. The feed is rolling, not a full
 inventory. Disappearance from it does not deactivate previously saved vacancies.
 
 ## Implementation and Compatibility
@@ -126,9 +140,17 @@ HTML/JSON-LD scraping as an undocumented enrichment fallback or guess missing fi
 
 The metadata gap was checked against the current adapter on October 5. A focused Ukrainian
 support reply and field-impact summary are prepared in
-[the RSS metadata follow-up](djinni-rss-support-followup.md). The draft is not sent and no
-new provider answer is available. Preparing it does not close the missing-data gap or
-block independently authorized publication of the current RSS implementation.
+[the RSS metadata follow-up](djinni-rss-support-followup.md). The owner subsequently reported
+sending it and supplied a response: RSS will not be expanded yet, but the previous careful
+method may supplement missing fields; `pubDate` is bump/update time and RSS has no pagination.
+See [the clarification and proposed package](djinni-provider-clarification-2026-10-05.md).
+Deployed v1.2.14 is still RSS-only. Enrichment, separate source update dates, historical date repair
+and frontend labels are now implemented locally, not deployed. The owner subsequently confirmed
+Prague, Czechia: v15 matching reads structured candidate residence requirements and accepts office/
+hybrid work only with positive Prague evidence. Czech-office RSS discovery supplements remote
+feeds within the same budgets. Unknown geography remains explicitly uncertain; this is not an
+automatic work-authorization check or a claim of complete Czech/Prague market coverage. See the
+latest dated clarification for verification of this local follow-up.
 
 ## Verification Boundary
 

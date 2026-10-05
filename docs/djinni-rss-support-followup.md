@@ -1,6 +1,8 @@
 # Djinni RSS Metadata Follow-Up
 
-Prepared: 2026-10-05. Status: draft only; not sent; no provider answer yet.
+Prepared: 2026-10-05. Status: owner reports sending the follow-up and supplied the provider reply.
+See [the received clarification](djinni-provider-clarification-2026-10-05.md). The original draft
+below is retained as preparation history; this task did not send a provider message.
 
 ## Scope and Evidence
 
@@ -23,7 +25,7 @@ GUID and categories. They do not expose the following facts as separate fields:
 The adapter retains older metadata with `metadata_origin=previously_stored_metadata`.
 That marker does not verify freshness. Full descriptions remain available to existing
 matching rules; no reliable extraction of every missing structured field is claimed.
-The meaning of RSS `pubDate` as original publication versus update time is also unverified.
+The provider subsequently confirmed that RSS `pubDate` is update/bump time, not first publication.
 
 ## Reply Draft
 

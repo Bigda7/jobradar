@@ -6,6 +6,30 @@ from jobradar.sources.policy import RETAINED_SOURCE_NAMES
 from jobradar.sources.registry import build_source_registry
 
 
+def test_djinni_czech_office_feed_can_be_configured_or_disabled_explicitly() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.djinni_additional_urls == (
+        "https://djinni.co/jobs/rss/?editorial=nonhr&employment=office&country=CZE",
+    )
+    assert Settings(djinni_additional_jobs_urls="").djinni_additional_urls == ()
+    assert Settings(
+        djinni_additional_jobs_urls=" ; https://djinni.co/jobs/rss/ ; "
+    ).djinni_additional_urls == ("https://djinni.co/jobs/rss/",)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"djinni_max_metadata_requests": 101},
+        {"djinni_metadata_request_delay_seconds": 1.9},
+        {"djinni_metadata_cache_seconds": 3599},
+    ],
+)
+def test_djinni_html_limits_are_separate_and_conservative(values: dict) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**values)
+
+
 def test_cors_origins_are_normalized_and_deduplicated() -> None:
     settings = Settings(
         cors_allowed_origins=(

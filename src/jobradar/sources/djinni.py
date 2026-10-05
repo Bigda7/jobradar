@@ -4,7 +4,7 @@ import asyncio
 import re
 from collections import deque
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from time import monotonic
@@ -26,7 +26,7 @@ from jobradar.sources.djinni_rss import (
     split_partition,
 )
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
-from jobradar.sources.structured_data import html_to_text
+from jobradar.sources.structured_data import html_to_text, parse_job_postings
 
 if TYPE_CHECKING:
     # Element is a type annotation only; defusedxml exclusively parses response data.
@@ -87,8 +87,18 @@ class DjinniSource(BaseSource):
         max_feed_requests: int = 512,
         request_delay_seconds: float = 0.8,
         run_timeout_seconds: float = 600.0,
+        metadata_enabled: bool = False,
+        max_metadata_requests: int = 100,
+        metadata_request_delay_seconds: float = 2.0,
+        metadata_cache_seconds: int = 86400,
+        additional_feed_urls: tuple[str, ...] = (),
     ) -> None:
         self._feed_url = _feed_url(jobs_url, remote_only)
+        self._additional_feed_urls = tuple(
+            dict.fromkeys(_feed_url(url, False) for url in additional_feed_urls)
+        )
+        if len(self._additional_feed_urls) > 8:
+            raise ValueError("At most eight additional Djinni feeds may be configured.")
         self._request_timeout_seconds = request_timeout_seconds
         self._max_items = max_items
         # Retain the legacy constructor argument; RSS does not support page traversal.
@@ -96,6 +106,10 @@ class DjinniSource(BaseSource):
         self._max_feed_requests = max_feed_requests
         self._run_timeout_seconds = run_timeout_seconds
         self._limiter = _RequestLimiter(request_delay_seconds)
+        self._metadata_enabled = metadata_enabled
+        self._max_metadata_requests = min(100, max(1, max_metadata_requests))
+        self._metadata_cache_seconds = metadata_cache_seconds
+        self._metadata_limiter = _RequestLimiter(max(2.0, metadata_request_delay_seconds))
         self._fetching = False
 
     async def fetch(self) -> AsyncIterator[RawListing]:
@@ -104,19 +118,108 @@ class DjinniSource(BaseSource):
         self._fetching = True
         self._run_deadline = monotonic() + self._run_timeout_seconds
         self._run_bytes = 0
+        self._metadata_blocked = False
         try:
             if self._client is not None:
-                async for listing in self._fetch_feeds(self._client):
+                async for listing in self._fetch_listings(self._client):
                     yield listing
             else:
                 async with httpx.AsyncClient(
                     headers={"User-Agent": USER_AGENT},
                     timeout=httpx.Timeout(self._request_timeout_seconds),
                 ) as client:
-                    async for listing in self._fetch_feeds(client):
+                    async for listing in self._fetch_listings(client):
                         yield listing
         finally:
             self._fetching = False
+
+    async def _fetch_listings(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
+        if not self._metadata_enabled:
+            async for listing in self._fetch_feeds(client):
+                yield listing
+            return
+        listings = [listing async for listing in self._fetch_feeds(client)]
+        now = datetime.now(UTC)
+        pending = [
+            index for index, listing in enumerate(listings) if self._metadata_due(listing, now)
+        ]
+        pending.sort(key=lambda index: _metadata_priority(listings[index]))
+        requests = 0
+        failures = 0
+        for index in pending:
+            if (
+                self._metadata_blocked
+                or requests >= self._max_metadata_requests
+                or monotonic() >= self._run_deadline
+            ):
+                break
+            requests += 1
+            try:
+                listings[index] = await self._enrich_listing(client, listings[index])
+                failures = 0
+            except (DjinniSourceError, ValueError) as error:
+                payload = dict(listings[index].payload)
+                payload["metadata_attempted_at"] = datetime.now(UTC).isoformat()
+                listings[index] = listings[index].model_copy(update={"payload": payload})
+                self.record_detail_failure()
+                self.report_warning(f"Djinni metadata could not be refreshed: {error}")
+                failures += 1
+                if (
+                    isinstance(error, DjinniSourceError)
+                    and (error.stop_traversal or error.status_code in {403, 429})
+                ) or failures >= 3:
+                    break
+        if requests < len(pending):
+            self.mark_limit_reached()
+            self.report_warning(
+                f"Djinni retained RSS records with {len(pending) - requests} "
+                "deferred metadata refreshes."
+            )
+        for listing in listings:
+            yield listing
+
+    def _metadata_due(self, listing: RawListing, now: datetime) -> bool:
+        checked = listing.detail_fetched_at
+        if checked is None:
+            return True
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=UTC)
+        return now - checked >= timedelta(
+            seconds=self._metadata_cache_seconds
+        ) or listing.payload.get("metadata_rss_updated_at") != listing.payload.get(
+            "sourceUpdatedAt"
+        )
+
+    async def _enrich_listing(self, client: httpx.AsyncClient, listing: RawListing) -> RawListing:
+        content = await self._request_bytes(client, str(listing.source_url), metadata=True)
+        matches: list[dict[str, Any]] = []
+        for posting in parse_job_postings(content.decode("utf-8", errors="replace")):
+            try:
+                candidate = _to_raw_listing(posting)
+            except (DjinniSourceError, ValueError):
+                continue
+            if (
+                candidate.external_id == listing.external_id
+                and is_trusted_source_link(str(candidate.source_url), self.allowed_listing_hosts)
+                and _vacancy_id(str(candidate.source_url)) == listing.external_id
+            ):
+                matches.append(posting)
+        if len(matches) != 1:
+            raise DjinniSourceError("Djinni detail page has no unique matching JobPosting.")
+        payload = dict(listing.payload)
+        # A successful page refresh replaces old fields, including fields removed by the provider.
+        for key in LEGACY_METADATA_FIELDS:
+            payload.pop(key, None)
+            if key in matches[0]:
+                payload[key] = matches[0][key]
+        payload["metadata_origin"] = "job_page"
+        payload["metadata_rss_updated_at"] = payload.get("sourceUpdatedAt")
+        payload["metadata_attempted_at"] = datetime.now(UTC).isoformat()
+        enriched = listing.model_copy(
+            update={"payload": payload, "detail_fetched_at": datetime.now(UTC)}
+        )
+        self.normalize(enriched)
+        return enriched
 
     async def _fetch_feeds(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
         configured_categories = [
@@ -130,6 +233,16 @@ class DjinniSource(BaseSource):
         )
         queue = deque([initial])
         scheduled = {initial.url}
+        for url in self._additional_feed_urls:
+            if url not in scheduled:
+                categories = [
+                    value
+                    for key, value in parse_qsl(urlsplit(url).query)
+                    if key == "primary_keyword" and value.strip()
+                ]
+                queue.append(FeedPartition(url, categories[0] if len(categories) == 1 else None))
+                scheduled.add(url)
+        configured_roots = set(scheduled)
         requests = 0
         malformed = 0
         cached_descriptions = 0
@@ -160,6 +273,7 @@ class DjinniSource(BaseSource):
                     or error.status_code in {403, 429}
                     or consecutive_failures >= 3
                 ):
+                    self._metadata_blocked = True
                     break
                 continue
             consecutive_failures = 0
@@ -169,6 +283,11 @@ class DjinniSource(BaseSource):
                 if requests == 1:
                     raise DjinniSourceError(
                         "Djinni RSS did not apply the configured category filter."
+                    )
+                if partition.url in configured_roots:
+                    limited = True
+                    self.report_warning(
+                        "Djinni RSS did not apply an additional feed's configured category filter."
                     )
                 # RSS channel categories include headings that are not accepted query values.
                 catalog_heading_count += 1
@@ -250,59 +369,74 @@ class DjinniSource(BaseSource):
             salary_max=salary_max,
             salary_currency=salary_currency,
             salary_period=salary_period,
-            published_at=_datetime(posting.get("datePosted")),
+            # Djinni confirmed that RSS pubDate and page datePosted describe updates/bumps.
+            published_at=None,
+            source_updated_at=_datetime(posting.get("sourceUpdatedAt")),
         )
 
     async def _request(self, client: httpx.AsyncClient, feed_url: str) -> Element:
+        content = await self._request_bytes(client, feed_url)
+        try:
+            root = ElementTree.fromstring(content, forbid_dtd=True)
+            if root.tag != "rss" or root.find("channel") is None:
+                raise DjinniSourceError("Djinni response is not an RSS channel.")
+            return root
+        except (ElementTree.ParseError, DefusedXmlException) as error:
+            raise DjinniSourceError(
+                "Djinni response contains invalid or unsafe RSS XML."
+            ) from error
+
+    async def _request_bytes(
+        self, client: httpx.AsyncClient, url: str, *, metadata: bool = False
+    ) -> bytes:
+        label = "metadata" if metadata else "RSS"
         try:
             remaining = self._run_deadline - monotonic()
             if remaining <= 0:
                 raise DjinniSourceError("Djinni RSS traversal exceeded its time budget.")
             async with asyncio.timeout(min(self._request_timeout_seconds, remaining)):
-                await self._limiter.wait()
+                await (self._metadata_limiter if metadata else self._limiter).wait()
                 self.record_page()
                 async with client.stream(
                     "GET",
-                    feed_url,
+                    url,
                     follow_redirects=False,
-                    headers={"Accept": "application/rss+xml, application/xml"},
+                    headers={
+                        "Accept": "text/html"
+                        if metadata
+                        else "application/rss+xml, application/xml"
+                    },
                     timeout=self._request_timeout_seconds,
                 ) as response:
                     response.raise_for_status()
                     content = bytearray()
                     async for chunk in response.aiter_bytes(chunk_size=65536):
-                        if len(content) + len(chunk) > MAX_FEED_BYTES:
-                            raise DjinniSourceError("Djinni RSS exceeds the response byte limit.")
+                        if len(content) + len(chunk) > (1_000_000 if metadata else MAX_FEED_BYTES):
+                            raise DjinniSourceError(
+                                f"Djinni {label} exceeds the response byte limit."
+                            )
                         self._run_bytes += len(chunk)
                         if self._run_bytes > MAX_RUN_BYTES:
                             raise DjinniSourceError(
                                 "Djinni RSS traversal exceeds its byte budget.", stop_traversal=True
                             )
                         content.extend(chunk)
-            root = ElementTree.fromstring(content, forbid_dtd=True)
-            if root.tag != "rss" or root.find("channel") is None:
-                raise DjinniSourceError("Djinni response is not an RSS channel.")
-            return root
+            return bytes(content)
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             raise DjinniSourceError(
-                f"Djinni RSS request returned HTTP {status}.", status_code=status
+                f"Djinni {label} request returned HTTP {status}.", status_code=status
             ) from error
         except (httpx.HTTPError, TimeoutError) as error:
-            raise DjinniSourceError("Djinni RSS request failed or timed out.") from error
-        except (ElementTree.ParseError, DefusedXmlException) as error:
-            raise DjinniSourceError(
-                "Djinni response contains invalid or unsafe RSS XML."
-            ) from error
+            raise DjinniSourceError(f"Djinni {label} request failed or timed out.") from error
 
     def _rss_listing(self, item: Element, feed_url: str) -> RawListing:
         source_url = _required_string(item.findtext("link") or item.findtext("guid"), "link")
         if not is_trusted_source_link(source_url, self.allowed_listing_hosts):
             raise DjinniSourceError("Djinni RSS item has an untrusted link.")
-        match = re.fullmatch(r"/jobs/(\d+)(?:-[^/]*)?/?", urlsplit(source_url).path)
-        if match is None:
+        external_id = _vacancy_id(source_url)
+        if external_id is None:
             raise DjinniSourceError("Djinni RSS item has no numeric vacancy identifier.")
-        external_id = match.group(1)
         posting: dict[str, Any] = {}
         cached = self.cached_listing(external_id)
         if cached is not None:
@@ -314,7 +448,12 @@ class DjinniSource(BaseSource):
                 }
             )
             if posting:
-                posting["metadata_origin"] = "previously_stored_metadata"
+                posting["metadata_origin"] = cached.payload.get(
+                    "metadata_origin", "previously_stored_metadata"
+                )
+            for key in ("metadata_rss_updated_at", "metadata_origin", "metadata_attempted_at"):
+                if key in cached.payload:
+                    posting[key] = cached.payload[key]
         encoded_description = item.findtext(CONTENT_ENCODED_TAG)
         description = description_text(encoded_description or item.findtext("description") or "")
         if not description and cached is not None:
@@ -327,6 +466,7 @@ class DjinniSource(BaseSource):
         if employment == "remote":
             posting["jobLocationType"] = "TELECOMMUTE"
         elif employment == "office":
+            posting.pop("jobLocationType", None)
             posting["jobLocation"] = posting.get("jobLocation") or {"@type": "Place"}
         posting.update(
             {
@@ -334,8 +474,9 @@ class DjinniSource(BaseSource):
                 "url": source_url,
                 "title": _required_string(html_to_text(item.findtext("title") or ""), "title"),
                 "description": description,
-                "datePosted": _rss_datetime(item.findtext("pubDate")),
+                "sourceUpdatedAt": _rss_datetime(item.findtext("pubDate")),
                 "rss": {
+                    **({"employment": "office"} if employment == "office" else {}),
                     "title": item.findtext("title"),
                     "link": item.findtext("link"),
                     "guid": item.findtext("guid"),
@@ -346,7 +487,35 @@ class DjinniSource(BaseSource):
                 },
             }
         )
-        return _to_raw_listing(posting)
+        listing = _to_raw_listing(posting)
+        return listing.model_copy(
+            update={"detail_fetched_at": cached.detail_fetched_at if cached else None}
+        )
+
+
+def _metadata_priority(listing: RawListing) -> tuple[int, datetime, int]:
+    attempted = _datetime(listing.payload.get("metadata_attempted_at"))
+    checked = listing.detail_fetched_at
+    if checked is not None and checked.tzinfo is None:
+        checked = checked.replace(tzinfo=UTC)
+    if checked is None and attempted is None:
+        priority = 0
+    elif (
+        checked is not None
+        and (attempted is None or checked >= attempted)
+        and listing.payload.get("metadata_rss_updated_at") != listing.payload.get("sourceUpdatedAt")
+    ):
+        priority = 1
+    else:
+        priority = 2
+    rss = listing.payload.get("rss")
+    office_priority = 0 if isinstance(rss, dict) and rss.get("employment") == "office" else 1
+    return priority, attempted or datetime.min.replace(tzinfo=UTC), office_priority
+
+
+def _vacancy_id(url: str) -> str | None:
+    match = re.fullmatch(r"/jobs/(\d+)(?:-[^/]*)?/?", urlsplit(url).path)
+    return match.group(1) if match else None
 
 
 def _feed_url(base_url: str, remote_only: bool) -> str:
@@ -455,18 +624,31 @@ def _location_values(value: Any) -> list[str]:
             continue
         address = item.get("address")
         if not isinstance(address, dict):
+            if item.get("@type") == "Country":
+                values.extend(_location_names(item.get("name")))
             continue
         for key in ("addressCountry", "addressRegion", "addressLocality"):
-            location_value = address.get(key)
-            if isinstance(location_value, str) and location_value.strip():
-                values.append(location_value.strip())
+            values.extend(_location_names(address.get(key)))
     return values
+
+
+def _location_names(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, dict):
+        return _location_names(value.get("name"))
+    if isinstance(value, list):
+        return [name for item in value for name in _location_names(item)]
+    return []
 
 
 def _datetime(value: Any) -> datetime | None:
     if value is None:
         return None
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, OverflowError):
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)

@@ -35,11 +35,37 @@ class SearchProfile:
     skills: tuple[SkillRule, ...]
     negative_skill_penalty: int
     negative_skills: tuple[NegativeSkillRule, ...]
+    residence_country_aliases: tuple[str, ...] = ()
+    residence_region_aliases: tuple[str, ...] = ()
+    local_city_aliases: tuple[str, ...] = ()
 
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v14-live-exchange-rates",
+    rules_version="bohdan-multi-source-v15-prague-location-eligibility",
+    residence_country_aliases=(
+        "CZ",
+        "CZE",
+        "Czechia",
+        "Czech Republic",
+        "Cesko",
+        "Česko",
+        "Česká republika",
+        "Чехия",
+        "Чехія",
+    ),
+    residence_region_aliases=(
+        "Europe",
+        "EU",
+        "European Union",
+        "EEA",
+        "European Economic Area",
+        "EMEA",
+        "Worldwide",
+        "World",
+        "Anywhere",
+    ),
+    local_city_aliases=("Prague", "Praha", "Прага"),
     english_level="B2",
     czech_level="A2",
     notification_threshold=55,

@@ -21,7 +21,7 @@ checked again before a public or commercial release.
 
 | Source | Access method | Current position | Attribution and retention | Commercial or multi-user action |
 | --- | --- | --- | --- | --- |
-| Djinni | Official filtered RSS; no HTML/JSON-LD fallback | RSS recommended and full descriptions allowed in the support reply supplied by the owner on 2026-10-05 | Keep Djinni attribution and the original URL; support states up to 100 RSS requests/minute; retention duration not specified | Reconfirm terms for a changed commercial or multi-user scope |
+| Djinni | Deployed: official filtered RSS only. Local approved candidate adds bounded public JobPosting page metadata enrichment | RSS recommended and full descriptions allowed; missing-field supplementation described as acceptable in the owner-supplied follow-up | Keep attribution and original URL; up to 100 RSS requests/minute; local HTML ceilings: 100/run and at least 2 seconds spacing, not a provider allowance; no retention duration specified | Reconfirm terms for a changed commercial or multi-user scope |
 | DOU Jobs | Official vacancy RSS feed | Approved | Keep DOU attribution and the original URL | Recheck feed terms before commercial launch |
 | Robota.ua | Public search pages and public vacancy details | Conditional | Preserve the original meaning and include a mandatory source link | Confirm commercial reuse before a commercial or multi-user launch |
 | Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Keep current polling and coverage unchanged; reassess terms and seek explicit permission before commercial or multi-user use |
@@ -54,6 +54,16 @@ again before another public release. This decision changes documentation only; i
 alter the running source, remove stored listings, or make a legal determination.
 
 ## Primary References
+
+Djinni's subsequent owner-supplied reply permits the described previous careful method for
+missing metadata, confirms `pubDate` is update/bump time and confirms a 100-item feed without
+pagination. This does not authorize unlimited HTML traffic or remove technical stability risks.
+The v1.2.15 package adds bounded enrichment and separates source updates from publication dates;
+it does not use HTML as an RSS-failure fallback. The owner confirmed Prague, Czechia, and v15
+matching checks structured residence restrictions and positive Prague office/hybrid evidence.
+Unknown geography and legal work authorization are not inferred. Production rollout status is
+recorded separately in the workspace handoff. See
+[provider clarification](djinni-provider-clarification-2026-10-05.md).
 
 - Djinni official RSS: https://djinni.co/jobs/rss/
 - Djinni supported search filters: https://djinni.co/jobs/

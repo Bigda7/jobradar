@@ -18,6 +18,28 @@ from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
 
 
 @pytest.mark.asyncio
+async def test_api_returns_update_dates_and_uses_them_for_newest_order(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    async with sqlite_session_factory() as session, session.begin():
+        jobs = list((await session.scalars(select(Opportunity).order_by(Opportunity.id))).all())
+        updated_id = jobs[0].id
+        jobs[0].published_at = None
+        jobs[0].source_updated_at = datetime(2026, 10, 5, 12, tzinfo=UTC)
+    application = create_app(sqlite_session_factory)
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://test"
+    ) as client:
+        response = await client.get("/jobs")
+    assert response.status_code == 200
+    newest = response.json()["items"][0]
+    assert newest["id"] == updated_id
+    assert newest["published_at"] is None
+    assert newest["source_updated_at"] == "2026-10-05T12:00:00Z"
+
+
+@pytest.mark.asyncio
 async def test_health_and_read_only_endpoints(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -4,6 +4,7 @@ from typing import Any
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.normalization import normalize_text
 from jobradar.matching.freelance import score_freelance_candidate
+from jobradar.matching.locations import evaluate_location_eligibility
 from jobradar.matching.models import MatchCandidate as MatchCandidate
 from jobradar.matching.models import ScoreResult as ScoreResult
 from jobradar.matching.profile import NegativeSkillRule, SearchProfile
@@ -119,6 +120,10 @@ def score_candidate(
     if rejection_concern is not None:
         return ScoreResult(score=0, reasons=(), concerns=(rejection_concern,))
 
+    location = evaluate_location_eligibility(candidate, profile)
+    if location.rejection_concern is not None:
+        return ScoreResult(score=0, reasons=(), concerns=(location.rejection_concern,))
+
     if candidate.kind is OpportunityKind.FREELANCE_PROJECT:
         result = score_freelance_candidate(candidate, profile)
         if result.score == 0:
@@ -126,20 +131,17 @@ def score_candidate(
         return ScoreResult(
             score=max(0, min(result.score + sanity.score_adjustment, 100)),
             reasons=result.reasons,
-            concerns=result.concerns + sanity.concerns,
+            concerns=result.concerns + sanity.concerns + location.concerns,
             matched_skills=result.matched_skills,
         )
 
-    if candidate.work_mode is not WorkMode.REMOTE:
-        return ScoreResult(
-            score=0,
-            reasons=(),
-            concerns=("Отклонено: вакансия не обозначена как удалённая.",),
-        )
-
     score = 20
-    reasons = ["Удалённый формат соответствует обязательному требованию."]
-    concerns = list(sanity.concerns)
+    reasons = [
+        "Удалённый формат соответствует обязательному требованию."
+        if candidate.work_mode is WorkMode.REMOTE
+        else "Office or hybrid work in Prague matches your location preference."
+    ]
+    concerns = list(sanity.concerns + location.concerns)
     title = normalize_text(candidate.title)
     searchable_text = normalize_text(
         " ".join(
