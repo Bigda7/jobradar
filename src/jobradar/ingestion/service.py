@@ -356,6 +356,7 @@ class IngestionService:
             listing.content_hash = content_hash
             listing.raw_data = raw_listing.payload
             listing.published_at = normalized.published_at
+            listing.source_updated_at = normalized.source_updated_at
             await refresh_opportunity_from_best_listing(session, opportunity.id)
             return "updated"
 
@@ -504,6 +505,7 @@ class IngestionService:
             "normalized_data": normalized_snapshot(normalized),
             "quality_score": listing_quality_score(normalized),
             "published_at": normalized.published_at,
+            "source_updated_at": normalized.source_updated_at,
             "detail_fetched_at": raw_listing.detail_fetched_at,
             "first_seen_at": now,
             "last_seen_at": now,
@@ -552,6 +554,7 @@ class IngestionService:
             salary_currency=normalized.salary_currency,
             salary_period=normalized.salary_period,
             published_at=normalized.published_at,
+            source_updated_at=normalized.source_updated_at,
             first_seen_at=now,
             last_seen_at=now,
         )

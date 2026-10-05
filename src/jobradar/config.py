@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     mock_source_enabled: bool = False
     djinni_source_enabled: bool = True
     djinni_jobs_url: str = "https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote"
+    djinni_additional_jobs_urls: str = (
+        "https://djinni.co/jobs/rss/?editorial=nonhr&employment=office&country=CZE"
+    )
     djinni_remote_only: bool = True
     djinni_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     djinni_max_items: int = Field(default=10000, ge=1, le=10000)
@@ -39,6 +42,10 @@ class Settings(BaseSettings):
     djinni_max_feed_requests: int = Field(default=512, ge=1, le=512)
     djinni_request_delay_seconds: float = Field(default=0.8, ge=0.7, le=10)
     djinni_run_timeout_seconds: float = Field(default=600.0, ge=1, le=900)
+    djinni_metadata_enabled: bool = True
+    djinni_max_metadata_requests: int = Field(default=100, ge=1, le=100)
+    djinni_metadata_request_delay_seconds: float = Field(default=2.0, ge=2, le=30)
+    djinni_metadata_cache_seconds: int = Field(default=86400, ge=3600, le=604800)
     djinni_poll_interval_seconds: int = Field(default=3600, ge=1800)
     workua_source_enabled: bool = True
     workua_reader_base_url: str = "https://r.jina.ai/http://www.work.ua"
@@ -205,6 +212,12 @@ class Settings(BaseSettings):
                 "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when Telegram is enabled."
             )
         return self
+
+    @property
+    def djinni_additional_urls(self) -> tuple[str, ...]:
+        return tuple(
+            url.strip() for url in self.djinni_additional_jobs_urls.split(";") if url.strip()
+        )
 
     @property
     def workua_urls(self) -> tuple[str, ...]:

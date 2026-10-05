@@ -146,6 +146,7 @@ class Opportunity(TimestampMixin, Base):
     salary_currency: Mapped[str | None] = mapped_column(String(3))
     salary_period: Mapped[str | None] = mapped_column(String(50))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
@@ -200,6 +201,7 @@ class Listing(TimestampMixin, Base):
     normalized_data: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE)
     quality_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     detail_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

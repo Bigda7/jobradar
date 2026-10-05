@@ -1,5 +1,6 @@
 import asyncio
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from xml.sax.saxutils import escape
 
@@ -35,6 +36,400 @@ LEGACY_JOB = {
     "estimatedSalary": {"currency": "USD", "minValue": 1200, "maxValue": 1800},
     "datePosted": "2026-08-22T15:36:45+03:00",
 }
+
+
+def _detail(posting: dict) -> str:
+    return '<script type="application/ld+json">' + json.dumps(posting) + "</script>"
+
+
+CZECH_OFFICE_FEED = "https://djinni.co/jobs/rss/?employment=office&country=CZE"
+
+
+@pytest.mark.asyncio
+async def test_additional_office_feed_shares_discovery_and_deduplicates_numeric_ids(
+    fast_rss_requests: None,
+) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(dict(request.url.params))
+        items = (
+            (_item(844408), _item(844409))
+            if request.url.params.get("employment") == "office"
+            else (_item(),)
+        )
+        return httpx.Response(200, text=_rss(*items))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(
+            client=client, additional_feed_urls=(CZECH_OFFICE_FEED, CZECH_OFFICE_FEED)
+        )
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 2 and len(requests) == 2
+    assert requests[0]["employment"] == "remote"
+    assert requests[1] == {"employment": "office", "country": "CZE"}
+    assert source.normalize(rows[0]).work_mode is WorkMode.REMOTE
+    assert source.normalize(rows[1]).work_mode is WorkMode.ONSITE
+    assert source.normalize(rows[1]).location_text is None
+    assert rows[1].payload["rss"]["employment"] == "office"
+
+
+@pytest.mark.asyncio
+async def test_additional_feed_uses_shared_request_budget(fast_rss_requests: None) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url)
+        return httpx.Response(200, text=_rss(_item()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(
+            client=client, additional_feed_urls=(CZECH_OFFICE_FEED,), max_feed_requests=1
+        )
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 1 and len(requests) == 1
+    assert source.consume_run_metrics().limit_reached
+    assert source.consume_warnings()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429])
+async def test_blocked_additional_feed_stops_all_metadata_requests(
+    fast_rss_requests: None,
+    status: int,
+) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return (
+            httpx.Response(status)
+            if request.url.params.get("employment") == "office"
+            else httpx.Response(200, text=_rss(_item()))
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(
+            client=client, additional_feed_urls=(CZECH_OFFICE_FEED,), metadata_enabled=True
+        )
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 1 and requests == ["/jobs/rss/", "/jobs/rss/"]
+    assert source.consume_run_metrics().detail_failure_count == 0
+    assert source.consume_warnings()
+
+
+@pytest.mark.parametrize("url", ["https://evil.example/jobs/", "http://djinni.co/jobs/"])
+def test_additional_feeds_reject_untrusted_urls(url: str) -> None:
+    with pytest.raises(ValueError):
+        DjinniSource(additional_feed_urls=(url,))
+
+
+def test_additional_feeds_are_bounded() -> None:
+    with pytest.raises(ValueError, match="eight"):
+        DjinniSource(
+            additional_feed_urls=tuple(f"https://djinni.co/jobs/rss/?x={i}" for i in range(9))
+        )
+
+
+@pytest.mark.asyncio
+async def test_additional_office_feed_gets_metadata_before_unchecked_remote_backlog(
+    fast_rss_requests: None,
+) -> None:
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/rss/":
+            return httpx.Response(
+                200,
+                text=_rss(
+                    _item(844409) if request.url.params.get("employment") == "office" else _item()
+                ),
+            )
+        pages.append(request.url.path)
+        posting = {
+            **LEGACY_JOB,
+            "identifier": 844409,
+            "url": str(request.url),
+            "jobLocationType": None,
+            "applicantLocationRequirements": None,
+            "jobLocation": {
+                "address": {"addressCountry": ["Czechia", "Poland"], "addressLocality": ["Prague"]}
+            },
+        }
+        return httpx.Response(200, text=_detail(posting))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(
+            client=client,
+            additional_feed_urls=(CZECH_OFFICE_FEED,),
+            metadata_enabled=True,
+            max_metadata_requests=1,
+        )
+        rows = [row async for row in source.fetch()]
+    assert len(pages) == 1 and "844409" in pages[0]
+    job = source.normalize(rows[1])
+    assert job.work_mode is WorkMode.ONSITE
+    assert job.location_text == "Czechia, Poland, Prague"
+    assert rows[1].detail_fetched_at is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_bump_retry_does_not_starve_successful_expired_cache(
+    fast_rss_requests: None,
+) -> None:
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/rss/":
+            return httpx.Response(200, text=_rss(_item(), _item(844409)))
+        pages.append(request.url.path)
+        return httpx.Response(404)
+
+    now = datetime.now(UTC)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True, max_metadata_requests=1)
+        source.prime_listing_cache(
+            {
+                "844408": CachedListing(
+                    {
+                        **LEGACY_JOB,
+                        "metadata_attempted_at": now.isoformat(),
+                        "metadata_rss_updated_at": "old-bump",
+                    },
+                    now - timedelta(days=1),
+                ),
+                "844409": CachedListing(
+                    {
+                        **LEGACY_JOB,
+                        "metadata_attempted_at": (now - timedelta(days=3)).isoformat(),
+                        "metadata_rss_updated_at": "2026-08-22T12:36:45+00:00",
+                    },
+                    now - timedelta(days=2),
+                ),
+            }
+        )
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 2
+    assert len(pages) == 1 and "844409" in pages[0]
+
+
+@pytest.mark.asyncio
+async def test_additional_configured_category_failure_is_visible(fast_rss_requests: None) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=_rss(_item())))
+    ) as client:
+        source = DjinniSource(
+            client=client, additional_feed_urls=(CZECH_OFFICE_FEED + "&primary_keyword=Java",)
+        )
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 1
+    assert source.consume_run_metrics().limit_reached
+    assert any("additional feed" in warning for warning in source.consume_warnings())
+
+
+@pytest.mark.asyncio
+async def test_detail_metadata_is_cached_and_bumps_do_not_become_publication_dates(
+    fast_rss_requests: None,
+) -> None:
+    requests = []
+    date = "Sat, 22 Aug 2026 15:36:45 +0300"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            200,
+            text=_rss(_item(date=date))
+            if request.url.path == "/jobs/rss/"
+            else _detail(LEGACY_JOB),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True)
+        first = [listing async for listing in source.fetch()]
+        normalized = source.normalize(first[0])
+        assert normalized.company == "Example Company"
+        assert normalized.location_text == "Europe"
+        assert normalized.salary_min == Decimal("1200")
+        assert normalized.employment_type == "full_time"
+        assert normalized.published_at is None
+        assert first[0].payload["description"].startswith("Build APIs")
+        source.prime_listing_cache(
+            {first[0].external_id: CachedListing(first[0].payload, first[0].detail_fetched_at)}
+        )
+        second = [listing async for listing in source.fetch()]
+        assert second == first
+        assert len(requests) == 3
+        date = "Sun, 23 Aug 2026 15:36:45 +0300"
+        third = [listing async for listing in source.fetch()]
+        assert len(requests) == 5
+        assert source.normalize(third[0]).source_updated_at == datetime(
+            2026, 8, 23, 12, 36, 45, tzinfo=UTC
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [302, 403, 429, 503])
+async def test_metadata_failure_retains_rss_and_cached_fields_and_stops_when_blocked(
+    fast_rss_requests: None,
+    status: int,
+) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return (
+            httpx.Response(200, text=_rss(_item(), _item(844409)))
+            if request.url.path == "/jobs/rss/"
+            else httpx.Response(status, headers={"Location": "https://evil.example/private"})
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True)
+        source.prime_listing_cache({"844408": CachedListing(LEGACY_JOB, None)})
+        listings = [listing async for listing in source.fetch()]
+        assert len(listings) == 2
+        assert source.normalize(listings[0]).company == "Example Company"
+        assert listings[0].detail_fetched_at is None
+        assert len(requests) == (2 if status in {403, 429} else 3)
+        assert source.consume_run_metrics().detail_failure_count == (
+            1 if status in {403, 429} else 2
+        )
+        assert any(f"HTTP {status}" in warning for warning in source.consume_warnings())
+
+
+@pytest.mark.asyncio
+async def test_metadata_budget_and_persisted_attempt_order_do_not_starve_other_listings(
+    fast_rss_requests: None,
+) -> None:
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/rss/":
+            return httpx.Response(200, text=_rss(_item(), _item(844409)))
+        pages.append(request.url.path)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True, max_metadata_requests=1)
+        first = [listing async for listing in source.fetch()]
+        assert len(first) == 2 and len(pages) == 1
+        assert source.consume_run_metrics().limit_reached
+        source.prime_listing_cache(
+            {
+                listing.external_id: CachedListing(listing.payload, listing.detail_fetched_at)
+                for listing in first
+            }
+        )
+        await anext(source.fetch())
+        assert len(pages) == 2 and pages[0] != pages[1]
+
+
+@pytest.mark.asyncio
+async def test_metadata_cache_expiration_refreshes_the_page(fast_rss_requests: None) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            200, text=_rss(_item()) if request.url.path == "/jobs/rss/" else _detail(LEGACY_JOB)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True)
+        first = [listing async for listing in source.fetch()]
+        source.prime_listing_cache(
+            {"844408": CachedListing(first[0].payload, datetime.now(UTC) - timedelta(days=2))}
+        )
+        second = [listing async for listing in source.fetch()]
+        assert len(requests) == 4
+        assert second[0].detail_fetched_at is not None
+        assert source.consume_run_metrics().detail_failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_metadata_deadline_does_not_discard_successful_rss(fast_rss_requests: None) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/rss/":
+            return httpx.Response(200, text=_rss(_item()))
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, text=_detail(LEGACY_JOB))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True, request_timeout_seconds=0.02)
+        listings = [listing async for listing in source.fetch()]
+        assert len(listings) == 1 and listings[0].detail_fetched_at is None
+        assert source.consume_run_metrics().detail_failure_count == 1
+        assert any(
+            "metadata request failed or timed out" in warning
+            for warning in source.consume_warnings()
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<html>No JSON-LD</html>",
+        _detail({**LEGACY_JOB, "identifier": 1}),
+        _detail({**LEGACY_JOB, "url": "https://evil.example/jobs/844408-junior-python-developer/"}),
+        "x" * 1_000_001,
+    ],
+    ids=["missing-jsonld", "wrong-id", "untrusted-url", "oversized"],
+)
+async def test_invalid_or_oversized_metadata_cannot_replace_cached_fields(
+    fast_rss_requests: None,
+    body: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_rss(_item()) if request.url.path == "/jobs/rss/" else body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True)
+        source.prime_listing_cache({"844408": CachedListing(LEGACY_JOB, None)})
+        listing = await anext(source.fetch())
+        assert source.normalize(listing).company == "Example Company"
+        assert listing.detail_fetched_at is None
+        assert source.consume_run_metrics().detail_failure_count == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_metadata_refresh_removes_withdrawn_salary_and_uses_candidate_country(
+    fast_rss_requests: None,
+) -> None:
+    posting = {key: value for key, value in LEGACY_JOB.items() if key != "estimatedSalary"}
+    posting["applicantLocationRequirements"] = {"address": {"addressCountry": "UA"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text=_rss(_item()) if request.url.path == "/jobs/rss/" else _detail(posting)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True)
+        source.prime_listing_cache({"844408": CachedListing(LEGACY_JOB, None)})
+        listing = await anext(source.fetch())
+        normalized = source.normalize(listing)
+        assert normalized.salary_min is None and normalized.location_text == "UA"
+        assert listing.detail_fetched_at is not None
+
+
+@pytest.mark.asyncio
+async def test_blocked_rss_does_not_fall_back_to_html(fast_rss_requests: None) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        assert request.url.path == "/jobs/rss/"
+        return (
+            httpx.Response(200, text=_catalog_feed(range(100), catalog=("Python",)))
+            if len(requests) == 1
+            else httpx.Response(429)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, metadata_enabled=True)
+        assert len([listing async for listing in source.fetch()]) == 100
+    assert len(requests) == 2
 
 
 def _item(
@@ -490,7 +885,8 @@ async def test_rss_preserves_identity_and_full_description_without_inventing_met
     assert normalized.location_text == "Remote"
     assert normalized.company is normalized.salary_min is normalized.salary_max is None
     assert normalized.employment_type is None
-    assert normalized.published_at == datetime(2026, 8, 22, 12, 36, 45, tzinfo=UTC)
+    assert normalized.published_at is None
+    assert normalized.source_updated_at == datetime(2026, 8, 22, 12, 36, 45, tzinfo=UTC)
     assert listings[0].payload["rss"]["categories"] == ["Python"]
     assert "<strong>" in listings[0].payload["rss"]["description"]
     assert source.deactivate_missing_listings is False
@@ -750,6 +1146,7 @@ async def test_rss_migration_updates_existing_listing_without_duplicate_or_deact
 @pytest.mark.asyncio
 async def test_migration_does_not_resend_a_previously_sent_notification(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
+    fast_rss_requests: None,
 ) -> None:
     class LegacySource(DjinniSource):
         async def fetch(self):  # type: ignore[no-untyped-def]
@@ -775,12 +1172,22 @@ async def test_migration_does_not_resend_a_previously_sent_notification(
             )
         )
 
+    bump_date = "Sat, 22 Aug 2026 15:36:45 +0300"
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "djinni.co"
-        return httpx.Response(200, text=_rss(_item()))
+        return httpx.Response(
+            200,
+            text=_rss(_item(date=bump_date))
+            if request.url.path == "/jobs/rss/"
+            else _detail(
+                {key: value for key, value in LEGACY_JOB.items() if key != "estimatedSalary"}
+            ),
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await service.run_source(DjinniSource(client=client))
+        source = DjinniSource(client=client, metadata_enabled=True)
+        await service.run_source(source)
         assert (await matching.evaluate(BOHDAN_PROFILE)).evaluated == 1
         notifications = NotificationService(
             sqlite_session_factory, TelegramClient("synthetic-token", 1, client=client)
@@ -788,6 +1195,14 @@ async def test_migration_does_not_resend_a_previously_sent_notification(
         summary = await notifications.dispatch(
             BOHDAN_PROFILE, minimum_score=0, max_messages=10, minimum_first_seen_at=None
         )
+        bump_date = "Sun, 23 Aug 2026 15:36:45 +0300"
+        bumped = await service.run_source(source)
+        assert bumped.created == 0 and bumped.updated == 1
+        assert (await matching.evaluate(BOHDAN_PROFILE)).evaluated == 1
+        repeated = await notifications.dispatch(
+            BOHDAN_PROFILE, minimum_score=0, max_messages=10, minimum_first_seen_at=None
+        )
+        assert repeated.sent == 0 and repeated.failed == 0 and repeated.skipped_duplicate == 1
     assert summary.sent == 0 and summary.failed == 0 and summary.skipped_duplicate == 1
     async with sqlite_session_factory() as session:
         listing = await session.scalar(select(Listing))

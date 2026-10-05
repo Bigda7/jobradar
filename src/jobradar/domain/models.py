@@ -33,3 +33,4 @@ class NormalizedOpportunity(BaseModel):
     salary_currency: str | None = Field(default=None, min_length=3, max_length=3)
     salary_period: str | None = Field(default=None, max_length=50)
     published_at: datetime | None = None
+    source_updated_at: datetime | None = None

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -138,6 +139,35 @@ async def test_telegram_client_uses_bot_api_json_contract() -> None:
     assert requests[1].method == "POST"
     assert b'"parse_mode":"HTML"' in requests[1].content
     assert b'"chat_id":123' in requests[1].content
+
+
+@pytest.mark.asyncio
+async def test_prague_rules_recalculation_does_not_resend_historical_matches(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    previous = replace(BOHDAN_PROFILE, rules_version="bohdan-multi-source-v14-live-exchange-rates")
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    matching = MatchingService(sqlite_session_factory)
+    await matching.evaluate(previous)
+    client = RecordingTelegramClient()
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+    first = await service.dispatch(
+        previous,
+        minimum_score=previous.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
+    recalculated = await matching.evaluate(BOHDAN_PROFILE)
+    second = await service.dispatch(
+        BOHDAN_PROFILE,
+        minimum_score=BOHDAN_PROFILE.notification_threshold,
+        max_messages=5,
+        minimum_first_seen_at=None,
+    )
+    assert recalculated.evaluated > 0
+    assert first.sent == 2
+    assert second.sent == 0 and second.failed == 0 and second.skipped_duplicate == 2
+    assert len(client.messages) == 2
 
 
 @pytest.mark.asyncio

@@ -105,8 +105,11 @@ def build_content_hash(
     opportunity: NormalizedOpportunity,
     raw_payload: dict[str, Any],
 ) -> str:
+    normalized = opportunity.model_dump(mode="json")
+    if normalized["source_updated_at"] is None:
+        normalized.pop("source_updated_at")
     content = {
-        "normalized": opportunity.model_dump(mode="json"),
+        "normalized": normalized,
         "raw": raw_payload,
     }
     serialized = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

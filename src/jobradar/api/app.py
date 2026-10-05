@@ -2,6 +2,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -243,7 +244,7 @@ def create_app(
                     source_display_name.label("source_display_name"),
                 )
                 .where(*filters)
-                .order_by(Opportunity.published_at.desc().nullslast(), Opportunity.id.desc())
+                .order_by(_opportunity_recency().desc(), Opportunity.id.desc())
                 .limit(limit)
                 .offset(offset)
             )
@@ -362,7 +363,7 @@ def create_app(
         source_display_name = _canonical_source_display_name(selected_source_name)
         order_by = (
             (
-                Opportunity.published_at.desc().nullslast(),
+                _opportunity_recency().desc(),
                 MatchEvaluation.score.desc(),
                 Opportunity.id.desc(),
             )
@@ -376,7 +377,7 @@ def create_app(
             if match_sort == "company"
             else (
                 MatchEvaluation.score.desc(),
-                Opportunity.published_at.desc().nullslast(),
+                _opportunity_recency().desc(),
                 Opportunity.id.desc(),
             )
         )
@@ -515,6 +516,12 @@ def _canonical_source_display_name(
         .order_by(*canonical_source_link_order())
         .limit(1)
         .scalar_subquery()
+    )
+
+
+def _opportunity_recency() -> ColumnElement[datetime]:
+    return func.coalesce(
+        Opportunity.source_updated_at, Opportunity.published_at, Opportunity.first_seen_at
     )
 
 
