@@ -70,8 +70,9 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         if force_sources or await ingestion.is_source_due(
             source.name,
             poll_interval_seconds,
-            jitter_ratio=settings.source_poll_jitter_ratio,
+            jitter_ratio=0 if source.poll_from_start else settings.source_poll_jitter_ratio,
             now=cycle_started_at,
+            schedule_from_start=source.poll_from_start,
         ):
             await ingestion.run_source(source)
         else:
@@ -79,7 +80,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
                 "source_run_skipped_not_due",
                 source=source.name,
                 poll_interval_seconds=poll_interval_seconds,
-                jitter_ratio=settings.source_poll_jitter_ratio,
+                jitter_ratio=0 if source.poll_from_start else settings.source_poll_jitter_ratio,
             )
 
     if telegram_client is not None and settings.telegram_source_health_alerts_enabled:

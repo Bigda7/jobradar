@@ -40,13 +40,13 @@ class Settings(BaseSettings):
     djinni_max_items: int = Field(default=10000, ge=1, le=10000)
     djinni_max_pages: int = Field(default=20, ge=1, le=20)
     djinni_max_feed_requests: int = Field(default=512, ge=1, le=512)
-    djinni_request_delay_seconds: float = Field(default=0.8, ge=0.7, le=10)
+    djinni_request_delay_seconds: float = Field(default=60 / 95, ge=60 / 95, le=10)
     djinni_run_timeout_seconds: float = Field(default=600.0, ge=1, le=900)
     djinni_metadata_enabled: bool = True
     djinni_max_metadata_requests: int = Field(default=100, ge=1, le=100)
     djinni_metadata_request_delay_seconds: float = Field(default=2.0, ge=2, le=30)
     djinni_metadata_cache_seconds: int = Field(default=86400, ge=3600, le=604800)
-    djinni_poll_interval_seconds: int = Field(default=3600, ge=1800)
+    djinni_poll_interval_seconds: int = Field(default=900, ge=900)
     workua_source_enabled: bool = True
     workua_reader_base_url: str = "https://r.jina.ai/http://www.work.ua"
     workua_search_urls: str = (

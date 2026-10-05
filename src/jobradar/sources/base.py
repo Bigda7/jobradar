@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from jobradar.domain.enums import OpportunityKind
 from jobradar.domain.models import NormalizedOpportunity, RawListing
 from jobradar.sources.link_policy import is_trusted_source_link
+from jobradar.sources.request_budget import RequestBudget
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ class SourceRunMetrics:
     candidate_count: int = 0
     filtered_count: int = 0
     detail_failure_count: int = 0
+    metadata_deferred_count: int = 0
     page_count: int = 0
     limit_reached: bool = False
 
@@ -29,6 +31,7 @@ class BaseSource(ABC):
     display_name: str
     opportunity_kind: OpportunityKind
     deactivate_missing_listings: bool = False
+    poll_from_start: bool = False
     allowed_listing_hosts: ClassVar[frozenset[str]] = frozenset()
 
     def validate_listing_url(self, raw_listing: RawListing) -> None:
@@ -43,6 +46,14 @@ class BaseSource(ABC):
 
     def prime_listing_cache(self, listings: dict[str, CachedListing]) -> None:
         self._cached_listings = dict(listings)
+
+    def configure_request_budget(self, budget: RequestBudget) -> None:
+        self._request_budget = budget
+
+    def record_metadata_deferred(self, count: int) -> None:
+        if count < 0:
+            raise ValueError("Deferred metadata count cannot be negative")
+        self._metrics().metadata_deferred_count += count
 
     def cached_listing(self, external_id: str) -> CachedListing | None:
         return getattr(self, "_cached_listings", {}).get(external_id)

@@ -64,6 +64,8 @@ async def test_workua_failed_detail_refresh_preserves_stored_text_and_recovers(
     source.failed = True
     result = await service.run_source(source)
     assert result.detail_failures == 1
+    assert result.status is RunStatus.PARTIAL
+    assert result.errors == 1
     async with sqlite_session_factory() as session, session.begin():
         listing = await session.scalar(select(Listing))
         opportunity = await session.scalar(select(Opportunity))
@@ -71,15 +73,21 @@ async def test_workua_failed_detail_refresh_preserves_stored_text_and_recovers(
         assert listing.raw_data["description"] == opportunity.description
         assert "Full description" in opportunity.description
         assert listing.raw_data["detail_status"] == "cached"
+        assert listing.raw_data["detail_error"] == "challenge"
+        run = await session.scalar(select(SourceRun).order_by(SourceRun.id.desc()))
+        assert run is not None and "challenge" in run.error_message
+        assert run.detail_failure_count == 1
         listing.detail_fetched_at = datetime.now(UTC)
     source.failed = False
     result = await service.run_source(source)
     assert result.detail_failures == 0
+    assert result.status is RunStatus.SUCCEEDED and result.errors == 0
     assert source.detail_requests == 3
     async with sqlite_session_factory() as session:
         listing = await session.scalar(select(Listing))
         assert listing is not None
         assert listing.raw_data["detail_status"] == "complete"
+        assert listing.raw_data["detail_error"] is None
 
 
 class AlternateMockSource(MockSource):

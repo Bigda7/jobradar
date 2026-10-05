@@ -75,13 +75,18 @@ Djinni uses the provider-recommended RSS for discovery, never HTML as an RSS fai
 `DJINNI_JOBS_URL` name remains compatible with the previous default search URL; it is converted
 to RSS with the same supported query filters and enforced remote filtering when enabled.
 `DJINNI_MAX_PAGES` is retained for configuration compatibility but no longer controls requests.
-Scheduled polling intervals are unchanged. Saturated RSS feeds are automatically split by the
+Djinni becomes eligible every 15 minutes from the start of its previous scan, without polling
+jitter; actual starts depend on worker cycles and other scheduled work. Other sources retain
+their completion-based intervals and jitter. Saturated RSS feeds are automatically split by the
 provider's category catalog, then experience and English filters as needed, without widening
 configured filters. Defaults are 10000 unique items, 512 requests, a 600-second traversal budget,
-and 0.8 seconds between requests. Unresolved saturation, failed partitions or safety-budget stops
+and approximately 0.632 seconds between RSS requests (target 95/minute). Persisted reservations
+enforce at most 100 RSS attempts in a rolling 60-second window across worker restarts.
+Unresolved saturation, failed partitions or safety-budget stops
 remain observable rather than being reported as complete coverage. Missing RSS metadata is
 supplemented from the matching public JobPosting page under the provider's project-specific reply.
-Enrichment defaults to at most 100 pages per run, at least 2 seconds between page requests,
+Enrichment defaults to at most 100 pages per run and 100 attempts per rolling hour across runs
+and restarts, with at least 2 seconds between page requests,
 and a 24-hour refresh eligibility threshold. These are local safety choices, not a provider HTML
 allowance. New records and bumped records precede routine refreshes; unsuccessful attempts do not
 starve other pending records. A large backlog can delay refresh beyond 24 hours. Network stages
@@ -90,6 +95,9 @@ retain RSS records and cached facts, remain visible, and never trigger a redirec
 RSS `pubDate` is `source_updated_at`, not first publication. Djinni `published_at` stays unknown;
 the frontend distinguishes updated, published, and first-seen dates. Migration `20261005_0020`
 repairs existing Djinni date snapshots without changing IDs, sent deliveries, or other-source dates.
+Migration `20261005_0021` persists request windows and pending-metadata metrics. Planned metadata
+deferral is shown separately from actual collection errors on Sources; it does not by itself
+produce a partial-source health alert. This count describes the latest scan, not a durable job queue.
 The owner confirmed residence in Prague, Czechia. Matching accepts remote employment from any
 employer country when explicit candidate-residence requirements include Czechia or Europe;
 known incompatible country restrictions reject the vacancy. Onsite/hybrid employment requires
@@ -97,10 +105,12 @@ positive Prague workplace evidence, not merely a Czech country filter or employe
 Missing, unrecognized, pending or bump-stale metadata is reported as uncertain, not verified
 eligibility. This does not establish citizenship, work authorization or contract compatibility.
 `DJINNI_ADDITIONAL_JOBS_URLS` adds the Czech-office RSS feed to remote discovery under the same
-whole-run budgets. Other source search filters and all polling intervals remain unchanged.
+whole-run budgets. Other source search filters and polling intervals remain unchanged.
 The matching rule version is v15; sent-delivery protection and guaranteed queued retries are
 unchanged. Existing queued messages retain their original accepted snapshot across rule changes.
 See [`docs/djinni-rss-review.md`](docs/djinni-rss-review.md) for verification and limitations.
+See [`docs/source-throughput-and-recovery.md`](docs/source-throughput-and-recovery.md) for request
+budgets, Work.ua retry behavior and rollout requirements.
 Work.ua is currently implemented and enabled, but its third-party reader and public display of
 vacancy descriptions have not been cleared with Work.ua. The current engineering decision and
 the options for a further public rollout are recorded in

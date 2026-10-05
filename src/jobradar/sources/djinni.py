@@ -26,6 +26,7 @@ from jobradar.sources.djinni_rss import (
     split_partition,
 )
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
+from jobradar.sources.request_budget import MemoryRequestBudget
 from jobradar.sources.structured_data import html_to_text, parse_job_postings
 
 if TYPE_CHECKING:
@@ -55,9 +56,13 @@ class DjinniSourceError(RuntimeError):
         self.stop_traversal = stop_traversal
 
 
+class MetadataBudgetExhausted(RuntimeError):
+    pass
+
+
 class _RequestLimiter:
     def __init__(self, delay_seconds: float) -> None:
-        self._delay = max(0.7, delay_seconds)
+        self._delay = max(60 / 95, delay_seconds)
         self._next_request_at = 0.0
         self._lock = asyncio.Lock()
 
@@ -71,6 +76,7 @@ class _RequestLimiter:
 
 class DjinniSource(BaseSource):
     name = "djinni"
+    poll_from_start = True
     display_name = "Djinni"
     opportunity_kind = OpportunityKind.EMPLOYMENT
     allowed_listing_hosts = SOURCE_LISTING_HOSTS["djinni"]
@@ -85,7 +91,7 @@ class DjinniSource(BaseSource):
         client: httpx.AsyncClient | None = None,
         *,
         max_feed_requests: int = 512,
-        request_delay_seconds: float = 0.8,
+        request_delay_seconds: float = 60 / 95,
         run_timeout_seconds: float = 600.0,
         metadata_enabled: bool = False,
         max_metadata_requests: int = 100,
@@ -111,6 +117,7 @@ class DjinniSource(BaseSource):
         self._metadata_cache_seconds = metadata_cache_seconds
         self._metadata_limiter = _RequestLimiter(max(2.0, metadata_request_delay_seconds))
         self._fetching = False
+        self._request_budget = MemoryRequestBudget()
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         if self._fetching:
@@ -157,6 +164,9 @@ class DjinniSource(BaseSource):
             try:
                 listings[index] = await self._enrich_listing(client, listings[index])
                 failures = 0
+            except MetadataBudgetExhausted:
+                requests -= 1
+                break
             except (DjinniSourceError, ValueError) as error:
                 payload = dict(listings[index].payload)
                 payload["metadata_attempted_at"] = datetime.now(UTC).isoformat()
@@ -170,11 +180,7 @@ class DjinniSource(BaseSource):
                 ) or failures >= 3:
                     break
         if requests < len(pending):
-            self.mark_limit_reached()
-            self.report_warning(
-                f"Djinni retained RSS records with {len(pending) - requests} "
-                "deferred metadata refreshes."
-            )
+            self.record_metadata_deferred(len(pending) - requests)
         for listing in listings:
             yield listing
 
@@ -394,20 +400,37 @@ class DjinniSource(BaseSource):
             remaining = self._run_deadline - monotonic()
             if remaining <= 0:
                 raise DjinniSourceError("Djinni RSS traversal exceeded its time budget.")
-            async with asyncio.timeout(min(self._request_timeout_seconds, remaining)):
+            async with asyncio.timeout(remaining):
                 await (self._metadata_limiter if metadata else self._limiter).wait()
+                if metadata:
+                    if not await self._request_budget.reserve("metadata"):
+                        raise MetadataBudgetExhausted
+                else:
+                    for _ in range(100):
+                        if await self._request_budget.reserve("rss"):
+                            break
+                        await asyncio.sleep(60 / 95)
+                    else:
+                        raise DjinniSourceError("Djinni RSS request window is unavailable.")
+                if monotonic() >= self._run_deadline:
+                    raise DjinniSourceError("Djinni request deadline reached.")
                 self.record_page()
-                async with client.stream(
-                    "GET",
-                    url,
-                    follow_redirects=False,
-                    headers={
-                        "Accept": "text/html"
-                        if metadata
-                        else "application/rss+xml, application/xml"
-                    },
-                    timeout=self._request_timeout_seconds,
-                ) as response:
+                async with (
+                    asyncio.timeout(
+                        min(self._request_timeout_seconds, self._run_deadline - monotonic())
+                    ),
+                    client.stream(
+                        "GET",
+                        url,
+                        follow_redirects=False,
+                        headers={
+                            "Accept": "text/html"
+                            if metadata
+                            else "application/rss+xml, application/xml"
+                        },
+                        timeout=self._request_timeout_seconds,
+                    ) as response,
+                ):
                     response.raise_for_status()
                     content = bytearray()
                     async for chunk in response.aiter_bytes(chunk_size=65536):

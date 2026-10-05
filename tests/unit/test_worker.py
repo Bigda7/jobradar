@@ -30,6 +30,48 @@ async def _acquired_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.asyncio
+async def test_only_start_scheduled_source_disables_completion_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    class StartScheduledSource(MockSource):
+        name = "djinni"
+        poll_from_start = True
+
+    class CompletionScheduledSource(MockSource):
+        name = "workua"
+
+    settings = SimpleNamespace(
+        matching_enabled=False,
+        telegram_enabled=False,
+        source_reconciliation_max_missing_ratio=0.8,
+        source_poll_jitter_ratio=0.15,
+        source_poll_interval_seconds=lambda name: 900 if name == "djinni" else 21600,
+        employment_stale_after_days=365,
+        freelance_stale_after_days=365,
+    )
+    checks = []
+
+    async def not_due(self, name, interval, **kwargs):  # type: ignore[no-untyped-def]
+        checks.append((name, interval, kwargs["jitter_ratio"], kwargs["schedule_from_start"]))
+        return False
+
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker, "session_factory", sqlite_session_factory)
+    monkeypatch.setattr(
+        worker,
+        "build_source_registry",
+        lambda _: [
+            StartScheduledSource(),
+            CompletionScheduledSource(),
+        ],
+    )
+    monkeypatch.setattr(IngestionService, "is_source_due", not_due)
+    await worker.run_cycle()
+    assert checks == [("djinni", 900, 0, True), ("workua", 21600, 0.15, False)]
+
+
+@pytest.mark.asyncio
 async def test_background_worker_cycle_contains_failures_and_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -278,6 +278,7 @@ def _format_partial_message(source: Source, run: SourceRun) -> str:
             f"<b>Частичный сбор источника: {escape(source.display_name)}</b>",
             "Два последних запуска завершились частично.",
             f"Ошибок в последнем запуске: {run.error_count}.",
+            f"Не удалось обновить описания: {run.detail_failure_count}.",
             f"Причина: {escape(reason[:500])}",
             "Часть вакансий с этой площадки может не поступать.",
         )
@@ -288,9 +289,15 @@ def _format_recovery_message(source: Source, run: SourceRun) -> str:
     return "\n".join(
         (
             f"<b>Источник восстановлен: {escape(source.display_name)}</b>",
-            "Сбор снова работает.",
+            (
+                "Поиск вакансий снова работает, но часть описаний пока не обновилась."
+                if run.detail_failure_count
+                else "Последний сбор завершился без ошибок."
+            ),
             f"Получено кандидатов: {run.candidate_count}.",
             f"Обработано вакансий: {run.discovered_count}.",
+            f"Не удалось обновить описания: {run.detail_failure_count}.",
+            "Восстановление всех ранее пропущенных вакансий этим сообщением не подтверждается.",
         )
     )
 

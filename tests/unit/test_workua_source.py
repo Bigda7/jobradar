@@ -479,7 +479,7 @@ async def test_unavailable_search_is_reported_without_discarding_other_results()
         listings = [listing async for listing in source.fetch()]
     assert len(listings) == 1
     assert source.consume_warnings() == (
-        "Work.ua search page unavailable: https://www.work.ua/en/jobs-remote-blocked/.",
+        "Work.ua search page unavailable (challenge): https://www.work.ua/en/jobs-remote-blocked/.",
     )
 
 
