@@ -65,12 +65,23 @@ The production registry intentionally enables only four sources used in the curr
 
 | Source | Transport | Data type |
 | --- | --- | --- |
-| Djinni | public JSON-LD | employment |
+| Djinni | official filtered RSS | employment |
 | Work.ua | public pages through a read-only text reader | employment |
 | Robota.ua | public pages through a read-only text reader | employment |
 | DOU Jobs | RSS | employment |
 
 The source registry contains only these adapters.
+Djinni uses the provider-recommended RSS without HTML/JSON-LD fallback. The legacy
+`DJINNI_JOBS_URL` name remains compatible with the previous default search URL; it is converted
+to RSS with the same supported query filters and enforced remote filtering when enabled.
+`DJINNI_MAX_PAGES` is retained for configuration compatibility but no longer controls requests.
+Scheduled polling intervals are unchanged. Saturated RSS feeds are automatically split by the
+provider's category catalog, then experience and English filters as needed, without widening
+configured filters. Defaults are 10000 unique items, 512 requests, a 600-second traversal budget,
+and 0.8 seconds between requests. Unresolved saturation, failed partitions or safety-budget stops
+remain observable rather than being reported as complete coverage. Missing RSS metadata is
+preserved only for already-known listings, with its origin recorded; it may be stale.
+See [`docs/djinni-rss-review.md`](docs/djinni-rss-review.md) for verification and limitations.
 Work.ua is currently implemented and enabled, but its third-party reader and public display of
 vacancy descriptions have not been cleared with Work.ua. The current engineering decision and
 the options for a further public rollout are recorded in

@@ -17,6 +17,9 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 request_timeout_seconds=settings.djinni_request_timeout_seconds,
                 max_items=settings.djinni_max_items,
                 max_pages=settings.djinni_max_pages,
+                max_feed_requests=settings.djinni_max_feed_requests,
+                request_delay_seconds=settings.djinni_request_delay_seconds,
+                run_timeout_seconds=settings.djinni_run_timeout_seconds,
             )
         )
     if settings.workua_source_enabled:
