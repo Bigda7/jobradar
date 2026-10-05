@@ -87,6 +87,7 @@ class SourceResponse(BaseModel):
     last_candidate_count: int | None = None
     last_filtered_count: int | None = None
     last_detail_failure_count: int | None = None
+    last_metadata_deferred_count: int | None = None
     last_page_count: int | None = None
     last_limit_reached: bool | None = None
     last_created_count: int | None = None

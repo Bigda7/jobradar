@@ -1,9 +1,13 @@
+import asyncio
+import math
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
+from time import monotonic
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -12,11 +16,11 @@ import structlog
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
+from jobradar.security import redact_sensitive_text
 from jobradar.sources.base import BaseSource, CachedListing
 from jobradar.sources.detail_cache import (
     can_reuse_detail,
     discovery_fingerprint,
-    get_with_backoff,
     polite_delay,
 )
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
@@ -61,9 +65,22 @@ logger = structlog.get_logger(__name__)
 
 
 class WorkUaSourceError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, status_code: int | None = None, reason: str | None = None
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.reason = reason
+
+
+def _failure_reason(error: WorkUaSourceError) -> str:
+    if error.status_code is not None:
+        return f"HTTP {error.status_code}"
+    if error.reason in {"timeout", "transport", "request_budget", "deadline", "challenge"}:
+        return error.reason
+    if "challenge" in str(error).casefold():
+        return "challenge"
+    return "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +126,13 @@ class WorkUaSource(BaseSource):
         self._client = client
 
     async def fetch(self) -> AsyncIterator[RawListing]:
+        self._run_deadline = monotonic() + 600.0
+        self._network_requests = 0
+        self._network_request_limit = (
+            2
+            * self._retry_attempts
+            * (len(self._search_urls) * self._max_pages_per_search + self._max_items)
+        )
         seen: set[str] = set()
         yielded = 0
         successful_search_pages = 0
@@ -126,7 +150,10 @@ class WorkUaSource(BaseSource):
                         search_url=page_url,
                         error=str(error),
                     )
-                    self.report_warning(f"Work.ua search page unavailable: {page_url}.")
+                    self.report_warning(
+                        f"Work.ua search page unavailable ({_failure_reason(error)}): "
+                        f"{redact_sensitive_text(page_url)[:300]}."
+                    )
                     break
                 successful_search_pages += 1
                 self.record_candidates(len(cards))
@@ -163,6 +190,7 @@ class WorkUaSource(BaseSource):
                 cached_description = _cached_description(cached)
                 now = datetime.now(UTC)
                 detail_status = "complete"
+                detail_error: str | None = None
                 description: str | None
                 if (
                     cached is not None
@@ -196,6 +224,7 @@ class WorkUaSource(BaseSource):
                             status_code=error.status_code,
                         )
                         self.record_detail_failure()
+                        detail_error = _failure_reason(error)
                         description = cached_description or card.description
                         detail_status = "cached" if cached_description is not None else "summary"
                         if cached_description is not None and cached is not None:
@@ -208,6 +237,7 @@ class WorkUaSource(BaseSource):
                                 reason="missing_description",
                             )
                             self.record_detail_failure()
+                            detail_error = "missing_description"
                             description = cached_description or card.description
                             detail_status = (
                                 "cached" if cached_description is not None else "summary"
@@ -216,6 +246,13 @@ class WorkUaSource(BaseSource):
                                 detail_fetched_at = cached.detail_fetched_at
                         else:
                             detail_fetched_at = datetime.now(UTC)
+                if detail_error is not None:
+                    retained = "cached description" if detail_status == "cached" else "summary"
+                    self.report_warning(
+                        f"Work.ua detail unavailable ({detail_error}): "
+                        f"{redact_sensitive_text(card.url)[:300]}; "
+                        f"retained {retained}."
+                    )
                 yield RawListing(
                     external_id=card.external_id,
                     source_url=card.url,
@@ -223,6 +260,7 @@ class WorkUaSource(BaseSource):
                         **discovery_payload,
                         "description": description,
                         "detail_status": detail_status,
+                        "detail_error": detail_error,
                     },
                     detail_fetched_at=detail_fetched_at,
                 )
@@ -247,7 +285,9 @@ class WorkUaSource(BaseSource):
             no_cache=True,
         )
         if is_workua_challenge(markdown):
-            raise WorkUaSourceError("Work.ua returned a security challenge through the reader.")
+            raise WorkUaSourceError(
+                "Work.ua returned a security challenge through the reader.", reason="challenge"
+            )
         return parse_workua_markdown_cards(markdown)
 
     async def _fetch_description(self, vacancy_url: str) -> str | None:
@@ -263,7 +303,9 @@ class WorkUaSource(BaseSource):
             no_cache=True,
         )
         if is_workua_challenge(markdown):
-            raise WorkUaSourceError("Work.ua vacancy returned a security challenge.")
+            raise WorkUaSourceError(
+                "Work.ua vacancy returned a security challenge.", reason="challenge"
+            )
         return parse_workua_markdown_description(markdown)
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
@@ -325,22 +367,60 @@ class WorkUaSource(BaseSource):
         *,
         headers: dict[str, str],
     ) -> str:
-        try:
-            response = await get_with_backoff(
-                client,
-                request_url,
-                headers=headers,
-                attempts=self._retry_attempts,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as error:
-            status_code = (
-                error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
-            )
-            raise WorkUaSourceError(
-                f"Work.ua reader request failed: {error}", status_code=status_code
-            ) from error
-        return response.text
+        deadline = min(
+            getattr(self, "_run_deadline", math.inf),
+            monotonic() + min(120.0, self._request_timeout_seconds * self._retry_attempts + 30),
+        )
+        for attempt in range(self._retry_attempts):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise WorkUaSourceError("Work.ua request deadline reached.", reason="deadline")
+            if getattr(self, "_network_requests", 0) >= getattr(
+                self, "_network_request_limit", math.inf
+            ):
+                raise WorkUaSourceError("Work.ua request budget reached.", reason="request_budget")
+            self._network_requests = getattr(self, "_network_requests", 0) + 1
+            response: httpx.Response | None = None
+            try:
+                async with asyncio.timeout(min(self._request_timeout_seconds, remaining)):
+                    response = await client.get(
+                        request_url,
+                        headers=headers,
+                        timeout=min(self._request_timeout_seconds, remaining),
+                    )
+                response.raise_for_status()
+                return response.text
+            except httpx.HTTPStatusError as error:
+                status = error.response.status_code
+                failure = WorkUaSourceError(
+                    f"Work.ua reader returned HTTP {status}.", status_code=status
+                )
+                if status not in {429, 500, 502, 503, 504}:
+                    raise failure from error
+            except (httpx.TimeoutException, TimeoutError):
+                failure = WorkUaSourceError("Work.ua reader timed out.", reason="timeout")
+            except httpx.TransportError:
+                failure = WorkUaSourceError("Work.ua reader transport failed.", reason="transport")
+            except httpx.HTTPError as error:
+                raise WorkUaSourceError("Work.ua reader response is unavailable.") from error
+            if attempt + 1 >= self._retry_attempts:
+                raise failure
+            delay = float(2**attempt)
+            if response is not None and response.headers.get("Retry-After") is not None:
+                try:
+                    delay = float(response.headers["Retry-After"])
+                except ValueError:
+                    try:
+                        retry_at = parsedate_to_datetime(response.headers["Retry-After"])
+                        if retry_at.tzinfo is None:
+                            retry_at = retry_at.replace(tzinfo=UTC)
+                        delay = (retry_at - datetime.now(UTC)).total_seconds()
+                    except (ValueError, TypeError, OverflowError):
+                        pass
+            if not math.isfinite(delay) or delay > 30 or max(0.0, delay) >= deadline - monotonic():
+                raise failure
+            await asyncio.sleep(max(0.0, delay))
+        raise WorkUaSourceError("Work.ua retry attempts exhausted.")
 
 
 def _cached_description(cached: CachedListing | None) -> str | None:

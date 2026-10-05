@@ -24,6 +24,7 @@ from jobradar.ingestion.canonical import (
     refresh_opportunity_from_best_listing,
 )
 from jobradar.ingestion.deduplication import is_confident_duplicate
+from jobradar.ingestion.request_budget import DatabaseRequestBudget
 from jobradar.security import redact_sensitive_text
 from jobradar.sources.base import BaseSource, CachedListing
 
@@ -43,6 +44,7 @@ class IngestionResult:
     candidates: int = 0
     filtered: int = 0
     detail_failures: int = 0
+    metadata_deferred: int = 0
     pages: int = 0
     limit_reached: bool = False
     created: int = 0
@@ -83,11 +85,21 @@ class IngestionService:
         *,
         jitter_ratio: float = 0.15,
         now: datetime | None = None,
+        schedule_from_start: bool = False,
     ) -> bool:
         async with self._session_factory() as session:
             last_run_at = await session.scalar(
                 select(Source.last_run_at).where(Source.name == source_name)
             )
+            if schedule_from_start:
+                latest_start = await session.scalar(
+                    select(SourceRun.started_at)
+                    .join(Source)
+                    .where(Source.name == source_name)
+                    .order_by(SourceRun.started_at.desc(), SourceRun.id.desc())
+                    .limit(1)
+                )
+                last_run_at = latest_start or last_run_at
         if last_run_at is None:
             return True
         current_time = now or datetime.now(UTC)
@@ -106,6 +118,7 @@ class IngestionService:
     async def run_source(self, adapter: BaseSource) -> IngestionResult:
         source_id, run_id = await self._start_run(adapter)
         adapter.begin_run()
+        adapter.configure_request_budget(DatabaseRequestBudget(self._session_factory, source_id))
         adapter.prime_listing_cache(await self._load_listing_cache(source_id))
         result = IngestionResult(
             source_name=adapter.name,
@@ -179,6 +192,7 @@ class IngestionService:
         result.candidates = max(source_metrics.candidate_count, result.discovered)
         result.filtered = source_metrics.filtered_count
         result.detail_failures = source_metrics.detail_failure_count
+        result.metadata_deferred = source_metrics.metadata_deferred_count
         result.pages = source_metrics.page_count
         result.limit_reached = source_metrics.limit_reached
         if source_warnings:
@@ -241,6 +255,7 @@ class IngestionService:
             candidates=result.candidates,
             filtered=result.filtered,
             detail_failures=result.detail_failures,
+            metadata_deferred=result.metadata_deferred,
             pages=result.pages,
             limit_reached=result.limit_reached,
             created=result.created,
@@ -579,6 +594,7 @@ class IngestionService:
             run.candidate_count = result.candidates
             run.filtered_count = result.filtered
             run.detail_failure_count = result.detail_failures
+            run.metadata_deferred_count = result.metadata_deferred
             run.page_count = result.pages
             run.limit_reached = result.limit_reached
             run.created_count = result.created

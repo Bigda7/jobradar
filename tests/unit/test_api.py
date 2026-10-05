@@ -152,6 +152,30 @@ async def test_public_sources_hide_diagnostics_but_preserve_issue_metrics(
 
 
 @pytest.mark.asyncio
+async def test_pending_metadata_is_visible_without_exposing_request_state_or_failure(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sqlite_session_factory() as session, session.begin():
+        source = Source(name="djinni", display_name="Djinni", request_budget={"rss": [123.0]})
+        session.add(source)
+        await session.flush()
+        session.add(
+            SourceRun(source_id=source.id, status="succeeded", metadata_deferred_count=4500)
+        )
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(sqlite_session_factory)), base_url="http://test"
+    ) as client:
+        response = await client.get("/sources")
+    public = response.json()[0]
+    assert public["last_metadata_deferred_count"] == 4500
+    assert public["last_coverage_warning"] == "metadata_pending"
+    assert public["last_run_status"] == "succeeded"
+    assert public["last_error"] is None
+    assert public["last_error_count"] == 0 and public["last_limit_reached"] is False
+    assert "request_budget" not in public
+
+
+@pytest.mark.asyncio
 async def test_minimum_salary_only_compares_monthly_amounts_in_selected_currency(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -72,6 +72,7 @@ async def _create_run(
     discovered_count: int = 0,
     limit_reached: bool = False,
     error_count: int = 0,
+    detail_failure_count: int = 0,
 ) -> int:
     async with session_factory() as session, session.begin():
         run = SourceRun(
@@ -84,6 +85,7 @@ async def _create_run(
             discovered_count=discovered_count,
             limit_reached=limit_reached,
             error_count=error_count,
+            detail_failure_count=detail_failure_count,
         )
         session.add(run)
         source = await session.get(Source, source_id)
@@ -160,6 +162,32 @@ async def test_source_health_alerts_after_two_failures_and_once_on_recovery(
         assert source is not None
         assert source.failure_alert_active is False
         assert source.failure_alert_reason is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_recovery_does_not_claim_failed_descriptions_were_recovered(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _create_source(sqlite_session_factory, last_success_at=None)
+    async with sqlite_session_factory() as session, session.begin():
+        source = await session.get(Source, source_id)
+        assert source is not None
+        source.failure_alert_active = True
+        source.failure_alert_reason = "partial"
+    run_id = await _create_run(
+        sqlite_session_factory,
+        source_id=source_id,
+        status=RunStatus.SUCCEEDED,
+        started_at=datetime.now(UTC),
+        detail_failure_count=5,
+    )
+    telegram = RecordingTelegramClient()
+    result = await SourceHealthAlertService(sqlite_session_factory, telegram).process_run(run_id)
+    assert result.sent and result.event == "recovery"
+    assert "часть описаний пока не обновилась" in telegram.messages[0]
+    assert "Не удалось обновить описания: 5." in telegram.messages[0]
+    assert "без ошибок" not in telegram.messages[0]
+    assert "ранее пропущенных вакансий" in telegram.messages[0]
 
 
 @pytest.mark.asyncio

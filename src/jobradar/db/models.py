@@ -42,6 +42,9 @@ class Source(TimestampMixin, Base):
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    request_budget: Mapped[dict[str, list[float]]] = mapped_column(
+        JSON_TYPE, default=dict, server_default="{}", nullable=False
+    )
     failure_alert_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     failure_alert_reason: Mapped[str | None] = mapped_column(String(30))
     coverage_alert_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -76,6 +79,9 @@ class SourceRun(Base):
     candidate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     filtered_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     detail_failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_deferred_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     page_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     limit_reached: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -291,6 +291,7 @@ def create_app(
                     "last_candidate_count": latest_run.candidate_count,
                     "last_filtered_count": latest_run.filtered_count,
                     "last_detail_failure_count": latest_run.detail_failure_count,
+                    "last_metadata_deferred_count": latest_run.metadata_deferred_count,
                     "last_page_count": latest_run.page_count,
                     "last_limit_reached": latest_run.limit_reached,
                     "last_created_count": latest_run.created_count,
@@ -443,6 +444,8 @@ def _source_coverage_warning(run: SourceRun) -> str | None:
         return "limit_reached"
     if run.detail_failure_count > 0:
         return "detail_failures"
+    if run.metadata_deferred_count > 0:
+        return "metadata_pending"
     if run.discovered_count == 0 and run.candidate_count > 0:
         return "all_candidates_filtered"
     if run.discovered_count == 0:

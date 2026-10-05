@@ -313,7 +313,7 @@ async def test_metadata_budget_and_persisted_attempt_order_do_not_starve_other_l
         source = DjinniSource(client=client, metadata_enabled=True, max_metadata_requests=1)
         first = [listing async for listing in source.fetch()]
         assert len(first) == 2 and len(pages) == 1
-        assert source.consume_run_metrics().limit_reached
+        assert source.consume_run_metrics().metadata_deferred_count == 1
         source.prime_listing_cache(
             {
                 listing.external_id: CachedListing(listing.payload, listing.detail_fetched_at)
@@ -322,6 +322,66 @@ async def test_metadata_budget_and_persisted_attempt_order_do_not_starve_other_l
         )
         await anext(source.fetch())
         assert len(pages) == 2 and pages[0] != pages[1]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_persistent_metadata_budget_preserves_rss_without_failure(
+    fast_rss_requests: None,
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from jobradar.db.models import Source, SourceRun
+    from jobradar.domain.enums import RunStatus
+
+    now = datetime.now(UTC).timestamp()
+    async with sqlite_session_factory() as session, session.begin():
+        session.add(
+            Source(
+                name="djinni",
+                display_name="Djinni",
+                request_budget={
+                    "metadata": [now - 1000 + index * 2 for index in range(100)],
+                },
+            )
+        )
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, text=_rss(_item(), _item(844409)))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await IngestionService(sqlite_session_factory).run_source(
+            DjinniSource(client=client, metadata_enabled=True)
+        )
+    assert paths == ["/jobs/rss/"]
+    assert result.status is RunStatus.SUCCEEDED and result.errors == 0
+    assert result.metadata_deferred == 2 and result.detail_failures == 0
+    async with sqlite_session_factory() as session:
+        run = await session.scalar(select(SourceRun))
+        assert run is not None and run.metadata_deferred_count == 2
+        assert not run.limit_reached and run.warning_count == 0
+        assert await session.scalar(select(func.count()).select_from(Listing)) == 2
+
+
+@pytest.mark.asyncio
+async def test_rss_budget_wait_is_bounded_by_run_deadline_without_network_access() -> None:
+    class ExhaustedBudget:
+        async def reserve(self, category: str) -> bool:
+            return False
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(200, text=_rss(_item()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, run_timeout_seconds=0.02)
+        source.configure_request_budget(ExhaustedBudget())
+        with pytest.raises(DjinniSourceError, match="timed out"):
+            await anext(source.fetch())
+    assert calls == []
+    assert not source._fetching
 
 
 @pytest.mark.asyncio
@@ -476,6 +536,13 @@ def fast_rss_requests(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(djinni_module._RequestLimiter, "wait", no_wait)
+
+    async def allow(category: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        djinni_module.MemoryRequestBudget, "reserve", lambda self, category: allow(category)
+    )
 
 
 @pytest.mark.asyncio
@@ -689,8 +756,8 @@ async def test_limiter_spaces_requests_and_cannot_be_configured_above_provider_r
     for _ in range(101):
         await limiter.wait()
         starts.append(clock[0])
-    assert starts[-1] >= 69.9
-    assert all(sum(start <= value < start + 60 for value in starts) <= 86 for start in starts)
+    assert starts[-1] >= 60 / 95 * 100 - 0.001
+    assert all(sum(start <= value < start + 60 for value in starts) <= 96 for start in starts)
 
 
 @pytest.mark.parametrize(
