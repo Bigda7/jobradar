@@ -1,23 +1,72 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from collections import deque
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from email.utils import parsedate_to_datetime
+from time import monotonic
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
+from defusedxml import ElementTree
+from defusedxml.common import DefusedXmlException
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
 from jobradar.sources.base import BaseSource
-from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
-from jobradar.sources.structured_data import parse_job_postings
+from jobradar.sources.djinni_rss import (
+    FEED_SATURATION,
+    FeedPartition,
+    category_filter_is_ignored,
+    description_text,
+    split_partition,
+)
+from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
+from jobradar.sources.structured_data import html_to_text
 
-DEFAULT_JOBS_URL = "https://djinni.co/jobs/l-nonhr/remote/"
+if TYPE_CHECKING:
+    # Element is a type annotation only; defusedxml exclusively parses response data.
+    from xml.etree.ElementTree import Element  # nosec B405
+
+DEFAULT_JOBS_URL = "https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote"
 USER_AGENT = "JobRadar/0.2 (personal job aggregator)"
+MAX_FEED_BYTES = 5_000_000
+MAX_RUN_BYTES = 100_000_000
+CONTENT_ENCODED_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
+LEGACY_METADATA_FIELDS = (
+    "hiringOrganization",
+    "estimatedSalary",
+    "employmentType",
+    "applicantLocationRequirements",
+    "jobLocation",
+)
 
 
 class DjinniSourceError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, *, status_code: int | None = None, stop_traversal: bool = False
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.stop_traversal = stop_traversal
+
+
+class _RequestLimiter:
+    def __init__(self, delay_seconds: float) -> None:
+        self._delay = max(0.7, delay_seconds)
+        self._next_request_at = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            wait_seconds = self._next_request_at - monotonic()
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            self._next_request_at = monotonic() + self._delay
 
 
 class DjinniSource(BaseSource):
@@ -31,60 +80,160 @@ class DjinniSource(BaseSource):
         jobs_url: str = DEFAULT_JOBS_URL,
         remote_only: bool = True,
         request_timeout_seconds: float = 20.0,
-        max_items: int = 100,
+        max_items: int = 10000,
         max_pages: int = 10,
         client: httpx.AsyncClient | None = None,
+        *,
+        max_feed_requests: int = 512,
+        request_delay_seconds: float = 0.8,
+        run_timeout_seconds: float = 600.0,
     ) -> None:
-        self._jobs_url = jobs_url
-        self._remote_only = remote_only
+        self._feed_url = _feed_url(jobs_url, remote_only)
         self._request_timeout_seconds = request_timeout_seconds
         self._max_items = max_items
-        self._max_pages = max_pages
+        # Retain the legacy constructor argument; RSS does not support page traversal.
         self._client = client
+        self._max_feed_requests = max_feed_requests
+        self._run_timeout_seconds = run_timeout_seconds
+        self._limiter = _RequestLimiter(request_delay_seconds)
+        self._fetching = False
 
     async def fetch(self) -> AsyncIterator[RawListing]:
-        yielded = 0
-        malformed = 0
-        seen_ids: set[str] = set()
-        for page_number in range(1, self._max_pages + 1):
-            self.record_page()
-            html = await self._fetch_page(page_number)
-            postings = parse_job_postings(html)
-            self.record_candidates(len(postings))
-            if not postings:
-                if page_number == 1:
-                    raise DjinniSourceError("Djinni page did not contain JobPosting JSON-LD data.")
-                break
+        if self._fetching:
+            raise DjinniSourceError("A Djinni RSS fetch is already running on this adapter.")
+        self._fetching = True
+        self._run_deadline = monotonic() + self._run_timeout_seconds
+        self._run_bytes = 0
+        try:
+            if self._client is not None:
+                async for listing in self._fetch_feeds(self._client):
+                    yield listing
+            else:
+                async with httpx.AsyncClient(
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=httpx.Timeout(self._request_timeout_seconds),
+                ) as client:
+                    async for listing in self._fetch_feeds(client):
+                        yield listing
+        finally:
+            self._fetching = False
 
-            new_ids = 0
-            for posting in postings:
+    async def _fetch_feeds(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
+        configured_categories = [
+            value
+            for key, value in parse_qsl(urlsplit(self._feed_url).query)
+            if key == "primary_keyword" and value.strip()
+        ]
+        initial = FeedPartition(
+            self._feed_url,
+            configured_categories[0] if len(configured_categories) == 1 else None,
+        )
+        queue = deque([initial])
+        scheduled = {initial.url}
+        requests = 0
+        malformed = 0
+        cached_descriptions = 0
+        consecutive_failures = 0
+        seen_ids: set[str] = set()
+        observed_ids: dict[str, set[str]] = {}
+        subdivisions: dict[str, tuple[str, ...]] = {}
+        root_ids: set[str] = set()
+        catalog_heading_count = 0
+        limited = False
+        while queue:
+            if requests >= self._max_feed_requests or monotonic() >= self._run_deadline:
+                self.report_warning("Djinni RSS traversal stopped at its request or time budget.")
+                limited = True
+                break
+            partition = queue.popleft()
+            requests += 1
+            try:
+                root = await self._request(client, partition.url)
+            except DjinniSourceError as error:
+                if requests == 1:
+                    raise
+                consecutive_failures += 1
+                limited = True
+                self.report_warning(f"Djinni RSS partition failed: {error}")
+                if (
+                    error.stop_traversal
+                    or error.status_code in {403, 429}
+                    or consecutive_failures >= 3
+                ):
+                    break
+                continue
+            consecutive_failures = 0
+            items = root.findall("./channel/item")
+            self.record_candidates(len(items))
+            if category_filter_is_ignored(partition, items):
+                if requests == 1:
+                    raise DjinniSourceError(
+                        "Djinni RSS did not apply the configured category filter."
+                    )
+                # RSS channel categories include headings that are not accepted query values.
+                catalog_heading_count += 1
+                self.record_filtered(len(items))
+                continue
+            partition_ids: set[str] = set()
+            for item in items:
+                if monotonic() >= self._run_deadline:
+                    limited = True
+                    self.report_warning("Djinni RSS traversal stopped at its time budget.")
+                    break
                 try:
-                    raw_listing = _to_raw_listing(posting)
+                    raw_listing = self._rss_listing(item, partition.url)
+                    self.normalize(raw_listing)
                 except (DjinniSourceError, ValueError):
                     malformed += 1
                     self.record_filtered()
                     continue
+                partition_ids.add(raw_listing.external_id)
                 if raw_listing.external_id in seen_ids:
-                    continue
-                seen_ids.add(raw_listing.external_id)
-                new_ids += 1
-                if self._remote_only and _work_mode(posting) is not WorkMode.REMOTE:
                     self.record_filtered()
                     continue
+                if len(seen_ids) >= self._max_items:
+                    limited = True
+                    break
+                seen_ids.add(raw_listing.external_id)
+                if raw_listing.payload.get("description_origin") == "previously_stored_description":
+                    cached_descriptions += 1
                 yield raw_listing
-                yielded += 1
-                if yielded >= self._max_items:
-                    self.mark_limit_reached()
-                    if malformed:
-                        self.report_warning(
-                            f"Djinni skipped {malformed} malformed JobPosting items."
-                        )
-                    return
-
-            if new_ids == 0:
+            observed_ids[partition.url] = partition_ids
+            if requests == 1:
+                root_ids = partition_ids
+            if len(seen_ids) >= self._max_items:
+                limited = True
                 break
+            if len(items) >= FEED_SATURATION:
+                children = split_partition(partition, root)
+                children = tuple(child for child in children if child.url not in scheduled)
+                if not children:
+                    limited = True
+                else:
+                    subdivisions[partition.url] = tuple(child.url for child in children)
+                    queue.extend(children)
+                    scheduled.update(child.url for child in children)
+        for parent, children_urls in subdivisions.items():
+            covered = set().union(*(observed_ids.get(url, set()) for url in children_urls))
+            missing = observed_ids.get(parent, set()) - covered
+            if missing:
+                limited = True
+                self.report_warning(
+                    f"Djinni RSS subdivisions did not reproduce {len(missing)} parent items; "
+                    "their already-fetched descriptions were retained."
+                )
+        if catalog_heading_count and not root_ids.issubset(
+            set().union(*(values for url, values in observed_ids.items() if url != initial.url))
+        ):
+            limited = True
+        if limited:
+            self.mark_limit_reached()
         if malformed:
-            self.report_warning(f"Djinni skipped {malformed} malformed JobPosting items.")
+            self.report_warning(f"Djinni skipped {malformed} malformed RSS items.")
+        if cached_descriptions:
+            self.report_warning(
+                f"Djinni RSS omitted {cached_descriptions} descriptions; stored text was retained."
+            )
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         posting = raw_listing.payload
@@ -104,37 +253,132 @@ class DjinniSource(BaseSource):
             published_at=_datetime(posting.get("datePosted")),
         )
 
-    async def _fetch_page(self, page_number: int) -> str:
-        page_url = _page_url(self._jobs_url, page_number)
-        if self._client is not None:
-            return await self._request(self._client, page_url)
-
-        timeout = httpx.Timeout(self._request_timeout_seconds)
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
-            timeout=timeout,
-        ) as client:
-            return await self._request(client, page_url)
-
-    async def _request(self, client: httpx.AsyncClient, page_url: str) -> str:
+    async def _request(self, client: httpx.AsyncClient, feed_url: str) -> Element:
         try:
-            response = await client.get(page_url)
-            response.raise_for_status()
-        except httpx.HTTPError as error:
-            raise DjinniSourceError(f"Djinni request failed: {error}") from error
-        return response.text
+            remaining = self._run_deadline - monotonic()
+            if remaining <= 0:
+                raise DjinniSourceError("Djinni RSS traversal exceeded its time budget.")
+            async with asyncio.timeout(min(self._request_timeout_seconds, remaining)):
+                await self._limiter.wait()
+                self.record_page()
+                async with client.stream(
+                    "GET",
+                    feed_url,
+                    follow_redirects=False,
+                    headers={"Accept": "application/rss+xml, application/xml"},
+                    timeout=self._request_timeout_seconds,
+                ) as response:
+                    response.raise_for_status()
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        if len(content) + len(chunk) > MAX_FEED_BYTES:
+                            raise DjinniSourceError("Djinni RSS exceeds the response byte limit.")
+                        self._run_bytes += len(chunk)
+                        if self._run_bytes > MAX_RUN_BYTES:
+                            raise DjinniSourceError(
+                                "Djinni RSS traversal exceeds its byte budget.", stop_traversal=True
+                            )
+                        content.extend(chunk)
+            root = ElementTree.fromstring(content, forbid_dtd=True)
+            if root.tag != "rss" or root.find("channel") is None:
+                raise DjinniSourceError("Djinni response is not an RSS channel.")
+            return root
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            raise DjinniSourceError(
+                f"Djinni RSS request returned HTTP {status}.", status_code=status
+            ) from error
+        except (httpx.HTTPError, TimeoutError) as error:
+            raise DjinniSourceError("Djinni RSS request failed or timed out.") from error
+        except (ElementTree.ParseError, DefusedXmlException) as error:
+            raise DjinniSourceError(
+                "Djinni response contains invalid or unsafe RSS XML."
+            ) from error
+
+    def _rss_listing(self, item: Element, feed_url: str) -> RawListing:
+        source_url = _required_string(item.findtext("link") or item.findtext("guid"), "link")
+        if not is_trusted_source_link(source_url, self.allowed_listing_hosts):
+            raise DjinniSourceError("Djinni RSS item has an untrusted link.")
+        match = re.fullmatch(r"/jobs/(\d+)(?:-[^/]*)?/?", urlsplit(source_url).path)
+        if match is None:
+            raise DjinniSourceError("Djinni RSS item has no numeric vacancy identifier.")
+        external_id = match.group(1)
+        posting: dict[str, Any] = {}
+        cached = self.cached_listing(external_id)
+        if cached is not None:
+            posting.update(
+                {
+                    key: cached.payload[key]
+                    for key in LEGACY_METADATA_FIELDS
+                    if key in cached.payload
+                }
+            )
+            if posting:
+                posting["metadata_origin"] = "previously_stored_metadata"
+        encoded_description = item.findtext(CONTENT_ENCODED_TAG)
+        description = description_text(encoded_description or item.findtext("description") or "")
+        if not description and cached is not None:
+            description = description_text(str(cached.payload.get("description") or ""))
+            if description:
+                posting["description_origin"] = "previously_stored_description"
+        if not description:
+            raise DjinniSourceError("Djinni RSS item is missing its description.")
+        employment = dict(parse_qsl(urlsplit(feed_url).query)).get("employment")
+        if employment == "remote":
+            posting["jobLocationType"] = "TELECOMMUTE"
+        elif employment == "office":
+            posting["jobLocation"] = posting.get("jobLocation") or {"@type": "Place"}
+        posting.update(
+            {
+                "identifier": external_id,
+                "url": source_url,
+                "title": _required_string(html_to_text(item.findtext("title") or ""), "title"),
+                "description": description,
+                "datePosted": _rss_datetime(item.findtext("pubDate")),
+                "rss": {
+                    "title": item.findtext("title"),
+                    "link": item.findtext("link"),
+                    "guid": item.findtext("guid"),
+                    "description": item.findtext("description"),
+                    "pubDate": item.findtext("pubDate"),
+                    "categories": [value.text for value in item.findall("category") if value.text],
+                    **({"content_encoded": encoded_description} if encoded_description else {}),
+                },
+            }
+        )
+        return _to_raw_listing(posting)
 
 
-def _page_url(base_url: str, page_number: int) -> str:
-    if page_number <= 1:
-        return base_url
+def _feed_url(base_url: str, remote_only: bool) -> str:
+    if not is_trusted_source_link(base_url, SOURCE_LISTING_HOSTS["djinni"]):
+        raise ValueError("Djinni feed URL must use a trusted HTTPS Djinni host.")
     parsed = urlsplit(base_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query["page"] = str(page_number)
-    return urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
-    )
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "page"
+    ]
+    if parsed.path in {"/jobs/l-nonhr/remote/", "/jobs/l-nonhr/"}:
+        if not any(key == "editorial" for key, _ in query):
+            query.append(("editorial", "nonhr"))
+    elif parsed.path not in {"/jobs/", "/jobs/remote/", "/jobs/rss/"}:
+        raise ValueError("Unsupported legacy Djinni path; configure the filtered RSS URL.")
+    if remote_only or parsed.path.endswith("/remote/"):
+        query = [(key, value) for key, value in query if key != "employment"]
+        query.append(("employment", "remote"))
+    return urlunsplit((parsed.scheme, parsed.netloc, "/jobs/rss/", urlencode(query), ""))
+
+
+def _rss_datetime(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _to_raw_listing(posting: dict[str, Any]) -> RawListing:

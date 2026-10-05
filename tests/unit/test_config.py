@@ -89,11 +89,34 @@ def test_production_accepts_complete_secure_configuration() -> None:
 def test_active_source_coverage_defaults_use_audited_balanced_limits() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.djinni_max_items == 200
+    assert settings.djinni_max_items == 10000
     assert settings.djinni_max_pages == 20
     assert settings.workua_max_items == 75
     assert settings.robota_ua_max_items == 100
     assert settings.dou_jobs_max_items == 100
+
+
+def test_djinni_rss_limit_accepts_more_than_200_and_preserves_explicit_old_limit() -> None:
+    assert Settings(_env_file=None, djinni_max_items=1000).djinni_max_items == 1000
+    assert Settings(_env_file=None, djinni_max_items=200).djinni_max_items == 200
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, djinni_max_items=10001)
+
+
+@pytest.mark.parametrize(
+    "setting, value",
+    [
+        ("djinni_max_feed_requests", 0),
+        ("djinni_max_feed_requests", 513),
+        ("djinni_request_delay_seconds", 0.6),
+        ("djinni_run_timeout_seconds", 901),
+    ],
+)
+def test_djinni_rss_operating_budgets_reject_unsafe_configuration(
+    setting: str, value: float
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{setting: value})
 
 
 def test_default_registry_contains_only_retained_sources() -> None:

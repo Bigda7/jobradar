@@ -31,11 +31,14 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = "http://localhost:5173"
     mock_source_enabled: bool = False
     djinni_source_enabled: bool = True
-    djinni_jobs_url: str = "https://djinni.co/jobs/l-nonhr/remote/"
+    djinni_jobs_url: str = "https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote"
     djinni_remote_only: bool = True
     djinni_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    djinni_max_items: int = Field(default=200, ge=1, le=200)
+    djinni_max_items: int = Field(default=10000, ge=1, le=10000)
     djinni_max_pages: int = Field(default=20, ge=1, le=20)
+    djinni_max_feed_requests: int = Field(default=512, ge=1, le=512)
+    djinni_request_delay_seconds: float = Field(default=0.8, ge=0.7, le=10)
+    djinni_run_timeout_seconds: float = Field(default=600.0, ge=1, le=900)
     djinni_poll_interval_seconds: int = Field(default=3600, ge=1800)
     workua_source_enabled: bool = True
     workua_reader_base_url: str = "https://r.jina.ai/http://www.work.ua"

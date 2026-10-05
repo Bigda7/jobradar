@@ -1,6 +1,6 @@
 # Source Access Policy
 
-Last reviewed: 2026-09-28
+Last reviewed: 2026-10-05 (Djinni update; other source reviews unchanged)
 
 This document records the access method, attribution requirements, retention constraints, and
 commercial-use risk for the four sources supported by the current production registry. It is an
@@ -21,7 +21,7 @@ checked again before a public or commercial release.
 
 | Source | Access method | Current position | Attribution and retention | Commercial or multi-user action |
 | --- | --- | --- | --- | --- |
-| Djinni | Public job pages and JobPosting JSON-LD | Conditional | Keep Djinni attribution and the original URL | Request written permission before commercial use |
+| Djinni | Official filtered RSS; no HTML/JSON-LD fallback | RSS recommended and full descriptions allowed in the support reply supplied by the owner on 2026-10-05 | Keep Djinni attribution and the original URL; support states up to 100 RSS requests/minute; retention duration not specified | Reconfirm terms for a changed commercial or multi-user scope |
 | DOU Jobs | Official vacancy RSS feed | Approved | Keep DOU attribution and the original URL | Recheck feed terms before commercial launch |
 | Robota.ua | Public search pages and public vacancy details | Conditional | Preserve the original meaning and include a mandatory source link | Confirm commercial reuse before a commercial or multi-user launch |
 | Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Keep current polling and coverage unchanged; reassess terms and seek explicit permission before commercial or multi-user use |
@@ -55,13 +55,20 @@ alter the running source, remove stored listings, or make a legal determination.
 
 ## Primary References
 
+- Djinni official RSS: https://djinni.co/jobs/rss/
+- Djinni supported search filters: https://djinni.co/jobs/
+- Djinni support reply supplied by the project owner on 2026-10-05; the response and actual
+  RSS behavior are summarized in [Djinni RSS review](djinni-rss-review.md).
 - Robota.ua usage notice: https://robota.ua/?goHome=true
 - Work.ua robots directives: https://www.work.ua/robots.txt
 - Work.ua service conditions: https://www.work.ua/about-us/conditions/
 
 ## Open Source Access Questions
 
-1. Confirm commercial reuse terms for Djinni and Robota.ua before any public or commercial use.
+1. Confirm Robota.ua commercial reuse terms and re-review Djinni terms before changing the
+   current project into a commercial or multi-user product. Djinni's project-specific reply
+   recommends RSS and permits full descriptions; it does not specify a retention duration
+   or settle every possible future product use.
 2. Work.ua permission for automated collection and public display remains unverified under the
    owner's decision to keep the existing portfolio integration enabled. Commercial or multi-user
    reuse requires a separate review and explicit permission.
