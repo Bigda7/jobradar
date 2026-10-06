@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
@@ -10,23 +11,113 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar import worker
 from jobradar.db.models import (
+    Listing,
     MatchEvaluation,
     NotificationDelivery,
     NotificationScanCursor,
     Opportunity,
+    Source,
+    SourceRun,
     TelegramOpportunityMessage,
 )
-from jobradar.domain.enums import DeliveryStatus
+from jobradar.domain.enums import DeliveryStatus, RunStatus
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.notifications.currency import CurrencyConversionError, ExchangeRates
 from jobradar.notifications.scan_cursor import NotificationScanCursorService
 from jobradar.sources.mock import MockSource
+from jobradar.sources.workua import WorkUaSource
 
 
 @asynccontextmanager
 async def _acquired_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
     yield True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_kind", ["search", "detail"])
+async def test_workua_challenge_preserves_data_and_does_not_stop_other_sources(
+    blocked_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    search = (
+        '<div class="job-link"><a href="/en/jobs/123/">Python Developer</a>'
+        '<p class="ellipsis">Remote. Short summary</p></div>'
+    )
+    detail = '<div id="job-description">Full saved requirements</div>'
+    widget = '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+    challenge = "<p>Performing security verification</p>"
+    blocked = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        kind = "search" if "jobs-remote" in request.url.path else "detail"
+        if blocked and kind == blocked_kind:
+            return httpx.Response(200, text=challenge)
+        return httpx.Response(200, text=(search if kind == "search" else detail) + widget)
+
+    settings = SimpleNamespace(
+        matching_enabled=False,
+        telegram_enabled=False,
+        source_reconciliation_max_missing_ratio=0.8,
+        source_poll_jitter_ratio=0.15,
+        source_poll_interval_seconds=lambda _: 21600,
+        employment_stale_after_days=365,
+        freelance_stale_after_days=365,
+    )
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker, "session_factory", sqlite_session_factory)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            max_pages_per_search=1,
+            client=client,
+        )
+        assert (await IngestionService(sqlite_session_factory).run_source(source)).created == 1
+        async with sqlite_session_factory() as session, session.begin():
+            listing = await session.scalar(select(Listing).where(Listing.external_id == "123"))
+            assert listing is not None
+            listing.detail_fetched_at = datetime.now(UTC) - timedelta(days=2)
+            saved_timestamp = listing.detail_fetched_at.replace(tzinfo=None)
+
+        monkeypatch.setattr(worker, "build_source_registry", lambda _: [source, MockSource()])
+        blocked = True
+        await worker.run_cycle(force_sources=True)
+        async with sqlite_session_factory() as session:
+            statuses = dict(
+                (
+                    await session.execute(
+                        select(Source.name, SourceRun.status).join(SourceRun).order_by(SourceRun.id)
+                    )
+                ).all()
+            )
+            expected_status = RunStatus.FAILED if blocked_kind == "search" else RunStatus.PARTIAL
+            assert statuses == {"workua": expected_status.value, "mock": RunStatus.SUCCEEDED.value}
+            listing = await session.scalar(select(Listing).where(Listing.external_id == "123"))
+            assert listing is not None and listing.is_active
+            assert listing.raw_data["description"] == "Full saved requirements"
+            assert listing.detail_fetched_at.replace(tzinfo=None) == saved_timestamp
+            opportunity = await session.get(Opportunity, listing.opportunity_id)
+            assert opportunity is not None and opportunity.description == "Full saved requirements"
+            assert await session.scalar(select(func.count()).select_from(NotificationDelivery)) == 0
+
+        blocked = False
+        await worker.run_cycle(force_sources=True)
+        async with sqlite_session_factory() as session:
+            status = await session.scalar(
+                select(SourceRun.status)
+                .join(Source)
+                .where(Source.name == "workua")
+                .order_by(SourceRun.id.desc())
+                .limit(1)
+            )
+            assert status == RunStatus.SUCCEEDED.value
+            listing = await session.scalar(select(Listing).where(Listing.external_id == "123"))
+            assert listing is not None and listing.raw_data["detail_status"] == "complete"
+            assert listing.raw_data["detail_error"] is None
+            assert await session.scalar(select(func.count()).select_from(SourceRun)) == 5
+            assert await session.scalar(select(func.count()).select_from(Listing)) == 3
+            assert await session.scalar(select(func.count()).select_from(NotificationDelivery)) == 0
 
 
 @pytest.mark.asyncio
