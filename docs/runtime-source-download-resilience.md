@@ -19,11 +19,19 @@ Diagnostics identify the component, approved hostname and exception class or HTT
 status; they omit exception bodies, credentials and query strings.
 
 The existing immutable image, complete source coverage, artifact checksum, anonymous
-availability and registry attestation gates remain mandatory. No dependency, native
+availability and registry attestation gates remain mandatory. The packaging fix changes no native
 library version, license, application behavior, source access policy, database schema,
 matching rule, notification setting or polling budget changes. The published v1.2.17
 tag remains untouched; v1.2.18 carries the packaging fix and the prior source-resilience
 changes.
+
+After implementation, GitHub reported GHSA-5639-2j2p-m4mx for the transitive
+Alembic dependency Mako 1.4.1. The owner explicitly approved updating only Mako
+to patched 1.4.2 and continuing publication/deployment. Its locked source/wheel
+checksums are updated; all other dependency versions remain unchanged. The
+advisory describes Windows-only TemplateLookup traversal. Production is Linux
+and application/migration code does not accept user-controlled template names;
+these constraints do not substitute for installing the patched dependency.
 
 Regression tests cover primary success, bounded transient fallback, checksum failures
 on either endpoint, non-retryable HTTP responses, invalid review/redirect/size failures,
