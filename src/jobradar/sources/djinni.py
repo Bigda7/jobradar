@@ -27,6 +27,11 @@ from jobradar.sources.djinni_rss import (
     description_text,
     split_partition,
 )
+from jobradar.sources.djinni_rss_diagnostics import (
+    MAX_DIAGNOSTIC_PARENTS,
+    FeedReadDiagnostic,
+    consistency_diagnostic,
+)
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
 from jobradar.sources.request_budget import MemoryRequestBudget
 from jobradar.sources.structured_data import html_to_text, parse_job_postings
@@ -281,6 +286,10 @@ class DjinniSource(BaseSource):
         limited = False
         consistency_checked = False
         recheck_missing: dict[str, set[str]] = {}
+        first_reads: dict[str, FeedReadDiagnostic] = {}
+        rechecks: dict[str, FeedReadDiagnostic] = {}
+        scheduled_rechecks: set[str] = set()
+        stop_reason = "completed"
         while True:
             if not queue:
                 if consistency_checked or self._metadata_blocked:
@@ -303,6 +312,7 @@ class DjinniSource(BaseSource):
                         if url not in recheck_urls:
                             queue.append((partitions[url], True))
                             recheck_urls.add(url)
+                            scheduled_rechecks.add(url)
                 if not queue:
                     break
             if (
@@ -311,12 +321,23 @@ class DjinniSource(BaseSource):
             ):
                 self.report_warning("Djinni RSS traversal stopped at its request or time budget.")
                 limited = True
+                stop_reason = (
+                    "request_budget"
+                    if self._feed_request_attempts >= self._max_feed_requests
+                    else "time_budget"
+                )
                 break
             partition, is_recheck = queue.popleft()
             requests += 1
+            read = FeedReadDiagnostic(sequence=requests)
+            (rechecks if is_recheck else first_reads)[partition.url] = read
+            attempts_before = self._feed_request_attempts
+            started = monotonic()
             try:
                 root = await self._request(client, partition.url)
             except DjinniSourceError as error:
+                read.outcome = "failed"
+                read.http_status = error.status_code
                 if requests == 1:
                     raise
                 consecutive_failures += 1
@@ -328,12 +349,18 @@ class DjinniSource(BaseSource):
                     or consecutive_failures >= 3
                 ):
                     self._metadata_blocked = True
+                    stop_reason = "source_stop"
                     break
                 continue
+            finally:
+                read.attempts = self._feed_request_attempts - attempts_before
+                read.elapsed_seconds = round(monotonic() - started, 3)
             consecutive_failures = 0
             items = root.findall("./channel/item")
+            read.response_items = len(items)
             self.record_candidates(len(items))
             if category_filter_is_ignored(partition, items):
+                read.outcome = "category_ignored"
                 if requests == 1:
                     raise DjinniSourceError(
                         "Djinni RSS did not apply the configured category filter."
@@ -349,11 +376,14 @@ class DjinniSource(BaseSource):
                 catalog_heading_count += 1
                 self.record_filtered(len(items))
                 continue
+            read.outcome = "processed"
             partition_ids: set[str] = set()
             for item in items:
                 if monotonic() >= self._run_deadline:
                     limited = True
                     self.report_warning("Djinni RSS traversal stopped at its time budget.")
+                    read.outcome = "time_budget"
+                    stop_reason = "time_budget"
                     break
                 try:
                     raw_listing = self._rss_listing(item, partition.url)
@@ -368,16 +398,20 @@ class DjinniSource(BaseSource):
                     continue
                 if len(seen_ids) >= self._max_items:
                     limited = True
+                    read.outcome = "item_budget"
+                    stop_reason = "item_budget"
                     break
                 seen_ids.add(raw_listing.external_id)
                 if raw_listing.payload.get("description_origin") == "previously_stored_description":
                     cached_descriptions += 1
                 yield raw_listing
+            read.ids = partition_ids
             observed_ids.setdefault(partition.url, set()).update(partition_ids)
             if requests == 1:
                 root_ids = partition_ids
             if len(seen_ids) >= self._max_items:
                 limited = True
+                stop_reason = "item_budget"
                 break
             if len(items) >= FEED_SATURATION:
                 children = split_partition(partition, root)
@@ -395,9 +429,37 @@ class DjinniSource(BaseSource):
                             queue.append((child, False))
                             scheduled.add(child.url)
                             partitions[child.url] = child
+        diagnostics_count = 0
         for parent, children_urls in subdivisions.items():
             covered = set().union(*(observed_ids.get(url, set()) for url in children_urls))
             missing = observed_ids.get(parent, set()) - covered
+            if missing or parent in recheck_missing:
+                diagnostics_count += 1
+                if diagnostics_count <= MAX_DIAGNOSTIC_PARENTS:
+                    if parent in recheck_missing:
+                        recheck_selection = "eligible"
+                    elif not consistency_checked:
+                        recheck_selection = "not_reached"
+                    elif not all(url in observed_ids for url in children_urls):
+                        recheck_selection = "unobserved_children"
+                    elif len(missing) > MAX_RECHECK_MISSING_ITEMS:
+                        recheck_selection = "missing_count_above_ceiling"
+                    else:
+                        recheck_selection = "ineligible"
+                    logger.info(
+                        "djinni_rss_consistency_diagnostic",
+                        **consistency_diagnostic(
+                            parent,
+                            children_urls,
+                            missing | recheck_missing.get(parent, set()),
+                            first_reads,
+                            rechecks,
+                            scheduled_rechecks,
+                            remaining_missing=missing,
+                            stop_reason=stop_reason,
+                            recheck_selection=recheck_selection,
+                        ),
+                    )
             if missing:
                 limited = True
                 self.report_warning(
@@ -409,6 +471,11 @@ class DjinniSource(BaseSource):
                     "djinni_rss_consistency_recheck_resolved",
                     retained_items=len(recheck_missing[parent]),
                 )
+        if diagnostics_count > MAX_DIAGNOSTIC_PARENTS:
+            logger.info(
+                "djinni_rss_consistency_diagnostics_truncated",
+                omitted_parents=diagnostics_count - MAX_DIAGNOSTIC_PARENTS,
+            )
         if catalog_heading_count and not root_ids.issubset(
             set().union(*(values for url, values in observed_ids.items() if url != initial.url))
         ):

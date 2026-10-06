@@ -8,6 +8,7 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from jobradar.db.models import Listing, NotificationDelivery, Opportunity
 from jobradar.domain.enums import DeliveryStatus, WorkMode
@@ -735,6 +736,155 @@ async def test_stable_small_mismatch_is_not_silenced(fast_rss_requests: None) ->
         assert len([row async for row in source.fetch()]) == 100
     assert len(calls) == 3 and source.consume_run_metrics().limit_reached
     assert any("1 parent items" in warning for warning in source.consume_warnings())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "persistent",
+        "resolved",
+        "failed",
+        "ignored",
+        "budget",
+        "large",
+        "missing_child",
+        "ceiling",
+        "source_stop",
+        "time_budget",
+    ],
+)
+async def test_consistency_diagnostics_explain_actual_recheck_outcomes(
+    fast_rss_requests: None, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    counts: dict[str | None, int] = {}
+    if scenario == "ceiling":
+        monkeypatch.setattr(djinni_module, "MAX_CONSISTENCY_RECHECKS", 1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("primary_keyword")
+        counts[category] = counts.get(category, 0) + 1
+        if category is None:
+            catalog = ("Python", "JavaScript") if scenario == "ceiling" else ("Python",)
+            return httpx.Response(200, text=_catalog_feed(range(100), catalog=catalog))
+        if scenario == "missing_child" or (scenario == "failed" and counts[category] > 1):
+            return httpx.Response(502)
+        if scenario == "source_stop":
+            return httpx.Response(403)
+        if scenario == "time_budget":
+            source._run_deadline = 0.0
+        if scenario == "ignored" and counts[category] > 1:
+            return httpx.Response(200, text=_catalog_feed(range(100), category="JavaScript"))
+        identifiers = range(90) if scenario == "large" else range(99)
+        if scenario == "resolved" and counts[category] > 1:
+            identifiers = range(1, 100)
+        return httpx.Response(200, text=_catalog_feed(identifiers, category=category))
+
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            source = DjinniSource(
+                client=client, max_feed_requests=2 if scenario == "budget" else 512
+            )
+            rows = [row async for row in source.fetch()]
+    assert len(rows) == len({row.external_id for row in rows}) == 100
+    expected_calls = {
+        "persistent": 3,
+        "resolved": 3,
+        "failed": 5,
+        "ignored": 3,
+        "budget": 2,
+        "large": 2,
+        "missing_child": 4,
+        "ceiling": 4,
+        "source_stop": 2,
+        "time_budget": 2,
+    }
+    assert sum(counts.values()) == expected_calls[scenario]
+    events = [log for log in logs if log["event"] == "djinni_rss_consistency_diagnostic"]
+    assert len(events) == 1
+    diagnostic = events[0]
+    assert diagnostic["parent_read"]["sequence"] == 1
+    assert diagnostic["parent_read"]["attempts"] == 1
+    assert diagnostic["parent_read"]["response_items"] == 100
+    assert diagnostic["parent_read"]["target_ids_present"] == diagnostic["missing_ids"]
+    expected_ids = [str(value) for value in range(90, 100)] if scenario == "large" else ["99"]
+    if scenario in {"missing_child", "source_stop", "time_budget"}:
+        expected_ids = sorted(str(value) for value in range(100))[:10]
+    assert diagnostic["missing_ids"] == expected_ids
+    child = diagnostic["children"][0]
+    assert child["feed_id"] != diagnostic["parent"]["feed_id"]
+    assert child["filters"]["primary_keyword"][0].startswith("sha256:")
+    assert child["initial"]["sequence"] == 2
+    if scenario in {"persistent", "resolved", "failed", "ignored", "ceiling"}:
+        assert diagnostic["rechecks_attempted"] == 1
+        assert child["recheck_scheduled"] and child["recheck"]["sequence"] >= 3
+        assert diagnostic["recheck_selection"] == "eligible"
+    else:
+        assert diagnostic["rechecks_attempted"] == 0 and child["recheck"] is None
+    if scenario == "resolved":
+        assert diagnostic["remaining_missing_count"] == 0
+        assert child["recheck"]["target_ids_present"] == ["99"]
+        assert child["added_ids"] == child["removed_ids"] == 1
+        assert source.consume_warnings() == ()
+        assert not source.consume_run_metrics().limit_reached
+    else:
+        assert diagnostic["remaining_missing_count"] > 0
+        assert source.consume_run_metrics().limit_reached and source.consume_warnings()
+    if scenario == "failed":
+        assert child["recheck"]["outcome"] == "failed"
+        assert child["recheck"]["attempts"] == 3
+        assert child["recheck"]["http_status"] == 502
+        assert child["removed_ids"] is None
+    if scenario == "ignored":
+        assert child["recheck"]["outcome"] == "category_ignored"
+        assert child["removed_ids"] is None
+    if scenario == "budget":
+        assert diagnostic["stop_reason"] == "request_budget"
+        assert diagnostic["rechecks_scheduled"] == 1
+    if scenario == "large":
+        assert diagnostic["recheck_selection"] == "missing_count_above_ceiling"
+    if scenario == "missing_child":
+        assert diagnostic["recheck_selection"] == "unobserved_children"
+        assert diagnostic["initial_children_processed"] == 0
+        assert diagnostic["missing_ids_omitted"] == 90
+        assert child["initial"]["outcome"] == "failed"
+    if scenario == "ceiling":
+        assert diagnostic["children_count"] == 2 and diagnostic["rechecks_scheduled"] == 1
+        assert diagnostic["children"][1]["recheck_scheduled"] is False
+    if scenario == "source_stop":
+        assert diagnostic["stop_reason"] == "source_stop"
+        assert diagnostic["recheck_selection"] == "not_reached"
+        assert child["initial"]["http_status"] == 403
+    if scenario == "time_budget":
+        assert diagnostic["stop_reason"] == "time_budget"
+        assert child["initial"]["outcome"] == "time_budget"
+
+
+@pytest.mark.asyncio
+async def test_consistency_diagnostic_parent_limit_does_not_hide_warnings(
+    fast_rss_requests: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(djinni_module, "MAX_DIAGNOSTIC_PARENTS", 1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("primary_keyword")
+        if category is None:
+            body = _catalog_feed(range(100), catalog=("Python",))
+        elif "exp_level" not in request.url.params:
+            body = _catalog_feed([*range(99), 100])
+        else:
+            body = _catalog_feed(range(98))
+        return httpx.Response(200, text=body)
+
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            source = DjinniSource(client=client)
+            rows = [row async for row in source.fetch()]
+    assert len(rows) == 101
+    assert len([log for log in logs if log["event"] == "djinni_rss_consistency_diagnostic"]) == 1
+    assert logs[-1]["event"] == "djinni_rss_consistency_diagnostics_truncated"
+    assert logs[-1]["omitted_parents"] == 1
+    assert len(source.consume_warnings()) == 2 and source.consume_run_metrics().limit_reached
 
 
 @pytest.mark.asyncio

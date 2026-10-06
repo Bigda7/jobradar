@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -6,6 +7,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from jobradar.domain.enums import WorkMode
+from jobradar.sources import workua as workua_module
 from jobradar.sources.base import CachedListing
 from jobradar.sources.workua import (
     WorkUaSource,
@@ -57,6 +59,254 @@ CHALLENGE_PAGE = """
 <html><body><script src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform"></script>
 Work.ua має перевірити безпеку вашого з'єднання.</body></html>
 """
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["rate_limit", "retry_after", "deadline", "request_budget"])
+async def test_shared_stop_preserves_discoveries_without_more_requests_or_detail_waits(
+    monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    requested_paths: list[str] = []
+    delays: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/en/jobs-remote-python/":
+            if stop == "deadline":
+                source._run_deadline = 0.0
+            elif stop == "request_budget":
+                source._network_request_limit = source._network_requests
+            return httpx.Response(200, text=SEARCH_PAGE.replace(", Kyiv", ", Remote"))
+        return httpx.Response(
+            429 if stop == "rate_limit" else 503,
+            headers={"Retry-After": "0" if stop == "rate_limit" else "60"},
+        )
+
+    fetched_at = datetime.now(UTC) - timedelta(days=2)
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            source = WorkUaSource(
+                search_urls=tuple(
+                    f"https://www.work.ua/en/jobs-remote-{term}/"
+                    for term in ("python", "django", "react")
+                ),
+                reader_base_url="https://reader.test",
+                max_pages_per_search=1,
+                detail_request_delay_seconds=1.5,
+                client=client,
+            )
+            source.prime_listing_cache(
+                {
+                    "8441545": CachedListing(
+                        payload={"description": "Previously saved full description"},
+                        detail_fetched_at=fetched_at,
+                    )
+                }
+            )
+            rows = [row async for row in source.fetch()]
+    expected_paths = ["/en/jobs-remote-python/"]
+    if stop == "rate_limit":
+        expected_paths += ["/en/jobs-remote-django/"] * 2
+    elif stop == "retry_after":
+        expected_paths += ["/en/jobs-remote-django/"]
+    assert requested_paths == expected_paths
+    assert delays == ([0.0] if stop == "rate_limit" else [])
+    assert len(rows) == 2
+    assert rows[0].payload["description"] == "Previously saved full description"
+    assert rows[0].payload["detail_status"] == "cached"
+    assert rows[0].detail_fetched_at == fetched_at
+    assert rows[1].payload["description"] == rows[1].payload["summary"]
+    assert rows[1].payload["detail_status"] == "summary"
+    assert rows[1].detail_fetched_at is None
+    assert source.consume_run_metrics().detail_failure_count == 2
+    assert len(source.consume_warnings()) == 3
+    events = [log for log in logs if log["event"] == "workua_run_requests_stopped"]
+    assert len(events) == 1
+    assert events[0]["reason"] == stop
+    assert events[0]["network_requests"] == len(expected_paths)
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_run_with_no_cards_fails_once_then_next_cycle_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+    blocked = True
+
+    async def pause(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if blocked:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(
+            200, text=SEARCH_PAGE if "jobs-remote" in request.url.path else DETAIL_PAGE
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=(
+                "https://www.work.ua/en/jobs-remote-python/",
+                "https://www.work.ua/en/jobs-remote-django/",
+            ),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        with pytest.raises(WorkUaSourceError) as failure:
+            _ = [row async for row in source.fetch()]
+        assert failure.value.status_code == 429
+        assert requests == ["/en/jobs-remote-python/"] * 2
+        assert len(source.consume_warnings()) == 1
+        source.begin_run()
+        blocked = False
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 1 and rows[0].payload["detail_status"] == "complete"
+    assert source.consume_warnings() == ()
+    assert requests[2:] == [
+        "/en/jobs-remote-python/",
+        "/en/jobs-remote-django/",
+        "/en/jobs/8441545/",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_detail_pacing_cannot_wait_past_the_remaining_run_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_paths: list[str] = []
+    delays: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        source._run_deadline = workua_module.monotonic() + 0.5
+        return httpx.Response(200, text=SEARCH_PAGE.replace(", Kyiv", ", Remote"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            detail_request_delay_seconds=1.5,
+            client=client,
+        )
+        rows = [row async for row in source.fetch()]
+    assert requested_paths == ["/en/jobs-remote-python/"]
+    assert delays == [] and len(rows) == 2
+    assert all(row.payload["detail_error"] == "deadline" for row in rows)
+    assert source.consume_run_metrics().detail_failure_count == 2
+
+
+@pytest.mark.asyncio
+async def test_detail_rate_limit_preserves_other_cards_and_recovers_on_next_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+    blocked = True
+
+    async def pause(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if "jobs-remote" in request.url.path:
+            return httpx.Response(200, text=SEARCH_PAGE.replace(", Kyiv", ", Remote"))
+        if blocked:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, text=DETAIL_PAGE)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        rows = [row async for row in source.fetch()]
+        assert len(rows) == 2 and all(row.payload["detail_status"] == "summary" for row in rows)
+        assert requests == ["/en/jobs-remote-python/", "/en/jobs/8441545/", "/en/jobs/8441545/"]
+        assert source.consume_run_metrics().detail_failure_count == 2
+        assert len(source.consume_warnings()) == 2
+        source.begin_run()
+        blocked = False
+        recovered = [row async for row in source.fetch()]
+    assert len(recovered) == 2
+    assert all(row.payload["detail_status"] == "complete" for row in recovered)
+    assert (
+        source.consume_run_metrics().detail_failure_count == 0 and source.consume_warnings() == ()
+    )
+    assert requests[3:] == ["/en/jobs-remote-python/", "/en/jobs/8441545/", "/en/jobs/8441546/"]
+
+
+@pytest.mark.asyncio
+async def test_shared_stop_does_not_mark_a_reusable_fresh_description_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+    blocked = False
+
+    async def pause(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if blocked and request.url.path == "/en/jobs-remote-django/":
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(
+            200, text=SEARCH_PAGE if "jobs-remote" in request.url.path else DETAIL_PAGE
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=(
+                "https://www.work.ua/en/jobs-remote-python/",
+                "https://www.work.ua/en/jobs-remote-django/",
+            ),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        first = [row async for row in source.fetch()]
+        source.prime_listing_cache(
+            {
+                first[0].external_id: CachedListing(
+                    payload=first[0].payload,
+                    detail_fetched_at=first[0].detail_fetched_at,
+                )
+            }
+        )
+        source.begin_run()
+        requests.clear()
+        blocked = True
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 1 and rows[0].payload["detail_status"] == "complete"
+    assert rows[0].payload["detail_error"] is None
+    assert rows[0].detail_fetched_at == first[0].detail_fetched_at
+    assert requests == [
+        "/en/jobs-remote-python/",
+        "/en/jobs-remote-django/",
+        "/en/jobs-remote-django/",
+    ]
+    assert source.consume_run_metrics().detail_failure_count == 0
+    assert len(source.consume_warnings()) == 1
+
 
 MARKDOWN_SEARCH_PAGE = (
     "\n## [Backend Developer (Python, Django)]"
