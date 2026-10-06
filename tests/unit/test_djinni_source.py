@@ -537,12 +537,430 @@ def fast_rss_requests(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(djinni_module._RequestLimiter, "wait", no_wait)
 
+    async def no_retry_wait(self, seconds):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(DjinniSource, "_wait_for_rss_retry", no_retry_wait)
+
     async def allow(category: str) -> bool:
         return True
 
     monkeypatch.setattr(
         djinni_module.MemoryRequestBudget, "reserve", lambda self, category: allow(category)
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [408, 500, 502, 503, 504])
+async def test_transient_rss_error_recovers_without_partial_warning(
+    fast_rss_requests: None, status: int
+) -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url)
+        return (
+            httpx.Response(status) if len(requests) < 3 else httpx.Response(200, text=_rss(_item()))
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 1
+    assert len(requests) == source.consume_run_metrics().page_count == 3
+    assert source.consume_warnings() == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 302])
+async def test_nontransient_rss_status_is_never_retried(
+    fast_rss_requests: None, status: int
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(status, headers={"Retry-After": "10"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        with pytest.raises(DjinniSourceError):
+            await anext(source.fetch())
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_rss_transport_failure_recovers_without_exposing_exception_text(
+    fast_rss_requests: None, error_type: type[httpx.TransportError]
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        if len(calls) == 1:
+            raise error_type("Sensitive transport details", request=request)
+        return httpx.Response(200, text=_rss(_item()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 1
+    assert len(calls) == 2 and source.consume_warnings() == ()
+
+
+@pytest.mark.asyncio
+async def test_rss_retries_consume_attempt_cap_and_persistent_reservations(
+    fast_rss_requests: None,
+) -> None:
+    calls = []
+    reservations = []
+
+    class Budget:
+        async def reserve(self, category: str) -> bool:
+            reservations.append(category)
+            return True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(502)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, max_feed_requests=2)
+        source.configure_request_budget(Budget())
+        with pytest.raises(DjinniSourceError, match="request budget"):
+            await anext(source.fetch())
+    assert len(calls) == 2 and reservations == ["rss", "rss"]
+    assert source.consume_run_metrics().page_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header,expected_wait", [("5", 5.0), ("invalid", 1.0), ("-1", 1.0)])
+async def test_rss_retry_after_is_honored_with_bounded_backoff(
+    fast_rss_requests: None, monkeypatch: pytest.MonkeyPatch, header: str, expected_wait: float
+) -> None:
+    calls = []
+    waits = []
+
+    async def record_wait(self, seconds):  # type: ignore[no-untyped-def]
+        waits.append(seconds)
+
+    monkeypatch.setattr(DjinniSource, "_wait_for_rss_retry", record_wait)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return (
+            httpx.Response(503, headers={"Retry-After": header})
+            if len(calls) == 1
+            else httpx.Response(200, text=_rss(_item()))
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 1
+    assert waits == [expected_wait]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["31", "nan", "inf", "Wed, 01 Jan 2099 00:00:00 GMT"])
+async def test_excessive_retry_after_stops_without_early_retry(
+    fast_rss_requests: None, header: str
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(503, headers={"Retry-After": header})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        with pytest.raises(DjinniSourceError, match="retry wait") as caught:
+            await anext(source.fetch())
+    assert len(calls) == 1 and caught.value.stop_traversal
+
+
+@pytest.mark.asyncio
+async def test_rss_backoff_cannot_outlive_run_deadline(fast_rss_requests: None) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(502)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, run_timeout_seconds=0.5)
+        with pytest.raises(DjinniSourceError, match="retry wait"):
+            await anext(source.fetch())
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_rechecks_preserve_new_items_and_resolve_only_proven_mismatches(
+    fast_rss_requests: None,
+) -> None:
+    counts = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("primary_keyword")
+        counts[category] = counts.get(category, 0) + 1
+        if category is None:
+            body = _catalog_feed(range(100), catalog=("Python", "JavaScript"))
+        elif category == "Python":
+            identifiers = range(69) if counts[category] == 1 else [*range(70), 200]
+            body = _catalog_feed(identifiers)
+        else:
+            body = _catalog_feed(range(70, 100), category="JavaScript")
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == len({row.external_id for row in rows}) == 101
+    assert counts == {None: 1, "Python": 2, "JavaScript": 2}
+    assert source.consume_warnings() == () and not source.consume_run_metrics().limit_reached
+
+
+@pytest.mark.asyncio
+async def test_stable_small_mismatch_is_not_silenced(fast_rss_requests: None) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        if request.url.params.get("primary_keyword") is None:
+            body = _catalog_feed(range(100), catalog=("Python",))
+        else:
+            body = _catalog_feed(range(99))
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 100
+    assert len(calls) == 3 and source.consume_run_metrics().limit_reached
+    assert any("1 parent items" in warning for warning in source.consume_warnings())
+
+
+@pytest.mark.asyncio
+async def test_already_scheduled_children_still_count_toward_parent_coverage(
+    fast_rss_requests: None,
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        category = request.url.params.get("primary_keyword")
+        if category is None:
+            body = _catalog_feed(range(100), catalog=("Python", "JavaScript"))
+        elif category == "Python":
+            body = _catalog_feed(range(70))
+        else:
+            body = _catalog_feed(range(70, 100), category="JavaScript")
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(
+            client=client,
+            additional_feed_urls=(djinni_module.DEFAULT_JOBS_URL + "&primary_keyword=Python",),
+        )
+        assert len([row async for row in source.fetch()]) == 100
+    assert len(calls) == 3 and source.consume_warnings() == ()
+    assert not source.consume_run_metrics().limit_reached
+
+
+@pytest.mark.asyncio
+async def test_consistency_rechecks_share_original_attempt_budget(fast_rss_requests: None) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        body = (
+            _catalog_feed(range(100), catalog=("Python",))
+            if request.url.params.get("primary_keyword") is None
+            else _catalog_feed(range(99))
+        )
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, max_feed_requests=2)
+        assert len([row async for row in source.fetch()]) == 100
+    assert len(calls) == 2 and source.consume_run_metrics().limit_reached
+    assert source.consume_warnings()
+
+
+@pytest.mark.asyncio
+async def test_consistency_rechecks_have_a_separate_finite_ceiling(fast_rss_requests: None) -> None:
+    calls = []
+    categories = tuple(f"Category {index}" for index in range(13))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        category = request.url.params.get("primary_keyword")
+        body = (
+            _catalog_feed(range(100), catalog=categories)
+            if category is None
+            else _catalog_feed(range(99), category=category)
+        )
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 100
+    assert len(calls) == 1 + 13 + djinni_module.MAX_CONSISTENCY_RECHECKS
+    assert source.consume_run_metrics().limit_reached and source.consume_warnings()
+
+
+@pytest.mark.asyncio
+async def test_persistent_transient_rss_failure_exhausts_exactly_three_attempts(
+    fast_rss_requests: None,
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(502)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        with pytest.raises(DjinniSourceError, match="HTTP 502"):
+            await anext(source.fetch())
+    assert len(calls) == source.consume_run_metrics().page_count == 3
+    assert not source._fetching
+
+
+@pytest.mark.asyncio
+async def test_recheck_failure_cannot_hide_retained_parent_or_other_feed_records(
+    fast_rss_requests: None,
+) -> None:
+    counts = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("primary_keyword")
+        counts[category] = counts.get(category, 0) + 1
+        if category is None:
+            return httpx.Response(200, text=_catalog_feed(range(100), catalog=("Python",)))
+        if counts[category] > 1:
+            return httpx.Response(502)
+        return httpx.Response(200, text=_catalog_feed(range(99)))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        rows = [row async for row in source.fetch()]
+    assert len(rows) == 100 and counts == {None: 1, "Python": 4}
+    assert source.consume_run_metrics().limit_reached
+    warnings = source.consume_warnings()
+    assert any("HTTP 502" in warning for warning in warnings)
+    assert any("1 parent items" in warning for warning in warnings)
+
+
+@pytest.mark.asyncio
+async def test_newly_saturated_recheck_still_reports_uncertain_tail(
+    fast_rss_requests: None,
+) -> None:
+    counts = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("primary_keyword")
+        counts[category] = counts.get(category, 0) + 1
+        if category is None:
+            body = _catalog_feed(range(100), catalog=("Python",))
+        else:
+            body = _catalog_feed(range(99 if counts[category] == 1 else 100))
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 100
+    assert source.consume_run_metrics().limit_reached
+    assert any("newly saturated" in warning for warning in source.consume_warnings())
+
+
+@pytest.mark.asyncio
+async def test_recheck_ignoring_category_remains_a_coverage_failure(
+    fast_rss_requests: None,
+) -> None:
+    counts = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("primary_keyword")
+        counts[category] = counts.get(category, 0) + 1
+        if category is None:
+            body = _catalog_feed(range(100), catalog=("Python",))
+        elif counts[category] == 1:
+            body = _catalog_feed(range(99))
+        else:
+            body = _catalog_feed(range(100), category="JavaScript")
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        assert len([row async for row in source.fetch()]) == 100
+    assert source.consume_run_metrics().limit_reached
+    warnings = source.consume_warnings()
+    assert any("rechecked feed" in warning for warning in warnings)
+    assert any("1 parent items" in warning for warning in warnings)
+
+
+@pytest.mark.asyncio
+async def test_rss_retry_spacing_uses_real_limiter_and_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    starts = []
+    monkeypatch.setattr(djinni_module, "monotonic", lambda: clock[0])
+
+    async def advance(seconds):  # type: ignore[no-untyped-def]
+        clock[0] += seconds
+
+    monkeypatch.setattr(djinni_module.asyncio, "sleep", advance)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        starts.append(clock[0])
+        return httpx.Response(502) if len(starts) < 3 else httpx.Response(200, text=_rss(_item()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client)
+        source.configure_request_budget(djinni_module.MemoryRequestBudget(clock=lambda: clock[0]))
+        assert len([row async for row in source.fetch()]) == 1
+    assert starts == [0.0, 1.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_rss_retry_after_http_date_is_respected(
+    fast_rss_requests: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[no-untyped-def]
+            return datetime(2026, 10, 6, 10, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(djinni_module, "datetime", Clock)
+    assert djinni_module._retry_after_seconds("Tue, 06 Oct 2026 10:00:05 GMT") == 5.0
+    assert djinni_module._retry_after_seconds("Tue, 06 Oct 2026 09:00:00 GMT") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_rss_retry_cannot_bypass_an_exhausted_rolling_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(djinni_module, "monotonic", lambda: clock[0])
+
+    async def advance(seconds):  # type: ignore[no-untyped-def]
+        clock[0] += seconds
+
+    monkeypatch.setattr(djinni_module.asyncio, "sleep", advance)
+    budget = djinni_module.MemoryRequestBudget(clock=lambda: clock[0])
+    for _ in range(99):
+        assert await budget.reserve("rss")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(502)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = DjinniSource(client=client, run_timeout_seconds=5)
+        source.configure_request_budget(budget)
+        with pytest.raises(DjinniSourceError, match="deadline"):
+            await anext(source.fetch())
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
@@ -823,7 +1241,7 @@ async def test_repeated_partition_outage_stops_after_three_failed_requests(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         source = DjinniSource(client=client)
         assert len([listing async for listing in source.fetch()]) == 100
-    assert len(requests) == 4
+    assert len(requests) == 10
     assert source.consume_run_metrics().limit_reached
     assert sum("HTTP 503" in warning for warning in source.consume_warnings()) == 3
 
@@ -1159,7 +1577,6 @@ async def test_whole_response_deadline_is_enforced() -> None:
     [
         httpx.Response(200, content=b"x" * (MAX_FEED_BYTES + 1)),
         httpx.Response(429),
-        httpx.Response(503),
         httpx.Response(302, headers={"location": "https://djinni.co/jobs/"}),
     ],
 )
