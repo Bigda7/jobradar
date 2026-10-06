@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from jobradar.domain.enums import WorkMode
 from jobradar.sources.base import CachedListing
@@ -164,6 +165,161 @@ def test_workua_markdown_parsers_extract_current_reader_content() -> None:
 def test_workua_challenge_is_detected() -> None:
     assert is_workua_challenge(CHALLENGE_PAGE) is True
     assert is_workua_challenge(SEARCH_PAGE) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_kind", ["search", "detail"])
+@pytest.mark.parametrize("response_format", ["html", "markdown"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>',
+        '<script>const setting = "cf-chl-example";</script>',
+        '<script>const label = "performing security verification";</script>',
+        "<!-- performing security verification -->",
+    ],
+)
+async def test_valid_listing_content_is_not_discarded_for_incidental_markers(
+    page_kind: str, response_format: str, marker: str
+) -> None:
+    requests: list[str] = []
+    fixtures = {
+        ("search", "html"): SEARCH_PAGE,
+        ("search", "markdown"): MARKDOWN_SEARCH_PAGE,
+        ("detail", "html"): DETAIL_PAGE,
+        ("detail", "markdown"): MARKDOWN_DETAIL_PAGE,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_format = request.headers["X-Return-Format"]
+        requests.append(requested_format)
+        if requested_format != response_format:
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        return httpx.Response(200, text=fixtures[page_kind, response_format] + marker)
+
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            source = WorkUaSource(client=client)
+            if page_kind == "search":
+                cards = await source._fetch_search_cards(
+                    "https://www.work.ua/en/jobs-remote-python/"
+                )
+                assert cards[0].external_id == "8441545"
+            else:
+                description = await source._fetch_description(
+                    "https://www.work.ua/en/jobs/8441545/"
+                )
+                assert description is not None and "Build production Django APIs" in description
+
+    assert requests == (["html"] if response_format == "html" else ["html", "markdown"])
+    assert source.consume_warnings() == ()
+    assert logs[-1] == {
+        "event": "workua_response_classified",
+        "log_level": "info",
+        "page_kind": page_kind,
+        "response_format": response_format,
+        "classification": "content",
+        "parsed_items": 2 if (page_kind, response_format) == ("search", "html") else 1,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_kind", ["search", "detail"])
+@pytest.mark.parametrize("response_format", ["html", "markdown"])
+@pytest.mark.parametrize(
+    "security_text",
+    [
+        "Performing security verification",
+        "Work.ua має перевірити безпеку вашого з'єднання.",
+        "<p>Performing <span>security</span> verification</p>",
+        "<p>Performing&nbsp;security&#32;verification</p>",
+    ],
+)
+async def test_explicit_security_text_is_rejected_even_with_listing_shaped_content(
+    page_kind: str, response_format: str, security_text: str
+) -> None:
+    fixtures = {
+        ("search", "html"): SEARCH_PAGE,
+        ("search", "markdown"): MARKDOWN_SEARCH_PAGE,
+        ("detail", "html"): DETAIL_PAGE,
+        ("detail", "markdown"): MARKDOWN_DETAIL_PAGE,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers["X-Return-Format"] != response_format:
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        return httpx.Response(200, text=security_text + fixtures[page_kind, response_format])
+
+    with capture_logs() as logs:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            source = WorkUaSource(client=client)
+            with pytest.raises(WorkUaSourceError) as failure:
+                if page_kind == "search":
+                    await source._fetch_search_cards("https://www.work.ua/en/jobs-remote-python/")
+                else:
+                    await source._fetch_description("https://www.work.ua/en/jobs/8441545/")
+    assert failure.value.reason == "challenge"
+    assert all(log["classification"] == "challenge" for log in logs)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>',
+        '<div id="job-description"></div><script>cf-chl-example</script>',
+        '<div class="job-link"><a href="/en/jobs/1/"></a></div><script>cf-chl-example</script>',
+        '<template><div id="job-description">Fake description</div></template>cf-chl-example',
+    ],
+)
+def test_cloudflare_marker_without_listing_content_remains_a_challenge(content: str) -> None:
+    assert parse_workua_cards(content) == []
+    assert parse_workua_description(content) is None
+    assert is_workua_challenge(content) is True
+
+
+@pytest.mark.parametrize("hidden_tag", ["script", "style", "template"])
+def test_non_content_elements_do_not_pollute_listing_text(hidden_tag: str) -> None:
+    hidden = f"<{hidden_tag}>performing security verification</{hidden_tag}>"
+    search = SEARCH_PAGE.replace("Build Django APIs.", "Build Django APIs." + hidden)
+    detail = DETAIL_PAGE.replace("Write tests", "Write tests" + hidden)
+    assert parse_workua_cards(search) == parse_workua_cards(SEARCH_PAGE)
+    assert parse_workua_description(detail) == parse_workua_description(DETAIL_PAGE)
+    assert is_workua_challenge(search, has_listing_content=True) is False
+    assert is_workua_challenge(detail, has_listing_content=True) is False
+
+
+def test_self_closing_hidden_elements_do_not_hide_valid_listing_content() -> None:
+    hidden = '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"/>'
+    assert parse_workua_cards(hidden + SEARCH_PAGE) == parse_workua_cards(SEARCH_PAGE)
+    assert parse_workua_description(hidden + DETAIL_PAGE) == parse_workua_description(DETAIL_PAGE)
+
+
+def test_response_classification_does_not_log_content_or_request_credentials() -> None:
+    secret = "synthetic-secret-that-must-not-be-logged"
+    with capture_logs() as logs:
+        assert (
+            WorkUaSource._response_is_challenge(
+                CHALLENGE_PAGE + f'<input value="{secret}">', "search", "html", 0
+            )
+            is True
+        )
+        assert WorkUaSource._response_is_challenge("No vacancies", "search", "html", 0) is False
+    assert [log["classification"] for log in logs] == ["challenge", "empty"]
+    assert secret not in str(logs)
+    assert "cloudflare.com" not in str(logs)
+
+
+@pytest.mark.asyncio
+async def test_untrusted_cards_do_not_override_challenge_detection() -> None:
+    search = SEARCH_PAGE.replace("/en/jobs/", "https://untrusted.test/en/jobs/")
+    search += '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, text=search))
+    ) as client:
+        source = WorkUaSource(client=client)
+        with pytest.raises(WorkUaSourceError) as failure:
+            await source._fetch_search_cards("https://www.work.ua/en/jobs-remote-python/")
+    assert failure.value.reason == "challenge"
 
 
 @pytest.mark.asyncio

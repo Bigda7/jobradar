@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from collections import deque
 from collections.abc import AsyncIterator
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
+import structlog
 from defusedxml import ElementTree
 from defusedxml.common import DefusedXmlException
 
@@ -37,6 +39,12 @@ DEFAULT_JOBS_URL = "https://djinni.co/jobs/rss/?editorial=nonhr&employment=remot
 USER_AGENT = "JobRadar/0.2 (personal job aggregator)"
 MAX_FEED_BYTES = 5_000_000
 MAX_RUN_BYTES = 100_000_000
+RSS_REQUEST_ATTEMPTS = 3
+RSS_RETRY_STATUSES = frozenset({408, 500, 502, 503, 504})
+MAX_RSS_RETRY_WAIT = 30.0
+MAX_CONSISTENCY_RECHECKS = 12
+MAX_RECHECK_MISSING_ITEMS = 3
+logger = structlog.get_logger(__name__)
 CONTENT_ENCODED_TAG = "{http://purl.org/rss/1.0/modules/content/}encoded"
 LEGACY_METADATA_FIELDS = (
     "hiringOrganization",
@@ -49,11 +57,19 @@ LEGACY_METADATA_FIELDS = (
 
 class DjinniSourceError(RuntimeError):
     def __init__(
-        self, message: str, *, status_code: int | None = None, stop_traversal: bool = False
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        stop_traversal: bool = False,
+        retryable: bool = False,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.stop_traversal = stop_traversal
+        self.retryable = retryable
+        self.retry_after = retry_after
 
 
 class MetadataBudgetExhausted(RuntimeError):
@@ -125,6 +141,7 @@ class DjinniSource(BaseSource):
         self._fetching = True
         self._run_deadline = monotonic() + self._run_timeout_seconds
         self._run_bytes = 0
+        self._feed_request_attempts = 0
         self._metadata_blocked = False
         try:
             if self._client is not None:
@@ -237,7 +254,8 @@ class DjinniSource(BaseSource):
             self._feed_url,
             configured_categories[0] if len(configured_categories) == 1 else None,
         )
-        queue = deque([initial])
+        queue = deque([(initial, False)])
+        partitions = {initial.url: initial}
         scheduled = {initial.url}
         for url in self._additional_feed_urls:
             if url not in scheduled:
@@ -246,7 +264,9 @@ class DjinniSource(BaseSource):
                     for key, value in parse_qsl(urlsplit(url).query)
                     if key == "primary_keyword" and value.strip()
                 ]
-                queue.append(FeedPartition(url, categories[0] if len(categories) == 1 else None))
+                partition = FeedPartition(url, categories[0] if len(categories) == 1 else None)
+                queue.append((partition, False))
+                partitions[url] = partition
                 scheduled.add(url)
         configured_roots = set(scheduled)
         requests = 0
@@ -259,12 +279,40 @@ class DjinniSource(BaseSource):
         root_ids: set[str] = set()
         catalog_heading_count = 0
         limited = False
-        while queue:
-            if requests >= self._max_feed_requests or monotonic() >= self._run_deadline:
+        consistency_checked = False
+        recheck_missing: dict[str, set[str]] = {}
+        while True:
+            if not queue:
+                if consistency_checked or self._metadata_blocked:
+                    break
+                consistency_checked = True
+                recheck_urls: set[str] = set()
+                for parent, children_urls in subdivisions.items():
+                    covered = set().union(*(observed_ids.get(url, set()) for url in children_urls))
+                    missing = observed_ids.get(parent, set()) - covered
+                    if (
+                        not missing
+                        or len(missing) > MAX_RECHECK_MISSING_ITEMS
+                        or not all(url in observed_ids for url in children_urls)
+                    ):
+                        continue
+                    recheck_missing[parent] = missing
+                    for url in children_urls:
+                        if len(recheck_urls) >= MAX_CONSISTENCY_RECHECKS:
+                            break
+                        if url not in recheck_urls:
+                            queue.append((partitions[url], True))
+                            recheck_urls.add(url)
+                if not queue:
+                    break
+            if (
+                self._feed_request_attempts >= self._max_feed_requests
+                or monotonic() >= self._run_deadline
+            ):
                 self.report_warning("Djinni RSS traversal stopped at its request or time budget.")
                 limited = True
                 break
-            partition = queue.popleft()
+            partition, is_recheck = queue.popleft()
             requests += 1
             try:
                 root = await self._request(client, partition.url)
@@ -290,10 +338,12 @@ class DjinniSource(BaseSource):
                     raise DjinniSourceError(
                         "Djinni RSS did not apply the configured category filter."
                     )
-                if partition.url in configured_roots:
+                if partition.url in configured_roots or is_recheck:
                     limited = True
                     self.report_warning(
                         "Djinni RSS did not apply an additional feed's configured category filter."
+                        if partition.url in configured_roots
+                        else "Djinni RSS did not apply a rechecked feed's category filter."
                     )
                 # RSS channel categories include headings that are not accepted query values.
                 catalog_heading_count += 1
@@ -323,7 +373,7 @@ class DjinniSource(BaseSource):
                 if raw_listing.payload.get("description_origin") == "previously_stored_description":
                     cached_descriptions += 1
                 yield raw_listing
-            observed_ids[partition.url] = partition_ids
+            observed_ids.setdefault(partition.url, set()).update(partition_ids)
             if requests == 1:
                 root_ids = partition_ids
             if len(seen_ids) >= self._max_items:
@@ -331,13 +381,20 @@ class DjinniSource(BaseSource):
                 break
             if len(items) >= FEED_SATURATION:
                 children = split_partition(partition, root)
-                children = tuple(child for child in children if child.url not in scheduled)
                 if not children:
                     limited = True
+                elif is_recheck:
+                    # A newly saturated recheck cannot certify coverage of its unseen tail.
+                    if partition.url not in subdivisions:
+                        limited = True
+                        self.report_warning("Djinni RSS recheck reached a newly saturated feed.")
                 else:
                     subdivisions[partition.url] = tuple(child.url for child in children)
-                    queue.extend(children)
-                    scheduled.update(child.url for child in children)
+                    for child in children:
+                        if child.url not in scheduled:
+                            queue.append((child, False))
+                            scheduled.add(child.url)
+                            partitions[child.url] = child
         for parent, children_urls in subdivisions.items():
             covered = set().union(*(observed_ids.get(url, set()) for url in children_urls))
             missing = observed_ids.get(parent, set()) - covered
@@ -346,6 +403,11 @@ class DjinniSource(BaseSource):
                 self.report_warning(
                     f"Djinni RSS subdivisions did not reproduce {len(missing)} parent items; "
                     "their already-fetched descriptions were retained."
+                )
+            elif parent in recheck_missing:
+                logger.info(
+                    "djinni_rss_consistency_recheck_resolved",
+                    retained_items=len(recheck_missing[parent]),
                 )
         if catalog_heading_count and not root_ids.issubset(
             set().union(*(values for url, values in observed_ids.items() if url != initial.url))
@@ -381,43 +443,85 @@ class DjinniSource(BaseSource):
         )
 
     async def _request(self, client: httpx.AsyncClient, feed_url: str) -> Element:
-        content = await self._request_bytes(client, feed_url)
+        deadline = min(self._run_deadline, monotonic() + 120.0)
+        for attempt in range(RSS_REQUEST_ATTEMPTS):
+            try:
+                content = await self._request_bytes(client, feed_url, deadline=deadline)
+                break
+            except DjinniSourceError as error:
+                if (
+                    not error.retryable
+                    or error.stop_traversal
+                    or attempt + 1 == RSS_REQUEST_ATTEMPTS
+                ):
+                    raise
+                wait = max(2.0**attempt, error.retry_after or 0.0)
+                if (
+                    not math.isfinite(wait)
+                    or wait > MAX_RSS_RETRY_WAIT
+                    or wait >= deadline - monotonic()
+                ):
+                    raise DjinniSourceError(
+                        "Djinni RSS retry wait exceeds its bounded request window.",
+                        status_code=error.status_code,
+                        stop_traversal=True,
+                    ) from error
+                await self._wait_for_rss_retry(wait)
         try:
             root = ElementTree.fromstring(content, forbid_dtd=True)
             if root.tag != "rss" or root.find("channel") is None:
                 raise DjinniSourceError("Djinni response is not an RSS channel.")
+            if attempt:
+                logger.info("djinni_rss_request_recovered", attempts=attempt + 1)
             return root
         except (ElementTree.ParseError, DefusedXmlException) as error:
             raise DjinniSourceError(
                 "Djinni response contains invalid or unsafe RSS XML."
             ) from error
 
+    async def _wait_for_rss_retry(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
     async def _request_bytes(
-        self, client: httpx.AsyncClient, url: str, *, metadata: bool = False
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        metadata: bool = False,
+        deadline: float | None = None,
     ) -> bytes:
         label = "metadata" if metadata else "RSS"
+        effective_deadline = min(self._run_deadline, deadline or self._run_deadline)
         try:
-            remaining = self._run_deadline - monotonic()
+            remaining = effective_deadline - monotonic()
             if remaining <= 0:
-                raise DjinniSourceError("Djinni RSS traversal exceeded its time budget.")
+                raise DjinniSourceError(
+                    "Djinni request exceeded its time budget.", stop_traversal=True
+                )
             async with asyncio.timeout(remaining):
                 await (self._metadata_limiter if metadata else self._limiter).wait()
                 if metadata:
                     if not await self._request_budget.reserve("metadata"):
                         raise MetadataBudgetExhausted
                 else:
+                    if self._feed_request_attempts >= self._max_feed_requests:
+                        raise DjinniSourceError(
+                            "Djinni RSS traversal exceeded its request budget.", stop_traversal=True
+                        )
                     for _ in range(100):
                         if await self._request_budget.reserve("rss"):
                             break
                         await asyncio.sleep(60 / 95)
                     else:
                         raise DjinniSourceError("Djinni RSS request window is unavailable.")
-                if monotonic() >= self._run_deadline:
-                    raise DjinniSourceError("Djinni request deadline reached.")
+                if monotonic() >= effective_deadline:
+                    raise DjinniSourceError("Djinni request deadline reached.", stop_traversal=True)
+                if not metadata:
+                    self._feed_request_attempts += 1
                 self.record_page()
                 async with (
                     asyncio.timeout(
-                        min(self._request_timeout_seconds, self._run_deadline - monotonic())
+                        min(self._request_timeout_seconds, effective_deadline - monotonic())
                     ),
                     client.stream(
                         "GET",
@@ -448,10 +552,17 @@ class DjinniSource(BaseSource):
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             raise DjinniSourceError(
-                f"Djinni {label} request returned HTTP {status}.", status_code=status
+                f"Djinni {label} request returned HTTP {status}.",
+                status_code=status,
+                retryable=not metadata and status in RSS_RETRY_STATUSES,
+                retry_after=_retry_after_seconds(error.response.headers.get("Retry-After")),
             ) from error
         except (httpx.HTTPError, TimeoutError) as error:
-            raise DjinniSourceError(f"Djinni {label} request failed or timed out.") from error
+            raise DjinniSourceError(
+                f"Djinni {label} request failed or timed out.",
+                retryable=not metadata and isinstance(error, (httpx.TransportError, TimeoutError)),
+                stop_traversal=monotonic() >= effective_deadline,
+            ) from error
 
     def _rss_listing(self, item: Element, feed_url: str) -> RawListing:
         source_url = _required_string(item.findtext("link") or item.findtext("guid"), "link")
@@ -514,6 +625,22 @@ class DjinniSource(BaseSource):
         return listing.model_copy(
             update={"detail_fetched_at": cached.detail_fetched_at if cached else None}
         )
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(value)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=UTC)
+            seconds = (target - datetime.now(UTC)).total_seconds()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else math.inf
 
 
 def _metadata_priority(listing: RawListing) -> tuple[int, datetime, int]:

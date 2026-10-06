@@ -55,12 +55,11 @@ MARKDOWN_PUBLISHED_PATTERN = re.compile(
     r"job from (?P<date>[A-Z][a-z]+ \d{1,2}, \d{4})",
     flags=re.IGNORECASE,
 )
-CLOUDFLARE_MARKERS = (
-    "challenges.cloudflare.com",
-    "cf-chl-",
+SECURITY_TEXT_MARKERS = (
     "performing security verification",
     "work.ua має перевірити безпеку",
 )
+CLOUDFLARE_MARKERS = ("challenges.cloudflare.com", "cf-chl-", *SECURITY_TEXT_MARKERS)
 logger = structlog.get_logger(__name__)
 
 
@@ -273,9 +272,12 @@ class WorkUaSource(BaseSource):
         cards: list[WorkUaCard] = []
         for _ in range(self._retry_attempts):
             html = await self._fetch_page(search_url, response_format="html")
-            if is_workua_challenge(html):
-                break
             cards = parse_workua_cards(html)
+            trusted_count = sum(
+                is_trusted_source_link(card.url, self.allowed_listing_hosts) for card in cards
+            )
+            if self._response_is_challenge(html, "search", "html", trusted_count):
+                break
             if cards:
                 return cards
 
@@ -284,16 +286,20 @@ class WorkUaSource(BaseSource):
             response_format="markdown",
             no_cache=True,
         )
-        if is_workua_challenge(markdown):
+        cards = parse_workua_markdown_cards(markdown)
+        trusted_count = sum(
+            is_trusted_source_link(card.url, self.allowed_listing_hosts) for card in cards
+        )
+        if self._response_is_challenge(markdown, "search", "markdown", trusted_count):
             raise WorkUaSourceError(
                 "Work.ua returned a security challenge through the reader.", reason="challenge"
             )
-        return parse_workua_markdown_cards(markdown)
+        return cards
 
     async def _fetch_description(self, vacancy_url: str) -> str | None:
         html = await self._fetch_page(vacancy_url, response_format="html")
-        if not is_workua_challenge(html):
-            description = parse_workua_description(html)
+        description = parse_workua_description(html)
+        if not self._response_is_challenge(html, "detail", "html", int(description is not None)):
             if description is not None:
                 return description
 
@@ -302,11 +308,28 @@ class WorkUaSource(BaseSource):
             response_format="markdown",
             no_cache=True,
         )
-        if is_workua_challenge(markdown):
+        description = parse_workua_markdown_description(markdown)
+        if self._response_is_challenge(
+            markdown, "detail", "markdown", int(description is not None)
+        ):
             raise WorkUaSourceError(
                 "Work.ua vacancy returned a security challenge.", reason="challenge"
             )
-        return parse_workua_markdown_description(markdown)
+        return description
+
+    @staticmethod
+    def _response_is_challenge(
+        content: str, page_kind: str, response_format: str, parsed_items: int
+    ) -> bool:
+        challenge = is_workua_challenge(content, has_listing_content=parsed_items > 0)
+        logger.info(
+            "workua_response_classified",
+            page_kind=page_kind,
+            response_format=response_format,
+            classification="challenge" if challenge else "content" if parsed_items else "empty",
+            parsed_items=parsed_items,
+        )
+        return challenge
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         payload = raw_listing.payload
@@ -461,9 +484,34 @@ def _discovery_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class _WorkUaCardParser(HTMLParser):
+class _WorkUaTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
+        self.visible_parts: list[str] = []
+        self._hidden_tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "template"}:
+            self._hidden_tags.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in {"script", "style", "template"}:
+            self.handle_starttag(tag, attrs)
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._hidden_tags:
+            index = len(self._hidden_tags) - 1 - self._hidden_tags[::-1].index(tag)
+            del self._hidden_tags[index:]
+
+    def handle_data(self, data: str) -> None:
+        if not self._hidden_tags:
+            self.visible_parts.append(data)
+
+
+class _WorkUaCardParser(_WorkUaTextParser):
+    def __init__(self) -> None:
+        super().__init__()
         self.cards: list[WorkUaCard] = []
         self._card_depth = 0
         self._href: str | None = None
@@ -481,6 +529,9 @@ class _WorkUaCardParser(HTMLParser):
         self._expect_salary = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        super().handle_starttag(tag, attrs)
+        if self._hidden_tags:
+            return
         attributes = {key.casefold(): value for key, value in attrs}
         classes = set((attributes.get("class") or "").split())
         if tag.casefold() == "div" and "job-link" in classes and self._card_depth == 0:
@@ -512,6 +563,9 @@ class _WorkUaCardParser(HTMLParser):
             self._published_at = attributes.get("datetime")
 
     def handle_endtag(self, tag: str) -> None:
+        super().handle_endtag(tag)
+        if self._hidden_tags:
+            return
         if self._card_depth == 0:
             return
         normalized_tag = tag.casefold()
@@ -532,7 +586,7 @@ class _WorkUaCardParser(HTMLParser):
                 self._finish_card()
 
     def handle_data(self, data: str) -> None:
-        if self._card_depth == 0:
+        if self._hidden_tags or self._card_depth == 0:
             return
         value = _clean_text(data)
         if not value:
@@ -591,13 +645,16 @@ class _WorkUaCardParser(HTMLParser):
         )
 
 
-class _WorkUaDescriptionParser(HTMLParser):
+class _WorkUaDescriptionParser(_WorkUaTextParser):
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__()
         self.parts: list[str] = []
         self._capture_div_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        super().handle_starttag(tag, attrs)
+        if self._hidden_tags:
+            return
         normalized_tag = tag.casefold()
         attributes = {key.casefold(): value for key, value in attrs}
         if self._capture_div_depth and normalized_tag == "div":
@@ -606,11 +663,14 @@ class _WorkUaDescriptionParser(HTMLParser):
             self._capture_div_depth = 1
 
     def handle_endtag(self, tag: str) -> None:
+        super().handle_endtag(tag)
+        if self._hidden_tags:
+            return
         if self._capture_div_depth and tag.casefold() == "div":
             self._capture_div_depth -= 1
 
     def handle_data(self, data: str) -> None:
-        if self._capture_div_depth:
+        if not self._hidden_tags and self._capture_div_depth:
             value = _clean_text(data)
             if value:
                 self.parts.append(value)
@@ -701,9 +761,14 @@ def parse_workua_markdown_description(markdown: str) -> str | None:
     return _join_parts(parts) or None
 
 
-def is_workua_challenge(content: str) -> bool:
+def is_workua_challenge(content: str, *, has_listing_content: bool = False) -> bool:
+    parser = _WorkUaTextParser()
+    parser.feed(content)
+    visible_text = _join_parts(parser.visible_parts).casefold()
+    if any(marker in visible_text for marker in SECURITY_TEXT_MARKERS):
+        return True
     normalized = content.casefold()
-    return any(marker in normalized for marker in CLOUDFLARE_MARKERS)
+    return not has_listing_content and any(marker in normalized for marker in CLOUDFLARE_MARKERS)
 
 
 def parse_salary(value: Any) -> tuple[Decimal | None, Decimal | None, str | None]:
