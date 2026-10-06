@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import tarfile
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -235,3 +237,223 @@ def test_rejects_wrong_image_architecture(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(sources, "run_tool", lambda *args: b"amd64\n")
     with pytest.raises(ValueError, match="platform"):
         sources.collect_image("sha256:" + "a" * 64, "linux/arm64")
+
+
+@pytest.fixture
+def native_archive(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    primary, checksum = next(iter(sources.NATIVE_ARCHIVE_FALLBACKS))
+    mirror = sources.NATIVE_ARCHIVE_FALLBACKS[(primary, checksum)]
+    archive = {
+        "name": "gcc-12.4.0.tar.xz",
+        "url": primary,
+        "sha256": hashlib.sha256(b"source").hexdigest(),
+    }
+    monkeypatch.setattr(sources, "NATIVE_ARCHIVE_FALLBACKS", {(primary, archive["sha256"]): mirror})
+    return archive
+
+
+def test_native_fallback_is_pinned_to_existing_review() -> None:
+    review = json.loads(
+        (Path(__file__).resolve().parents[2] / "docs/runtime-native-sources.json").read_text()
+    )
+    archives = [
+        archive for group in review["groups"].values() for archive in group.get("archives", [])
+    ]
+    assert len(sources.NATIVE_ARCHIVE_FALLBACKS) == 1
+    for (url, checksum), mirror in sources.NATIVE_ARCHIVE_FALLBACKS.items():
+        assert any(archive["url"] == url and archive["sha256"] == checksum for archive in archives)
+        assert mirror == "https://mirrors.kernel.org/gnu/gcc/gcc-12.4.0/gcc-12.4.0.tar.xz"
+        assert sources.safe_url(mirror) == mirror
+
+
+def test_native_primary_success_does_not_contact_mirror(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str]
+) -> None:
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        return b"source"
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    assert sources.download_native_archive("gcc", native_archive) == (
+        b"source",
+        native_archive["url"],
+    )
+    assert calls == [native_archive["url"]]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        urllib.error.URLError(OSError("Network is unreachable")),
+        TimeoutError("private diagnostic"),
+        ConnectionResetError("private diagnostic"),
+        OSError("private diagnostic"),
+        *[
+            urllib.error.HTTPError("private-url", code, "private", {}, None)
+            for code in (500, 502, 503, 504)
+        ],
+    ],
+)
+def test_native_transient_failure_uses_one_checksummed_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    native_archive: dict[str, str],
+    error: Exception,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = []
+    mirror = next(iter(sources.NATIVE_ARCHIVE_FALLBACKS.values()))
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        if len(calls) == 1:
+            raise error
+        return b"source"
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    assert sources.download_native_archive("gcc", native_archive) == (b"source", mirror)
+    assert calls == [native_archive["url"], mirror]
+    output = capsys.readouterr().out
+    assert "gcc/gcc-12.4.0.tar.xz" in output
+    assert "ftp.gnu.org" in output
+    assert "private" not in output
+
+
+@pytest.mark.parametrize("code", [400, 403, 404, 408, 429])
+def test_native_non_retryable_http_response_does_not_contact_mirror(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str], code: int
+) -> None:
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        raise urllib.error.HTTPError(
+            "https://user:secret@example.invalid/?token=hidden", code, "private", {}, None
+        )
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    with pytest.raises(ValueError, match=f"ftp.gnu.org: HTTP {code}") as caught:
+        sources.download_native_archive("gcc", native_archive)
+    assert calls == [native_archive["url"]]
+    assert "secret" not in str(caught.value)
+    assert "hidden" not in str(caught.value)
+
+
+def test_native_fallback_failures_are_bounded_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str]
+) -> None:
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        raise urllib.error.URLError("secret-token")
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    with pytest.raises(ValueError, match="mirrors.kernel.org: URLError") as caught:
+        sources.download_native_archive("gcc", native_archive)
+    assert len(calls) == 2
+    assert "secret-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize("primary_fails", [False, True])
+def test_native_checksum_mismatch_never_passes_or_triggers_another_download(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str], primary_fails: bool
+) -> None:
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        if primary_fails and len(calls) == 1:
+            raise TimeoutError
+        return b"tampered"
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        sources.download_native_archive("gcc", native_archive)
+    assert len(calls) == (2 if primary_fails else 1)
+
+
+@pytest.mark.parametrize("reason", ["Source download exceeds the size limit", "Unsafe redirect"])
+def test_native_download_validation_failure_does_not_trigger_mirror(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str], reason: str
+) -> None:
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        raise ValueError(reason)
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    with pytest.raises(ValueError, match="validation failed"):
+        sources.download_native_archive("gcc", native_archive)
+    assert calls == [native_archive["url"]]
+
+
+def test_native_changed_checksum_has_no_reviewed_fallback(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str]
+) -> None:
+    native_archive["sha256"] = "a" * 64
+    calls = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        raise TimeoutError
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    with pytest.raises(ValueError, match="download failed"):
+        sources.download_native_archive("gcc", native_archive)
+    assert calls == [native_archive["url"]]
+
+
+@pytest.mark.parametrize(
+    "field,value", [("url", "https://localhost/archive"), ("sha256", "invalid")]
+)
+def test_native_invalid_review_fails_before_download(
+    monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str], field: str, value: str
+) -> None:
+    native_archive[field] = value
+
+    def fetch(url: str) -> bytes:
+        pytest.fail("Invalid review must not perform a request")
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    with pytest.raises(ValueError):
+        sources.download_native_archive("gcc", native_archive)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://mirrors.kernel.org/source",
+        "https://localhost/source",
+        "https://user:secret@mirrors.kernel.org/source",
+    ],
+)
+def test_reviewed_mirror_cannot_redirect_to_unsafe_endpoint(url: str) -> None:
+    request = urllib.request.Request("https://mirrors.kernel.org/source")
+    with pytest.raises(ValueError, match="allowed"):
+        sources.SafeRedirect().redirect_request(request, None, 302, "Found", {}, url)
+
+
+def test_native_manifest_records_successful_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_archive: dict[str, str]
+) -> None:
+    mirror = next(iter(sources.NATIVE_ARCHIVE_FALLBACKS.values()))
+
+    def fetch(url: str) -> bytes:
+        if url == native_archive["url"]:
+            raise TimeoutError
+        return b"source"
+
+    monkeypatch.setattr(sources, "fetch", fetch)
+    records, _ = sources.collect_native(
+        tmp_path,
+        {"native_files": []},
+        {"schema": 1, "files": [], "groups": {"gcc": {"archives": [native_archive]}}},
+        [],
+    )
+    assert records == [
+        {"path": "native/gcc/gcc-12.4.0.tar.xz", "sha256": native_archive["sha256"], "url": mirror}
+    ]
+    assert (tmp_path / records[0]["path"]).read_bytes() == b"source"

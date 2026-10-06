@@ -46,7 +46,7 @@
     "python:httptools:0.8.0:MIT",
     "python:httpx:0.28.1:BSD-3-Clause",
     "python:idna:3.19:BSD-3-Clause",
-    "python:mako:1.4.1:MIT",
+    "python:mako:1.4.2:MIT",
     "python:markupsafe:3.0.3:BSD-3-Clause",
     "python:psycopg-binary:3.3.4:LGPL-3.0-only",
     "python:psycopg:3.3.4:LGPL-3.0-only",

@@ -30,8 +30,15 @@ ALLOWED_HOSTS = {
     "www.python.org",
     "codeload.github.com",
     "ftp.gnu.org",
+    "mirrors.kernel.org",
 }
 MAX_DOWNLOAD = 200 * 1024 * 1024
+NATIVE_ARCHIVE_FALLBACKS = {
+    (
+        "https://ftp.gnu.org/gnu/gcc/gcc-12.4.0/gcc-12.4.0.tar.xz",
+        "704f652604ccbccb14bdabf3478c9511c89788b12cb3bbffded37341916a9175",
+    ): "https://mirrors.kernel.org/gnu/gcc/gcc-12.4.0/gcc-12.4.0.tar.xz",
+}
 
 
 def safe_url(url: str) -> str:
@@ -390,6 +397,49 @@ def native_rules(inventory: dict[str, Any], review: dict[str, Any]) -> dict[str,
     return rules
 
 
+def download_native_archive(group: str, archive: dict[str, str]) -> tuple[bytes, str]:
+    component = f"{safe_name(group)}/{safe_name(archive['name'])}"
+    checksum = archive["sha256"]
+    if not re.fullmatch(r"[a-f0-9]{64}", checksum):
+        raise ValueError(f"Invalid native source checksum: {component}")
+    primary = safe_url(archive["url"])
+    fallback = NATIVE_ARCHIVE_FALLBACKS.get((primary, checksum))
+    urls = [primary] if fallback is None else [primary, safe_url(fallback)]
+    failures = []
+    for index, url in enumerate(urls):
+        host = urllib.parse.urlsplit(url).hostname
+        retryable = False
+        try:
+            content = fetch(url)
+        except urllib.error.HTTPError as error:
+            reason = f"HTTP {error.code}"
+            retryable = error.code in {500, 502, 503, 504}
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            reason = type(error).__name__
+            retryable = True
+        except OSError as error:
+            reason = type(error).__name__
+            retryable = True
+        except ValueError:
+            raise ValueError(
+                f"Native source download validation failed: {component} ({host})"
+            ) from None
+        else:
+            if hashlib.sha256(content).hexdigest() != checksum:
+                raise ValueError(f"Native source checksum mismatch: {component} ({host})")
+            return content, url
+        failures.append(f"{host}: {reason}")
+        if not retryable or index == len(urls) - 1:
+            raise ValueError(
+                f"Native source download failed: {component} ({'; '.join(failures)})"
+            ) from None
+        print(
+            f"Native source fallback: {component} ({host}: {reason}; trying reviewed mirror)",
+            flush=True,
+        )
+    raise AssertionError("Native source download has no endpoints")
+
+
 def collect_native(
     root: Path, inventory: dict[str, Any], review: dict[str, Any], cached: list[dict[str, str]]
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
@@ -405,10 +455,7 @@ def collect_native(
             records = []
             for archive in group["archives"]:
                 filename = safe_name(archive["name"])
-                url = archive["url"]
-                content = fetch(url)
-                if hashlib.sha256(content).hexdigest() != archive["sha256"]:
-                    raise ValueError(f"Native source checksum mismatch: {name}/{filename}")
+                content, url = download_native_archive(name, archive)
                 records.append(preserve(root, f"{prefix}/{filename}", content, url))
                 for index, (member, notice) in enumerate(sorted(archive_notices(content).items())):
                     record = preserve(root, f"{prefix}/notices/{filename}-{index}.txt", notice, url)
