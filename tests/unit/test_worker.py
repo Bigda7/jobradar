@@ -35,8 +35,10 @@ async def _acquired_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("blocked_kind", ["search", "detail"])
-async def test_workua_challenge_preserves_data_and_does_not_stop_other_sources(
+@pytest.mark.parametrize(
+    "blocked_kind", ["search", "detail", "rate_limit_search", "rate_limit_detail"]
+)
+async def test_workua_upstream_failure_preserves_data_and_does_not_stop_other_sources(
     blocked_kind: str,
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: async_sessionmaker[AsyncSession],
@@ -52,7 +54,9 @@ async def test_workua_challenge_preserves_data_and_does_not_stop_other_sources(
 
     def handler(request: httpx.Request) -> httpx.Response:
         kind = "search" if "jobs-remote" in request.url.path else "detail"
-        if blocked and kind == blocked_kind:
+        if blocked and kind == blocked_kind.removeprefix("rate_limit_"):
+            if blocked_kind.startswith("rate_limit_"):
+                return httpx.Response(429, headers={"Retry-After": "0"})
             return httpx.Response(200, text=challenge)
         return httpx.Response(200, text=(search if kind == "search" else detail) + widget)
 
@@ -91,7 +95,9 @@ async def test_workua_challenge_preserves_data_and_does_not_stop_other_sources(
                     )
                 ).all()
             )
-            expected_status = RunStatus.FAILED if blocked_kind == "search" else RunStatus.PARTIAL
+            expected_status = (
+                RunStatus.FAILED if blocked_kind.endswith("search") else RunStatus.PARTIAL
+            )
             assert statuses == {"workua": expected_status.value, "mock": RunStatus.SUCCEEDED.value}
             listing = await session.scalar(select(Listing).where(Listing.external_id == "123"))
             assert listing is not None and listing.is_active

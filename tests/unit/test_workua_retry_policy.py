@@ -135,7 +135,8 @@ async def test_outer_timeout_bounds_a_slow_transport(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_run_deadline_and_request_budget_block_network_access() -> None:
+@pytest.mark.parametrize("constraint", ["request_budget", "deadline"])
+async def test_run_deadline_and_request_budget_block_network_access(constraint: str) -> None:
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -145,12 +146,38 @@ async def test_run_deadline_and_request_budget_block_network_access() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         source = WorkUaSource(client=client)
-        source._network_request_limit = 0
+        if constraint == "request_budget":
+            source._network_request_limit = 0
+        else:
+            source._run_deadline = 0
         with pytest.raises(WorkUaSourceError) as error:
             await source._request(client, "https://reader.test/page", headers={})
-        assert error.value.reason == "request_budget"
-        source._run_deadline = 0
-        with pytest.raises(WorkUaSourceError) as error:
-            await source._request(client, "https://reader.test/page", headers={})
-        assert error.value.reason == "deadline"
+        assert error.value.reason == constraint
     assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["5", "60", "nan", "inf"])
+async def test_retry_after_on_last_attempt_stops_other_logical_requests(
+    monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    requests: list[str] = []
+
+    async def pause(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", pause)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(503, headers={"Retry-After": "0" if len(requests) == 1 else header})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(client=client)
+        with pytest.raises(WorkUaSourceError) as failure:
+            await source._request(client, "https://reader.test/first", headers={})
+        assert failure.value.status_code == 503
+        with pytest.raises(WorkUaSourceError) as failure:
+            await source._request(client, "https://reader.test/second", headers={})
+        assert failure.value.status_code == 503
+    assert requests == ["/first", "/first"]

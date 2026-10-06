@@ -123,8 +123,10 @@ class WorkUaSource(BaseSource):
         self._detail_request_delay_seconds = detail_request_delay_seconds
         self._retry_attempts = retry_attempts
         self._client = client
+        self._run_stop_error: WorkUaSourceError | None = None
 
     async def fetch(self) -> AsyncIterator[RawListing]:
+        self._run_stop_error = None
         self._run_deadline = monotonic() + 600.0
         self._network_requests = 0
         self._network_request_limit = (
@@ -163,8 +165,17 @@ class WorkUaSource(BaseSource):
                     break
                 query_ids.update(card.external_id for card in new_cards)
                 card_batches.append(new_cards)
+            if self._run_stop_error is not None:
+                break
 
         if not card_batches:
+            if self._run_stop_error is not None:
+                raise WorkUaSourceError(
+                    f"Work.ua collection stopped ({_failure_reason(self._run_stop_error)}); "
+                    "no vacancy cards were collected.",
+                    status_code=self._run_stop_error.status_code,
+                    reason=self._run_stop_error.reason,
+                )
             if successful_search_pages:
                 raise WorkUaSourceError("Configured Work.ua searches returned no vacancy cards.")
             raise WorkUaSourceError("Every configured Work.ua search page failed.")
@@ -211,9 +222,19 @@ class WorkUaSource(BaseSource):
                     description = cached_description
                     detail_fetched_at = cached.detail_fetched_at
                 else:
-                    await polite_delay(self._detail_request_delay_seconds)
                     detail_fetched_at = None
                     try:
+                        self._raise_if_stopped()
+                        if self._detail_request_delay_seconds >= self._run_deadline - monotonic():
+                            self._stop_run(
+                                WorkUaSourceError(
+                                    "Work.ua detail pacing exceeds the remaining run window.",
+                                    reason="deadline",
+                                ),
+                                reason="deadline",
+                            )
+                            self._raise_if_stopped()
+                        await polite_delay(self._detail_request_delay_seconds)
                         description = await self._fetch_description(card.url)
                     except WorkUaSourceError as error:
                         logger.warning(
@@ -395,13 +416,10 @@ class WorkUaSource(BaseSource):
             monotonic() + min(120.0, self._request_timeout_seconds * self._retry_attempts + 30),
         )
         for attempt in range(self._retry_attempts):
+            self._raise_if_stopped()
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise WorkUaSourceError("Work.ua request deadline reached.", reason="deadline")
-            if getattr(self, "_network_requests", 0) >= getattr(
-                self, "_network_request_limit", math.inf
-            ):
-                raise WorkUaSourceError("Work.ua request budget reached.", reason="request_budget")
             self._network_requests = getattr(self, "_network_requests", 0) + 1
             response: httpx.Response | None = None
             try:
@@ -426,10 +444,11 @@ class WorkUaSource(BaseSource):
                 failure = WorkUaSourceError("Work.ua reader transport failed.", reason="transport")
             except httpx.HTTPError as error:
                 raise WorkUaSourceError("Work.ua reader response is unavailable.") from error
-            if attempt + 1 >= self._retry_attempts:
-                raise failure
             delay = float(2**attempt)
-            if response is not None and response.headers.get("Retry-After") is not None:
+            has_retry_after = (
+                response is not None and response.headers.get("Retry-After") is not None
+            )
+            if has_retry_after and response is not None:
                 try:
                     delay = float(response.headers["Retry-After"])
                 except ValueError:
@@ -440,10 +459,49 @@ class WorkUaSource(BaseSource):
                         delay = (retry_at - datetime.now(UTC)).total_seconds()
                     except (ValueError, TypeError, OverflowError):
                         pass
+            if attempt + 1 >= self._retry_attempts:
+                if failure.status_code == 429:
+                    self._stop_run(failure, reason="rate_limit")
+                elif has_retry_after and (not math.isfinite(delay) or delay > 0):
+                    self._stop_run(failure, reason="retry_after")
+                raise failure
             if not math.isfinite(delay) or delay > 30 or max(0.0, delay) >= deadline - monotonic():
+                if failure.status_code == 429:
+                    self._stop_run(failure, reason="rate_limit")
+                elif has_retry_after:
+                    self._stop_run(failure, reason="retry_after")
                 raise failure
             await asyncio.sleep(max(0.0, delay))
         raise WorkUaSourceError("Work.ua retry attempts exhausted.")
+
+    def _stop_run(self, error: WorkUaSourceError, *, reason: str) -> None:
+        if self._run_stop_error is not None:
+            return
+        self._run_stop_error = error
+        logger.info(
+            "workua_run_requests_stopped",
+            reason=reason,
+            status_code=error.status_code,
+            network_requests=getattr(self, "_network_requests", 0),
+        )
+
+    def _raise_if_stopped(self) -> None:
+        if self._run_stop_error is None:
+            if monotonic() >= getattr(self, "_run_deadline", math.inf):
+                self._stop_run(
+                    WorkUaSourceError("Work.ua run deadline reached.", reason="deadline"),
+                    reason="deadline",
+                )
+            elif getattr(self, "_network_requests", 0) >= getattr(
+                self, "_network_request_limit", math.inf
+            ):
+                self._stop_run(
+                    WorkUaSourceError("Work.ua request budget reached.", reason="request_budget"),
+                    reason="request_budget",
+                )
+        if self._run_stop_error is not None:
+            error = self._run_stop_error
+            raise WorkUaSourceError(str(error), status_code=error.status_code, reason=error.reason)
 
 
 def _cached_description(cached: CachedListing | None) -> str | None:
