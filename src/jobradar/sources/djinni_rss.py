@@ -30,6 +30,7 @@ MAX_CATALOG_CATEGORIES = 250
 class FeedPartition:
     url: str
     expected_category: str | None = None
+    split_categories: bool = True
 
 
 def split_partition(partition: FeedPartition, root: Element) -> tuple[FeedPartition, ...]:
@@ -37,7 +38,7 @@ def split_partition(partition: FeedPartition, root: Element) -> tuple[FeedPartit
     categories = list(
         dict.fromkeys(value for key, value in query if key == "primary_keyword" and value.strip())
     )
-    if len(categories) != 1:
+    if partition.split_categories and len(categories) != 1:
         if not categories:
             categories = list(
                 dict.fromkeys(
@@ -46,12 +47,25 @@ def split_partition(partition: FeedPartition, root: Element) -> tuple[FeedPartit
                     if category.text and category.text.strip()
                 )
             )
-        if not categories or len(categories) > MAX_CATALOG_CATEGORIES:
+        if len(categories) > MAX_CATALOG_CATEGORIES:
             return ()
-        return tuple(
+        children = tuple(
             FeedPartition(_replace_filter(partition.url, "primary_keyword", category), category)
             for category in categories
         )
+        if any(
+            not any(
+                category.text and category.text.strip() for category in item.findall("category")
+            )
+            for item in root.findall("./channel/item")
+        ):
+            # Category filters cannot cover records that have no category. Keep a parallel
+            # experience/English traversal within the same run budgets and original filters.
+            children += split_partition(
+                FeedPartition(partition.url, partition.expected_category, split_categories=False),
+                root,
+            )
+        return children
     for key, defaults in (("exp_level", EXPERIENCE_FILTERS), ("english_level", ENGLISH_FILTERS)):
         values = list(dict.fromkeys(value for name, value in query if name == key))
         if len(values) == 1:
@@ -59,7 +73,8 @@ def split_partition(partition: FeedPartition, root: Element) -> tuple[FeedPartit
         return tuple(
             FeedPartition(
                 _replace_filter(partition.url, key, value),
-                partition.expected_category or categories[0],
+                partition.expected_category or (categories[0] if len(categories) == 1 else None),
+                split_categories=partition.split_categories,
             )
             for value in (values or defaults)
         )

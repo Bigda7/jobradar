@@ -1,5 +1,10 @@
 # Djinni RSS Consistency Diagnostics
 
+The diagnostic-only package below is historical and was deployed in v1.2.19. The v1.2.20
+behavior follow-up is documented in [RSS coverage](djinni-rss-coverage.md).
+That package changes traversal/recheck allocation, not these original
+diagnostic-only guarantees. Consult the workspace handoff for the current production state.
+
 Status: implemented and verified on 2026-10-06; owner authorized combined v1.2.19 publication
 and deployment. Runtime rollout evidence is recorded separately in the workspace handoff.
 Production baseline is v1.2.18. No migration, API contract, dependency or source-policy change.
