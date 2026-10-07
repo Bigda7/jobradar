@@ -31,6 +31,7 @@ from jobradar.sources.djinni_rss_diagnostics import (
     MAX_DIAGNOSTIC_PARENTS,
     FeedReadDiagnostic,
     consistency_diagnostic,
+    feed_identity,
 )
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
 from jobradar.sources.request_budget import MemoryRequestBudget
@@ -280,6 +281,8 @@ class DjinniSource(BaseSource):
         consecutive_failures = 0
         seen_ids: set[str] = set()
         observed_ids: dict[str, set[str]] = {}
+        ignored_categories: set[str] = set()
+        catalog_partitions: set[str] = set()
         subdivisions: dict[str, tuple[str, ...]] = {}
         root_ids: set[str] = set()
         catalog_heading_count = 0
@@ -296,23 +299,36 @@ class DjinniSource(BaseSource):
                     break
                 consistency_checked = True
                 recheck_urls: set[str] = set()
+                parent_candidates: deque[deque[str]] = deque()
                 for parent, children_urls in subdivisions.items():
                     covered = set().union(*(observed_ids.get(url, set()) for url in children_urls))
                     missing = observed_ids.get(parent, set()) - covered
                     if (
                         not missing
                         or len(missing) > MAX_RECHECK_MISSING_ITEMS
-                        or not all(url in observed_ids for url in children_urls)
+                        or not all(
+                            url in observed_ids or url in ignored_categories
+                            for url in children_urls
+                        )
                     ):
                         continue
                     recheck_missing[parent] = missing
-                    for url in children_urls:
-                        if len(recheck_urls) >= MAX_CONSISTENCY_RECHECKS:
-                            break
+                    parent_candidates.append(
+                        deque(url for url in children_urls if url not in ignored_categories)
+                    )
+                # Give each affected parent one child visit per round before allocating
+                # another. Shared children consume only one visit from the existing ceiling.
+                while parent_candidates and len(recheck_urls) < MAX_CONSISTENCY_RECHECKS:
+                    candidates = parent_candidates.popleft()
+                    while candidates:
+                        url = candidates.popleft()
                         if url not in recheck_urls:
                             queue.append((partitions[url], True))
                             recheck_urls.add(url)
                             scheduled_rechecks.add(url)
+                            break
+                    if candidates:
+                        parent_candidates.append(candidates)
                 if not queue:
                     break
             if (
@@ -365,14 +381,24 @@ class DjinniSource(BaseSource):
                     raise DjinniSourceError(
                         "Djinni RSS did not apply the configured category filter."
                     )
-                if partition.url in configured_roots or is_recheck:
+                if (
+                    partition.url in configured_roots
+                    or is_recheck
+                    or partition.url not in catalog_partitions
+                ):
                     limited = True
                     self.report_warning(
                         "Djinni RSS did not apply an additional feed's configured category filter."
                         if partition.url in configured_roots
-                        else "Djinni RSS did not apply a rechecked feed's category filter."
+                        else (
+                            "Djinni RSS did not apply a rechecked feed's category filter."
+                            if is_recheck
+                            else "Djinni RSS ignored a subdivision's configured category filter."
+                        )
                     )
                 # RSS channel categories include headings that are not accepted query values.
+                if not is_recheck and partition.url in catalog_partitions:
+                    ignored_categories.add(partition.url)
                 catalog_heading_count += 1
                 self.record_filtered(len(items))
                 continue
@@ -424,6 +450,17 @@ class DjinniSource(BaseSource):
                         self.report_warning("Djinni RSS recheck reached a newly saturated feed.")
                 else:
                     subdivisions[partition.url] = tuple(child.url for child in children)
+                    if partition.expected_category is None and partition.split_categories:
+                        catalog_partitions.update(
+                            child.url for child in children if child.expected_category is not None
+                        )
+                    categoryless_children = sum(not child.split_categories for child in children)
+                    if partition.split_categories and categoryless_children:
+                        logger.info(
+                            "djinni_rss_uncategorized_coverage",
+                            parent=feed_identity(partition.url),
+                            fallback_children=categoryless_children,
+                        )
                     for child in children:
                         if child.url not in scheduled:
                             queue.append((child, False))
@@ -440,7 +477,9 @@ class DjinniSource(BaseSource):
                         recheck_selection = "eligible"
                     elif not consistency_checked:
                         recheck_selection = "not_reached"
-                    elif not all(url in observed_ids for url in children_urls):
+                    elif not all(
+                        url in observed_ids or url in ignored_categories for url in children_urls
+                    ):
                         recheck_selection = "unobserved_children"
                     elif len(missing) > MAX_RECHECK_MISSING_ITEMS:
                         recheck_selection = "missing_count_above_ceiling"
