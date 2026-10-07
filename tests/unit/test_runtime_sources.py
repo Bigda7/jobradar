@@ -28,6 +28,33 @@ def test_apk_inventory_preserves_build_provenance() -> None:
     ]
 
 
+def test_runtime_pins_fixed_zlib_and_reviews_its_exact_build() -> None:
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = (root / "Dockerfile").read_text()
+    runtime = dockerfile.split(" AS runtime", 1)[1].split("FROM builder AS test-builder", 1)[0]
+    assert "zlib=1.3.2-r1" in runtime
+    assert "apk upgrade" not in runtime
+    review = json.loads((root / "docs/runtime-package-review.json").read_text())
+    assert [entry for entry in review["components"] if entry.startswith("apk:zlib:")] == [
+        "apk:zlib:1.3.2-r1:Zlib:0afa2da0e8c8051c6f8f64a7a388e5a259904245"
+    ]
+
+
+def test_fixed_zlib_inventory_retains_source_and_license_identity() -> None:
+    package = collector.apk_inventory(
+        "P:zlib\nV:1.3.2-r1\nL:Zlib\no:zlib\nc:0afa2da0e8c8051c6f8f64a7a388e5a259904245\n"
+    )
+    assert package == [
+        {
+            "name": "zlib",
+            "version": "1.3.2-r1",
+            "license": "Zlib",
+            "origin": "zlib",
+            "commit": "0afa2da0e8c8051c6f8f64a7a388e5a259904245",
+        }
+    ]
+
+
 def test_invalid_apk_record_fails() -> None:
     with pytest.raises(ValueError, match="Invalid"):
         collector.apk_inventory("P:busybox\n")

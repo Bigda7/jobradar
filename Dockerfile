@@ -21,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apk add --no-cache openssl=3.5.9-r0 sqlite-libs=3.53.4-r0 \
+RUN apk add --no-cache openssl=3.5.9-r0 sqlite-libs=3.53.4-r0 zlib=1.3.2-r1 \
     && python -m pip uninstall --yes pip \
     && addgroup -S jobradar \
     && adduser -S -D -H -G jobradar jobradar
@@ -51,6 +51,6 @@ COPY --chown=jobradar:jobradar pyproject.toml ./
 COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py scripts/verify_runtime_license.py scripts/collect_runtime_licenses.py scripts/prepare_runtime_sources.py ./scripts/
 COPY --chown=jobradar:jobradar scripts/verify_postgres_backup.sh scripts/cleanup_build_cache.sh ./scripts/
 COPY --chown=jobradar:jobradar Dockerfile ./
-COPY --chown=jobradar:jobradar docs/runtime-native-sources.json ./docs/runtime-native-sources.json
+COPY --chown=jobradar:jobradar docs/runtime-native-sources.json docs/runtime-package-review.json ./docs/
 COPY --chown=jobradar:jobradar .github/workflows/publish-image.yml .github/workflows/ci.yml ./.github/workflows/
 COPY --chown=jobradar:jobradar tests ./tests

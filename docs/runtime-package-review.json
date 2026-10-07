@@ -30,7 +30,7 @@
     "apk:ssl_client:1.37.0-r31:GPL-2.0-only:c3ef5d10e6ef6528852c51f0564963e2f8c1be19",
     "apk:tzdata:2026d-r0:Public-Domain:a19caf9fe771707618d4d9e4fa2dd9db8155b461",
     "apk:xz-libs:5.8.4-r0:GPL-2.0-or-later AND 0BSD AND Public-Domain AND LGPL-2.1-or-later:0c088d609f9fe69eedd6b4c7f4b99cdad847c20a",
-    "apk:zlib:1.3.2-r0:Zlib:f248b33b5943c7dc69bf691031d7612ab2e8ed93",
+    "apk:zlib:1.3.2-r1:Zlib:0afa2da0e8c8051c6f8f64a7a388e5a259904245",
     "cpython:3.13.15",
     "python:alembic:1.19.1:MIT",
     "python:annotated-doc:0.0.5:MIT",
