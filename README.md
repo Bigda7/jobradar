@@ -82,6 +82,11 @@ provider's category catalog, then experience and English filters as needed, with
 configured filters. Defaults are 10000 unique items, 512 requests, a 600-second traversal budget,
 and approximately 0.632 seconds between RSS requests (target 95/minute). Persisted reservations
 enforce at most 100 RSS attempts in a rolling 60-second window across worker restarts.
+When a saturated categoryless feed contains uncategorized items, a parallel experience/English
+split retains coverage outside category filters. It consumes the same run budgets and never
+widens configured filters. Consistency rechecks are allocated round-robin across eligible
+parents within the existing 12-visit ceiling. See [RSS coverage](docs/djinni-rss-coverage.md)
+for evidence limits and the additional within-budget workload.
 Unresolved saturation, failed partitions or safety-budget stops
 remain observable rather than being reported as complete coverage. Missing RSS metadata is
 supplemented from the matching public JobPosting page under the provider's project-specific reply.
