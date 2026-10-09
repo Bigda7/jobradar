@@ -76,6 +76,10 @@ class RobotaUaSourceError(RuntimeError):
     pass
 
 
+class RobotaUaAccessError(RobotaUaSourceError):
+    """An explicit access restriction must not trigger another transport."""
+
+
 @dataclass(frozen=True, slots=True)
 class RobotaUaCard:
     external_id: str
@@ -136,7 +140,7 @@ class RobotaUaSource(BaseSource):
             *(self._collect_search(search_url, semaphore) for search_url in self._search_urls)
         )
         successful_search_pages = sum(result[0] for result in search_results)
-        for _, batches in search_results:
+        for _, batches, _ in search_results:
             card_batches.extend(batches)
 
         if not card_batches:
@@ -144,7 +148,11 @@ class RobotaUaSource(BaseSource):
                 raise RobotaUaSourceError(
                     "Configured Robota.ua searches returned no vacancy cards."
                 )
-            raise RobotaUaSourceError("Every configured Robota.ua search page failed.")
+            reason = next((result[2] for result in search_results if result[2]), None)
+            raise RobotaUaSourceError(
+                "Every configured Robota.ua search page failed. "
+                f"{reason or 'No response evidence.'}"
+            )
 
         for cards in card_batches:
             for card in cards:
@@ -201,10 +209,11 @@ class RobotaUaSource(BaseSource):
 
     async def _collect_search(
         self, search_url: str, semaphore: asyncio.Semaphore
-    ) -> tuple[int, list[list[RobotaUaCard]]]:
+    ) -> tuple[int, list[list[RobotaUaCard]], str | None]:
         successful_pages = 0
         batches: list[list[RobotaUaCard]] = []
         query_ids: set[str] = set()
+        failure: str | None = None
         for page_number in range(1, self._max_pages_per_search + 1):
             page_url = _page_url(search_url, page_number)
             self.record_page()
@@ -212,7 +221,8 @@ class RobotaUaSource(BaseSource):
                 async with semaphore:
                     cards = await self._fetch_search_cards(page_url)
             except RobotaUaSourceError as error:
-                self.report_warning(str(error))
+                failure = str(error)
+                self.report_warning(failure)
                 break
             successful_pages += 1
             self.record_candidates(len(cards))
@@ -223,16 +233,20 @@ class RobotaUaSource(BaseSource):
                 break
             query_ids.update(card.external_id for card in new_cards)
             batches.append(new_cards)
-        return successful_pages, batches
+        return successful_pages, batches, failure
 
     async def _fetch_search_cards(self, search_url: str) -> list[RobotaUaCard]:
-        cards: list[RobotaUaCard] = []
-        for _ in range(self._retry_attempts):
+        for attempt in range(self._retry_attempts):
             markdown = await self._fetch_page(search_url)
-            cards = parse_robota_ua_cards(markdown)
-            if cards:
-                break
-        return cards
+            content = _reader_content(markdown)
+            if content:
+                return parse_robota_ua_cards(content)
+            if attempt + 1 < self._retry_attempts:
+                await polite_delay(max(1.0, self._detail_request_delay_seconds))
+        raise RobotaUaSourceError(
+            f"Robota.ua reader returned an empty search body: {search_url}. "
+            "Vacancy availability could not be determined."
+        )
 
     async def _fetch_detail(self, card: RobotaUaCard) -> RobotaUaDetail | None:
         try:
@@ -242,6 +256,8 @@ class RobotaUaSource(BaseSource):
                 expected_external_id=card.external_id,
                 is_remote=card.is_remote,
             )
+        except RobotaUaAccessError:
+            raise
         except RobotaUaSourceError as error:
             self.report_warning(f"{error} Falling back to the vacancy page.")
 
@@ -307,11 +323,36 @@ class RobotaUaSource(BaseSource):
                 attempts=self._retry_attempts,
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            error_type = RobotaUaAccessError if status in {401, 403, 429} else RobotaUaSourceError
+            raise error_type(f"Robota.ua reader request returned HTTP {status}.") from error
         except httpx.HTTPError as error:
             raise RobotaUaSourceError(
                 f"Robota.ua reader request failed ({type(error).__name__})."
             ) from error
-        return response.text
+        content = response.text
+        lowered = content.casefold()
+        body = _reader_content(content).casefold()
+        if any(
+            marker in lowered
+            for marker in (
+                "cf-chl-",
+                "warning: target url returned error 403",
+                "warning: target url returned error 429",
+            )
+        ) or re.search(
+            r"(?:^|\n)(?:#{1,6}\s*)?"
+            r"(?:verify you are human|enable javascript and cookies to continue)(?:\W|$)",
+            body,
+        ):
+            raise RobotaUaAccessError("Robota.ua reader returned an access restriction.")
+        return content
+
+
+def _reader_content(markdown: str) -> str:
+    _, marker, content = markdown.partition("Markdown Content:")
+    return (content if marker else markdown).strip()
 
 
 def parse_robota_ua_cards(markdown: str) -> list[RobotaUaCard]:
