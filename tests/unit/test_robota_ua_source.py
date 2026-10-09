@@ -12,6 +12,7 @@ from jobradar.sources.base import CachedListing
 from jobradar.sources.registry import build_source_registry
 from jobradar.sources.robota_ua import (
     RobotaUaSource,
+    RobotaUaSourceError,
     parse_robota_ua_api_detail,
     parse_robota_ua_cards,
     parse_robota_ua_detail,
@@ -358,6 +359,138 @@ async def test_robota_ua_source_retries_rate_limited_api_detail() -> None:
 
     assert [listing.external_id for listing in listings] == ["111", "222"]
     assert api_attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_empty_reader_body_is_retried_with_delay_and_reported(monkeypatch) -> None:
+    requested_urls: list[str] = []
+    delays: list[float] = []
+
+    async def delay(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("jobradar.sources.robota_ua.polite_delay", delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(200, text="Title: Robota.ua\n\nMarkdown Content:\n\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            search_urls=("https://robota.ua/zapros/python-remote/ukraine",),
+            reader_base_url="https://reader.test",
+            client=client,
+        )
+        with pytest.raises(RobotaUaSourceError, match="failed.*empty search body"):
+            _ = [listing async for listing in source.fetch()]
+
+    assert len(requested_urls) == 2
+    assert delays == [1.0]
+    assert source.consume_warnings() == (
+        "Robota.ua reader returned an empty search body: "
+        "https://robota.ua/zapros/python-remote/ukraine. "
+        "Vacancy availability could not be determined.",
+    )
+    assert source.consume_run_metrics().candidate_count == 0
+    assert source.deactivate_missing_listings is False
+
+
+@pytest.mark.asyncio
+async def test_empty_reader_retry_can_recover_without_transport_change(monkeypatch) -> None:
+    attempts = 0
+
+    async def delay(seconds: float) -> None:
+        assert seconds == 1.0
+
+    monkeypatch.setattr("jobradar.sources.robota_ua.polite_delay", delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        assert str(request.url) == "https://reader.test/zapros/python-remote/ukraine"
+        attempts += 1
+        return httpx.Response(200, text="" if attempts == 1 else SEARCH_PAGE)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(reader_base_url="https://reader.test", client=client)
+        cards = await source._fetch_search_cards("https://robota.ua/zapros/python-remote/ukraine")
+    assert len(cards) == 3
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_rendered_empty_search_is_not_a_reader_failure() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, text="Markdown Content:\nNo vacancies found.")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(reader_base_url="https://reader.test", client=client)
+        assert await source._fetch_search_cards("https://robota.ua/zapros/python/ukraine") == []
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "message"),
+    [
+        (403, "", "HTTP 403"),
+        (401, "", "HTTP 401"),
+        (429, "", "HTTP 429"),
+        (200, "Warning: Target URL returned error 403: Forbidden", "access restriction"),
+        (200, "Markdown Content:\nVerify you are human", "access restriction"),
+    ],
+)
+async def test_explicit_api_restriction_does_not_use_page_fallback(status, body, message) -> None:
+    from jobradar.sources.robota_ua import RobotaUaAccessError, RobotaUaCard
+
+    requested_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(status, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            reader_base_url="https://reader.test",
+            api_reader_base_url="https://api-reader.test",
+            retry_attempts=1,
+            client=client,
+        )
+        with pytest.raises(RobotaUaAccessError, match=message):
+            await source._fetch_detail(
+                RobotaUaCard("111", "https://robota.ua/company1/vacancy111", True)
+            )
+    assert requested_urls == ["https://api-reader.test/vacancy?id=111"]
+    assert source.consume_warnings() == ()
+
+
+@pytest.mark.asyncio
+async def test_gone_html_fallback_is_not_parsed_as_a_detail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api-reader.test":
+            return httpx.Response(502)
+        return httpx.Response(410)
+
+    from jobradar.sources.robota_ua import RobotaUaCard
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            reader_base_url="https://reader.test",
+            api_reader_base_url="https://api-reader.test",
+            client=client,
+        )
+        assert (
+            await source._fetch_detail(
+                RobotaUaCard("111", "https://robota.ua/company1/vacancy111", True)
+            )
+            is None
+        )
+    assert source.consume_warnings() == (
+        "Robota.ua reader request returned HTTP 502. Falling back to the vacancy page.",
+    )
 
 
 def test_registry_builds_robota_ua_with_safe_poll_interval() -> None:

@@ -151,6 +151,21 @@ jobs:
           curl --fail --silent --show-error --location --head \
             --proto '=https' --proto-redir '=https' --max-time 120 "${SOURCE_URL}.sha256" >/dev/null
 
+      - name: Retain the exact verified OCI candidate for recovery
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          recovery_asset="runtime-image-${RELEASE_TAG}-linux-arm64"
+          cd "$RUNNER_TEMP"
+          cp runtime.oci.tar "${recovery_asset}.oci.tar"
+          cp image-metadata.json "${recovery_asset}.build.json"
+          sha256sum "${recovery_asset}.oci.tar" "${recovery_asset}.build.json" > "${recovery_asset}.sha256"
+          gh release upload "$RELEASE_TAG" \
+            "${recovery_asset}.oci.tar" "${recovery_asset}.build.json" "${recovery_asset}.sha256" \
+            --repo "$GITHUB_REPOSITORY"
+
       - name: Log in to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,10 +176,11 @@ jobs:
       - name: Publish the already verified image without rebuilding
         env:
           IMAGE_NAME: ${{ steps.release.outputs.image_name }}
+          IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          docker image push "${IMAGE_NAME}:${RELEASE_TAG}"
+          python scripts/push_verified_image.py "${IMAGE_NAME}:${RELEASE_TAG}" "$IMAGE_ID"
 
       - name: Inspect published digest and attestations
         id: verified

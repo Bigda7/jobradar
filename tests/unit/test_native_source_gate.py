@@ -167,8 +167,9 @@ def test_publication_cannot_precede_source_verification_and_delivery() -> None:
     sources_upload = names.index("Publish verified sources on the existing release")
     delivery_check = names.index("Verify anonymous source availability before image publication")
     image_upload = names.index("Publish the already verified image without rebuilding")
+    recovery_upload = names.index("Retain the exact verified OCI candidate for recovery")
     assert names.index("Require a public published source release") < build
-    assert build < verify < sources_upload < delivery_check < image_upload
+    assert build < verify < sources_upload < delivery_check < recovery_upload < image_upload
     assert "--push" not in steps[build]["run"]
     assert "metadata['containerimage.digest'] != sys.argv[2]" in steps[build]["run"]
     assert "--verify --image" in steps[verify]["run"]
@@ -178,4 +179,12 @@ def test_publication_cannot_precede_source_verification_and_delivery() -> None:
     assert "curl --fail" in steps[delivery_check]["run"]
     assert "GH_TOKEN" not in steps[delivery_check].get("env", {})
     assert "buildx build" not in steps[image_upload]["run"]
-    assert "docker image push" in steps[image_upload]["run"]
+    assert "scripts/push_verified_image.py" in steps[image_upload]["run"]
+    assert steps[image_upload]["env"]["IMAGE_ID"] == "${{ steps.candidate.outputs.image_id }}"
+    recovery = steps[recovery_upload]["run"]
+    assert "cp runtime.oci.tar" in recovery
+    assert "cp image-metadata.json" in recovery
+    assert "sha256sum" in recovery
+    assert "gh release upload" in recovery
+    assert "--clobber" not in recovery
+    assert "buildx build" not in recovery

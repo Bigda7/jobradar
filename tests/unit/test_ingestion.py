@@ -1,6 +1,7 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,7 +22,76 @@ from jobradar.ingestion.service import IngestionService, jittered_poll_interval_
 from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.matching.service import MatchingService
 from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
+from jobradar.sources.robota_ua import RobotaUaSource
 from jobradar.sources.workua import WorkUaCard, WorkUaSource, WorkUaSourceError
+
+
+@pytest.mark.asyncio
+async def test_robota_empty_reader_failure_preserves_listing_and_records_cause(
+    sqlite_session_factory: async_sessionmaker[AsyncSession], monkeypatch
+) -> None:
+    empty = False
+
+    async def delay(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr("jobradar.sources.robota_ua.polite_delay", delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api-reader.test":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 111,
+                    "name": "Python Developer",
+                    "description": "<p>Preserved vacancy description</p>",
+                    "isActive": True,
+                },
+            )
+        return httpx.Response(
+            200,
+            text="Markdown Content:\n"
+            + ("" if empty else "[Віддалена робота](https://robota.ua/company1/vacancy111)"),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            search_urls=("https://robota.ua/zapros/python-remote/ukraine",),
+            reader_base_url="https://reader.test",
+            api_reader_base_url="https://api-reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        service = IngestionService(sqlite_session_factory)
+        initial = await service.run_source(source)
+        assert initial.status is RunStatus.SUCCEEDED and initial.discovered == 1
+        async with sqlite_session_factory() as session:
+            listing = await session.scalar(select(Listing))
+            assert listing is not None
+            initial_last_seen = listing.last_seen_at
+            initial_detail_time = listing.detail_fetched_at
+            initial_hash = listing.content_hash
+        empty = True
+        result = await service.run_source(source)
+
+    assert result.status is RunStatus.FAILED
+    assert result.deactivated == result.discovered == 0
+    async with sqlite_session_factory() as session:
+        listing = await session.scalar(select(Listing))
+        opportunity = await session.scalar(select(Opportunity))
+        run = await session.scalar(select(SourceRun).order_by(SourceRun.id.desc()))
+        assert listing is not None and opportunity is not None and run is not None
+        assert listing.is_active
+        assert (
+            listing.raw_data["description"]
+            == opportunity.description
+            == "Preserved vacancy description"
+        )
+        assert listing.last_seen_at == initial_last_seen
+        assert listing.detail_fetched_at == initial_detail_time
+        assert listing.content_hash == initial_hash
+        assert "empty search body" in run.error_message
+        assert await session.scalar(select(func.count()).select_from(NotificationDelivery)) == 0
 
 
 @pytest.mark.asyncio
