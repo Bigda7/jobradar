@@ -196,7 +196,8 @@ services:
     restart: "no"
 
   db-test:
-    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    image: ${JOBRADAR_TEST_POSTGRES_IMAGE:-sha256:ad68598f8c2901e3fc40dbbe77d85b85ed21a87eecec830ebf4b6782ff5c34b6}
+    pull_policy: never
     profiles: ["test"]
     environment:
       POSTGRES_DB: jobradar_test

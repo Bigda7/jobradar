@@ -18,21 +18,6 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
-        env:
-          POSTGRES_DB: jobradar_test
-          POSTGRES_USER: jobradar
-          POSTGRES_PASSWORD: ci_only_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U jobradar -d jobradar_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     env:
       APP_ENV: test
       DATABASE_URL: postgresql+psycopg://jobradar:ci_only_password@localhost:5432/jobradar_test
@@ -55,13 +40,40 @@ jobs:
           uv python install 3.13
           uv sync --frozen --extra dev
 
+      - name: Load reviewed PostgreSQL fixture
+        run: |
+          set -euo pipefail
+          image="$(python3 scripts/prepare_postgres_fixture.py load --architecture amd64 --download-directory "${RUNNER_TEMP}/postgres-fixture")"
+          test "$image" = "$(bash scripts/postgres_fixture_image.sh)"
+          echo "JOBRADAR_TEST_POSTGRES_IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Start isolated PostgreSQL fixture
+        run: |
+          set -euo pipefail
+          name="jobradar-ci-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker run --detach --pull never --name "$name" \
+            --label "jobradar.ci.fixture=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --publish 127.0.0.1:5432:5432 --memory 640m --memory-swap 640m \
+            --cpus 1 --pids-limit 128 \
+            --env POSTGRES_DB=jobradar_test --env POSTGRES_USER=jobradar \
+            --env POSTGRES_PASSWORD=ci_only_password \
+            "$JOBRADAR_TEST_POSTGRES_IMAGE"
+          for attempt in {1..60}; do
+            if docker exec "$name" pg_isready --host=127.0.0.1 --username=jobradar --dbname=jobradar_test; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'PostgreSQL fixture did not become ready.' >&2
+          exit 1
+
       - name: Run static checks
         run: |
           uv run ruff format --check .
           uv run ruff check .
           uv run mypy src/jobradar
           uv run bandit -q -r src/jobradar
-          bash -n scripts/backup_postgres.sh scripts/verify_postgres_backup.sh scripts/cleanup_build_cache.sh
+          bash -n scripts/backup_postgres.sh scripts/verify_postgres_backup.sh scripts/postgres_fixture_image.sh scripts/cleanup_build_cache.sh
 
       - name: Audit Python dependencies
         run: |
@@ -81,14 +93,14 @@ jobs:
           initial_volumes="$(docker volume ls --quiet | sort)"
           backup_file="$(mktemp --suffix=.dump)"
           trap 'rm -f "$backup_file"' EXIT
-          docker run --rm --network host --env PGPASSWORD=ci_only_password \
-            postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 \
+          docker run --rm --pull never --network host --env PGPASSWORD=ci_only_password \
+            "$JOBRADAR_TEST_POSTGRES_IMAGE" \
             psql --host=localhost --username=jobradar --dbname=jobradar_test \
             --set ON_ERROR_STOP=1 \
             --command "INSERT INTO sources (name, display_name, opportunity_kind, enabled, failure_alert_active, coverage_alert_active, request_budget, created_at, updated_at) VALUES ('restore-fixture', 'Restore Fixture', 'employment', true, false, false, '{}'::jsonb, now(), now())" \
             --command "WITH restored_opportunity AS (INSERT INTO opportunities (kind, status, canonical_key, title, work_mode, first_seen_at, last_seen_at, created_at, updated_at) VALUES ('employment', 'active', 'restore-fixture', 'Restore fixture', 'remote', now(), now(), now(), now()) RETURNING id) INSERT INTO listings (source_id, opportunity_id, external_id, source_url, canonical_url, content_hash, raw_data, quality_score, first_seen_at, last_seen_at, is_active, created_at, updated_at) SELECT sources.id, restored_opportunity.id, 'restore-1', 'https://example.invalid/restore-1', 'https://example.invalid/restore-1', 'fixture-hash', '{}'::jsonb, 0, now(), now(), true, now(), now() FROM sources CROSS JOIN restored_opportunity WHERE sources.name = 'restore-fixture'"
-          docker run --rm --network host --env PGPASSWORD=ci_only_password \
-            postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 \
+          docker run --rm --pull never --network host --env PGPASSWORD=ci_only_password \
+            "$JOBRADAR_TEST_POSTGRES_IMAGE" \
             pg_dump --host=localhost --username=jobradar --dbname=jobradar_test \
             --format=custom --compress=6 >"$backup_file"
           restore_output="$(bash scripts/verify_postgres_backup.sh "$backup_file")"
@@ -128,3 +140,14 @@ jobs:
           --volume "${PWD}:/repo"
           zricethezav/gitleaks:v8.30.0@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           git /repo --redact=100 --no-banner --log-opts="--all --full-history -m" --exit-code=1
+
+      - name: Remove owned PostgreSQL fixture and volume
+        if: always()
+        run: |
+          set -euo pipefail
+          name="jobradar-ci-postgres-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if docker container inspect "$name" >/dev/null 2>&1; then
+            owner="$(docker inspect --format '{{index .Config.Labels "jobradar.ci.fixture"}}' "$name")"
+            test "$owner" = "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            docker rm --force --volumes "$name"
+          fi

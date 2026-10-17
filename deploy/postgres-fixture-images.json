@@ -1,0 +1,21 @@
+{
+  "release_url": "https://github.com/Bigda7/jobradar/releases/download/v1.2.23",
+  "images": {
+    "amd64": {
+      "archive": "jobradar-postgres-17.11-clean-linux-amd64.tar",
+      "size": 120198144,
+      "sha256": "687c034420f746e808f41fa15fe9b57cd735cf9967df7be0a993e29a20824b79",
+      "image_id": "sha256:ad68598f8c2901e3fc40dbbe77d85b85ed21a87eecec830ebf4b6782ff5c34b6",
+      "config_id": "sha256:05b61769646a7ab9326aae4c0e92b7978e0cd87d55ca2c4be319067fc2c9d007",
+      "layer_id": "sha256:6aed3ffae62ca1d8ddeb4f2f98792fc31cd951cd889173eed7856db032096913"
+    },
+    "arm64": {
+      "archive": "jobradar-postgres-17.11-clean-linux-arm64.tar",
+      "size": 118014464,
+      "sha256": "56336537ac47206c66d9d2ff3ba7ff4f0a9cc34191a38362a8886a2eef15341f",
+      "image_id": "sha256:51958852a6c4b54ffd5f768cf4e6e6a7786ffe1b78a30dbd638b835381de0e41",
+      "config_id": "sha256:24a3ac5c8f0871cdec773de8a7962f2eae68d114a2f141e9dad9ce4a23c59635",
+      "layer_id": "sha256:ef9acd06139ac6fcded8cd807dbe9784fc0cc22ebcf80811f23a4e1241649622"
+    }
+  }
+}
