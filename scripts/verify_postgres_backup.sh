@@ -13,7 +13,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 backup_path="$1"
-postgres_image='postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73'
+script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+postgres_image="$(bash "${script_directory}/postgres_fixture_image.sh")"
 container_name="jobradar-restore-check-$$-${RANDOM}"
 container_created=0
 cgroup_arguments=()
@@ -42,6 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker run \
+  --pull never \
   --detach \
   --rm \
   --name "${container_name}" \
@@ -58,6 +60,7 @@ docker run \
   "${cgroup_arguments[@]}" \
   "${postgres_image}" >/dev/null
 container_created=1
+printf 'Restore image: %s\n' "${postgres_image}"
 restore_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}' "${container_name}")"
 if [[ ! "${restore_volume}" =~ ^[0-9a-f]{64}$ ]]; then
   printf 'Unexpected restore fixture volume.\n' >&2

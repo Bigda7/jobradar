@@ -283,6 +283,10 @@ core data tables, and retains local backups for 14 days by default. A failed res
 the new dump from being retained or uploaded. The systemd timer in
 `deploy/systemd/` runs the script daily at `03:15 UTC`. To verify an existing local dump without
 contacting the live database, run `bash scripts/verify_postgres_backup.sh /path/to/backup.dump`.
+The verifier requires the matching reviewed PostgreSQL fixture to be preloaded;
+it does not pull an image or fall back to the old stock image. See
+[`docs/postgres-fixture-images.md`](docs/postgres-fixture-images.md) for exact archive
+verification, import, Compose testing, and the separately authorized publication/install order.
 The backup runner requires `JOBRADAR_BACKUP_DB_PASSWORD` for its separate read-only
 `jobradar_backup` login. Keep it in `/etc/jobradar/backup.env` (private permissions),
 even when S3 is not configured; never inject it into API/worker/bot.

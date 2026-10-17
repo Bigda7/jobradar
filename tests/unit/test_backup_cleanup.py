@@ -14,7 +14,15 @@ def test_failed_restore_container_creation_does_not_remove_existing_container(tm
         pytest.skip("Bash is required for the backup cleanup regression")
     calls = tmp_path / "calls.log"
     fake = tmp_path / "docker"
-    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$FIXTURE_CALLS"\nexit 1\n')
+    fake.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$1" >> "$FIXTURE_CALLS"\n'
+        'case "$1" in\n'
+        'info) printf "x86_64\\n"; exit 0;;\n'
+        'image) printf "%s linux/amd64 [\\"%s\\"]\\n" '
+        '"sha256:ad68598f8c2901e3fc40dbbe77d85b85ed21a87eecec830ebf4b6782ff5c34b6" '
+        '"sha256:6aed3ffae62ca1d8ddeb4f2f98792fc31cd951cd889173eed7856db032096913"; '
+        "exit 0;;\nesac\nexit 1\n"
+    )
     fake.chmod(0o755)
     archive = tmp_path / "fixture.dump"
     archive.write_bytes(b"synthetic archive")
@@ -28,4 +36,4 @@ def test_failed_restore_container_creation_does_not_remove_existing_container(tm
         timeout=10,
     )
     assert result.returncode != 0
-    assert calls.read_text().splitlines() == ["run"]
+    assert calls.read_text().splitlines() == ["info", "image", "run"]

@@ -48,11 +48,12 @@ FROM runtime AS test
 
 COPY --from=test-builder --chown=jobradar:jobradar /app/.venv /app/.venv
 COPY --chown=jobradar:jobradar pyproject.toml ./
-COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py scripts/verify_runtime_license.py scripts/collect_runtime_licenses.py scripts/prepare_runtime_sources.py scripts/prepare_postgres_sources.py scripts/push_verified_image.py ./scripts/
-COPY --chown=jobradar:jobradar scripts/backup_postgres.sh scripts/verify_postgres_backup.sh scripts/cleanup_build_cache.sh ./scripts/
+COPY --chown=jobradar:jobradar scripts/verify_image_attestations.py scripts/verify_registry_image.py scripts/verify_runtime_license.py scripts/collect_runtime_licenses.py scripts/prepare_runtime_sources.py scripts/prepare_postgres_sources.py scripts/prepare_postgres_fixture.py scripts/push_verified_image.py ./scripts/
+COPY --chown=jobradar:jobradar scripts/backup_postgres.sh scripts/verify_postgres_backup.sh scripts/postgres_fixture_image.sh scripts/cleanup_build_cache.sh ./scripts/
 COPY --chown=jobradar:jobradar Dockerfile compose.yaml compose.resources.yaml ./
 COPY --chown=jobradar:jobradar scripts/check_resource_capacity.py scripts/review_server_capacity.py ./scripts/
 COPY --chown=jobradar:jobradar deploy/postgres-prototype ./deploy/postgres-prototype
+COPY --chown=jobradar:jobradar deploy/postgres-fixture-images.json ./deploy/
 COPY --chown=jobradar:jobradar deploy/resource-prototype ./deploy/resource-prototype
 COPY --chown=jobradar:jobradar deploy/systemd ./deploy/systemd
 COPY --chown=jobradar:jobradar docs/runtime-native-sources.json docs/runtime-package-review.json ./docs/
