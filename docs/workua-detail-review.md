@@ -1,6 +1,32 @@
 # Work.ua Detail Refresh Review
 
-Reviewed on 2026-10-03. Local fix only; no publication or production rollout.
+Initial local review: 2026-10-03. The fix was subsequently deployed in v1.2.13;
+natural production execution was manually verified on 2026-10-04.
+
+## Post-Release Verification (2026-10-04)
+
+Read-only database queries and whitelist-filtered worker logs verified three natural runs:
+
+| Run | UTC window | Result | Discoveries | Detail challenges | Search challenges |
+| --- | --- | --- | --- | --- | --- |
+| 6087 | October 3, 19:48-19:49 | succeeded | 48 | 0 | 0 |
+| 6105 | October 4, 01:38-01:41 | partial | 45 | 6 | 2 |
+| 6125 | October 4, 07:59-08:02 | partial | 45 | 10 | 1 |
+
+Every recorded detail failure and search-page skip in the partial runs is accounted for by
+an upstream security challenge event. Stored error counts 2/1 correspond to the existing
+ingestion logic counting search warnings; no normalization, ingestion, or terminal fetch
+failure event was found in these windows. Partial status now makes blocked search coverage
+observable instead of reporting an unqualified successful collection.
+
+All ten failed-detail URLs in run 6125 match stored full descriptions with `detail_status=cached`
+and successful-detail timestamps before the run. This confirms live fallback behavior; it is
+not an independent byte-for-byte comparison against a pre-run database snapshot. Current active
+inventory has 58 listings, zero missing detail timestamps, and one legacy summary-only row.
+Earlier active summary-only count was seven, but inventory changes alone do not establish the
+recovery history of each old row. Complete upstream coverage and disappearance of challenges
+are not claimed. No forced crawl, row repair, access change, notification, or deployment occurred
+during this verification. The sections below preserve the original pre-release investigation.
 
 ## Production Evidence
 

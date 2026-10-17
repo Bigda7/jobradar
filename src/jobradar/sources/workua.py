@@ -16,6 +16,7 @@ import structlog
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
+from jobradar.http_download import DownloadBudget, DownloadLimitError, bounded_get
 from jobradar.security import redact_sensitive_text
 from jobradar.sources.base import BaseSource, CachedListing
 from jobradar.sources.detail_cache import (
@@ -75,7 +76,17 @@ class WorkUaSourceError(RuntimeError):
 def _failure_reason(error: WorkUaSourceError) -> str:
     if error.status_code is not None:
         return f"HTTP {error.status_code}"
-    if error.reason in {"timeout", "transport", "request_budget", "deadline", "challenge"}:
+    if error.reason in {
+        "timeout",
+        "transport",
+        "request_budget",
+        "deadline",
+        "challenge",
+        "response_limit",
+        "run_limit",
+        "redirect",
+        "encoding",
+    }:
         return error.reason
     if "challenge" in str(error).casefold():
         return "challenge"
@@ -128,6 +139,7 @@ class WorkUaSource(BaseSource):
     async def fetch(self) -> AsyncIterator[RawListing]:
         self._run_stop_error = None
         self._run_deadline = monotonic() + 600.0
+        self._download_budget = DownloadBudget(self._run_deadline)
         self._network_requests = 0
         self._network_request_limit = (
             2
@@ -138,6 +150,7 @@ class WorkUaSource(BaseSource):
         yielded = 0
         successful_search_pages = 0
         card_batches: list[list[WorkUaCard]] = []
+        first_search_failure: tuple[WorkUaSourceError, str] | None = None
         for search_url in self._search_urls:
             query_ids: set[str] = set()
             for page_number in range(1, self._max_pages_per_search + 1):
@@ -151,10 +164,13 @@ class WorkUaSource(BaseSource):
                         search_url=page_url,
                         error=str(error),
                     )
-                    self.report_warning(
+                    failure_summary = (
                         f"Work.ua search page unavailable ({_failure_reason(error)}): "
                         f"{redact_sensitive_text(page_url)[:300]}."
                     )
+                    self.report_warning(failure_summary)
+                    if first_search_failure is None:
+                        first_search_failure = error, failure_summary
                     break
                 successful_search_pages += 1
                 self.record_candidates(len(cards))
@@ -178,6 +194,13 @@ class WorkUaSource(BaseSource):
                 )
             if successful_search_pages:
                 raise WorkUaSourceError("Configured Work.ua searches returned no vacancy cards.")
+            if first_search_failure is not None:
+                first_error, summary = first_search_failure
+                raise WorkUaSourceError(
+                    f"Every configured Work.ua search page failed. {summary}",
+                    status_code=first_error.status_code,
+                    reason=first_error.reason,
+                )
             raise WorkUaSourceError("Every configured Work.ua search page failed.")
 
         for cards in card_batches:
@@ -420,17 +443,26 @@ class WorkUaSource(BaseSource):
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise WorkUaSourceError("Work.ua request deadline reached.", reason="deadline")
-            self._network_requests = getattr(self, "_network_requests", 0) + 1
             response: httpx.Response | None = None
             try:
                 async with asyncio.timeout(min(self._request_timeout_seconds, remaining)):
-                    response = await client.get(
+                    response = await bounded_get(
+                        client,
                         request_url,
                         headers=headers,
-                        timeout=min(self._request_timeout_seconds, remaining),
+                        timeout_seconds=min(self._request_timeout_seconds, remaining),
+                        budget=getattr(self, "_download_budget", None),
+                        before_request=self._reserve_network_request,
                     )
                 response.raise_for_status()
                 return response.text
+            except DownloadLimitError as error:
+                failure = WorkUaSourceError(
+                    f"Work.ua download stopped: {error}", reason=error.reason
+                )
+                if error.reason == "run_limit":
+                    self._stop_run(failure, reason="run_limit")
+                raise failure from error
             except httpx.HTTPStatusError as error:
                 status = error.response.status_code
                 failure = WorkUaSourceError(
@@ -473,6 +505,10 @@ class WorkUaSource(BaseSource):
                 raise failure
             await asyncio.sleep(max(0.0, delay))
         raise WorkUaSourceError("Work.ua retry attempts exhausted.")
+
+    def _reserve_network_request(self) -> None:
+        self._raise_if_stopped()
+        self._network_requests = getattr(self, "_network_requests", 0) + 1
 
     def _stop_run(self, error: WorkUaSourceError, *, reason: str) -> None:
         if self._run_stop_error is not None:

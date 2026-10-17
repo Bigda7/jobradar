@@ -62,6 +62,67 @@ Work.ua має перевірити безпеку вашого з'єднанн�
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_reason", "expected_status", "expected_code"),
+    [
+        ("challenge", "challenge", None, "challenge"),
+        ("403", "HTTP 403", 403, None),
+        ("502", "HTTP 502", 502, None),
+        ("timeout", "timeout", None, "timeout"),
+        ("transport", "transport", None, "transport"),
+        ("unavailable", "unavailable", None, None),
+    ],
+)
+async def test_all_search_failures_preserve_first_safe_reason_without_extra_requests(
+    failure: str, expected_reason: str, expected_status: int | None, expected_code: str | None
+) -> None:
+    requests: list[str] = []
+    first_url = "https://www.work.ua/en/jobs-remote-python/?token=synthetic-test-key"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/en/jobs-remote-django/":
+            return httpx.Response(503)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("Synthetic timeout", request=request)
+        if failure == "transport":
+            raise httpx.ConnectError("Synthetic transport failure", request=request)
+        if failure == "unavailable":
+            raise httpx.DecodingError("Synthetic invalid response", request=request)
+        return (
+            httpx.Response(200, text=CHALLENGE_PAGE)
+            if failure == "challenge"
+            else (httpx.Response(int(failure)))
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=(first_url, "https://www.work.ua/en/jobs-remote-django/"),
+            reader_base_url="https://reader.test",
+            retry_attempts=1,
+            client=client,
+        )
+        with pytest.raises(WorkUaSourceError) as error:
+            _ = [listing async for listing in source.fetch()]
+
+    summary = (
+        f"Work.ua search page unavailable ({expected_reason}): "
+        "https://www.work.ua/en/jobs-remote-python/?token=[REDACTED]."
+    )
+    assert str(error.value) == f"Every configured Work.ua search page failed. {summary}"
+    assert error.value.status_code == expected_status
+    assert error.value.reason == expected_code
+    assert "synthetic-test-key" not in str(error.value)
+    assert source.consume_warnings()[0] == summary
+    assert requests == ["/en/jobs-remote-python/"] * (2 if failure == "challenge" else 1) + [
+        "/en/jobs-remote-django/"
+    ]
+    metrics = source.consume_run_metrics()
+    assert metrics.page_count == 2 and metrics.candidate_count == 0
+    assert source.deactivate_missing_listings is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["rate_limit", "retry_after", "deadline", "request_budget"])
 async def test_shared_stop_preserves_discoveries_without_more_requests_or_detail_waits(
     monkeypatch: pytest.MonkeyPatch, stop: str
@@ -129,6 +190,44 @@ async def test_shared_stop_preserves_discoveries_without_more_requests_or_detail
     assert len(events) == 1
     assert events[0]["reason"] == stop
     assert events[0]["network_requests"] == len(expected_paths)
+
+
+@pytest.mark.asyncio
+async def test_oversized_detail_keeps_stale_description_and_reports_partial_refresh() -> None:
+    old_time = datetime.now(UTC) - timedelta(days=2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "jobs-remote" in request.url.path:
+            return httpx.Response(200, text=SEARCH_PAGE)
+        return httpx.Response(200, headers={"Content-Length": "100000000"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            detail_request_delay_seconds=0,
+            retry_attempts=1,
+            client=client,
+        )
+        source.prime_listing_cache(
+            {
+                "8441545": CachedListing(
+                    payload={
+                        "description": "Full cached text, never replaced by a truncated response"
+                    },
+                    detail_fetched_at=old_time,
+                )
+            }
+        )
+        rows = [row async for row in source.fetch()]
+    assert (
+        rows[0].payload["description"] == "Full cached text, never replaced by a truncated response"
+    )
+    assert rows[0].detail_fetched_at == old_time
+    assert rows[0].payload["detail_status"] == "cached"
+    assert source.consume_run_metrics().detail_failure_count == 1
+    assert any("response_limit" in warning for warning in source.consume_warnings())
 
 
 @pytest.mark.asyncio

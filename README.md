@@ -182,7 +182,14 @@ Do not commit `.env`, database dumps, private keys, certificates, or handoff doc
 
 ## Run with Docker Compose
 
-Build and start PostgreSQL, the API, worker, and Telegram bot:
+Configure the four separate service database URLs and provision database roles
+before starting the application. Follow the preparation/rollback sequence in
+[database service isolation](docs/database-service-isolation.md). The previous
+shared administrator DATABASE_URL is no longer used by Compose application services.
+The API receives no Telegram credentials; worker/bot keep their delivery settings.
+
+After provisioning, migrating and reapplying reviewed grants, build and start
+PostgreSQL, the API, worker, and Telegram bot:
 
 ```powershell
 .\scripts\compose.ps1 up --build -d
@@ -214,10 +221,11 @@ Stop the stack without deleting PostgreSQL data:
 
 ## Database migrations
 
-The API container applies committed migrations before Uvicorn starts. Apply them manually with:
+API startup never runs migrations. Use the separate maintenance service with its
+own schema-owner login, then reapply the reviewed access policy:
 
 ```powershell
-.\scripts\compose.ps1 run --rm api alembic upgrade head
+.\scripts\compose.ps1 --profile maintenance run --rm migrate
 ```
 
 Create and review a migration after changing ORM models:
@@ -275,6 +283,9 @@ core data tables, and retains local backups for 14 days by default. A failed res
 the new dump from being retained or uploaded. The systemd timer in
 `deploy/systemd/` runs the script daily at `03:15 UTC`. To verify an existing local dump without
 contacting the live database, run `bash scripts/verify_postgres_backup.sh /path/to/backup.dump`.
+The backup runner requires `JOBRADAR_BACKUP_DB_PASSWORD` for its separate read-only
+`jobradar_backup` login. Keep it in `/etc/jobradar/backup.env` (private permissions),
+even when S3 is not configured; never inject it into API/worker/bot.
 
 For off-site S3 backups, install AWS CLI v2, attach a least-privilege IAM role to the instance, and
 create `/etc/jobradar/backup.env`:
@@ -282,6 +293,7 @@ create `/etc/jobradar/backup.env`:
 ```dotenv
 JOBRADAR_BACKUP_S3_BUCKET=your-private-backup-bucket
 JOBRADAR_BACKUP_S3_PREFIX=postgres
+JOBRADAR_BACKUP_DB_PASSWORD=replace-with-the-separate-backup-role-password
 ```
 
 When the bucket is configured, the script uploads each validated dump and verifies its remote
@@ -327,7 +339,8 @@ the original diagnostic remains available internally.
 2. Set `APP_ENV=production`, unique database credentials, a random API bearer token, and exact
    public host allowlists in the deployment secret store.
 3. Terminate TLS at a maintained reverse proxy and expose only that proxy to the internet.
-4. Deploy an immutable image tag or digest, run `alembic upgrade head`, then verify `/health`,
+4. Deploy an immutable image tag or digest, run migrations through the maintenance service
+   and reapply the reviewed database grants (see the role-isolation runbook), then verify `/health`,
    `/ready`, authenticated `/jobs`, and authenticated `/matches`.
 5. Protect `main`, require the CI workflow, and review Dependabot pull requests before merging.
 

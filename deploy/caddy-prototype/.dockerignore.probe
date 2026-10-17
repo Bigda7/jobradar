@@ -1,0 +1,6 @@
+**
+!Dockerfile.probe
+!caddy.amd64
+!caddy.arm64
+!probe.amd64
+!probe.arm64

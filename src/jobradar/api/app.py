@@ -14,7 +14,7 @@ from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
-from sqlalchemy.sql.selectable import ScalarSelect
+from sqlalchemy.sql.selectable import Subquery
 
 from jobradar import __version__
 from jobradar.api.middleware import SecurityHeadersMiddleware
@@ -66,6 +66,8 @@ def create_app(
 ) -> FastAPI:
     selected_session_factory = application_session_factory or session_factory
     selected_settings = application_settings or settings
+    if selected_settings.service_role != "api":
+        raise ValueError("The HTTP application requires SERVICE_ROLE=api.")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -121,7 +123,9 @@ def create_app(
         if (
             not separator
             or scheme.casefold() != "bearer"
-            or not secrets.compare_digest(supplied_token, configured_token)
+            or not secrets.compare_digest(
+                supplied_token.encode("utf-8"), configured_token.encode("utf-8")
+            )
         ):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -232,21 +236,27 @@ def create_app(
             )
 
         total = await session.scalar(select(func.count()).select_from(Opportunity).where(*filters))
-        listing_url = _canonical_listing_url()
-        source_name = _canonical_source_name()
-        source_display_name = _canonical_source_display_name()
+        order_by = (_opportunity_recency().desc(), Opportunity.id.desc())
+        page = (
+            select(Opportunity.id.label("opportunity_id"))
+            .where(*filters)
+            .order_by(*order_by)
+            .limit(limit)
+            .offset(offset)
+            .subquery("job_page")
+        )
+        links = _page_source_links(page)
         rows = (
             await session.execute(
                 select(
                     Opportunity,
-                    listing_url.label("source_url"),
-                    source_name.label("source_name"),
-                    source_display_name.label("source_display_name"),
+                    links.c.source_url,
+                    links.c.source_name,
+                    links.c.source_display_name,
                 )
-                .where(*filters)
-                .order_by(_opportunity_recency().desc(), Opportunity.id.desc())
-                .limit(limit)
-                .offset(offset)
+                .join(links, links.c.opportunity_id == Opportunity.id)
+                .where(links.c.source_rank == 1)
+                .order_by(*order_by)
             )
         ).all()
         return JobListResponse(
@@ -320,6 +330,7 @@ def create_app(
         minimum_score: Annotated[int, Query(alias="min_score", ge=0, le=100)] = (
             selected_settings.matching_min_score
         ),
+        maximum_score: Annotated[int, Query(alias="max_score", ge=0, le=100)] = 100,
         source_filter: Annotated[
             str | None,
             Query(alias="source", min_length=1, max_length=100),
@@ -331,6 +342,8 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
         offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     ) -> MatchListResponse:
+        if maximum_score < minimum_score:
+            raise HTTPException(status_code=422, detail="max_score must be at least min_score")
         selected_source_name = _normalize_optional_filter(source_filter, "source")
         if selected_source_name is not None:
             selected_source_name = selected_source_name.casefold()
@@ -339,6 +352,7 @@ def create_app(
             MatchEvaluation.profile_id == BOHDAN_PROFILE.profile_id,
             MatchEvaluation.rules_version == BOHDAN_PROFILE.rules_version,
             MatchEvaluation.score >= minimum_score,
+            MatchEvaluation.score <= maximum_score,
             ~exists(
                 select(OpportunityUserState.opportunity_id).where(
                     OpportunityUserState.opportunity_id == MatchEvaluation.opportunity_id,
@@ -359,9 +373,6 @@ def create_app(
         total = await session.scalar(
             select(func.count()).select_from(MatchEvaluation).where(*filters)
         )
-        listing_url = _canonical_listing_url(selected_source_name)
-        source_name = _canonical_source_name(selected_source_name)
-        source_display_name = _canonical_source_display_name(selected_source_name)
         order_by = (
             (
                 _opportunity_recency().desc(),
@@ -382,23 +393,32 @@ def create_app(
                 Opportunity.id.desc(),
             )
         )
+        page = (
+            select(
+                Opportunity.id.label("opportunity_id"),
+                MatchEvaluation.id.label("evaluation_id"),
+            )
+            .join(MatchEvaluation, MatchEvaluation.opportunity_id == Opportunity.id)
+            .where(*filters)
+            .order_by(*order_by)
+            .limit(limit)
+            .offset(offset)
+            .subquery("match_page")
+        )
+        links = _page_source_links(page, selected_source_name)
         rows = (
             await session.execute(
                 select(
                     Opportunity,
                     MatchEvaluation,
-                    listing_url.label("source_url"),
-                    source_name.label("source_name"),
-                    source_display_name.label("source_display_name"),
+                    links.c.source_url,
+                    links.c.source_name,
+                    links.c.source_display_name,
                 )
-                .join(
-                    MatchEvaluation,
-                    MatchEvaluation.opportunity_id == Opportunity.id,
-                )
-                .where(*filters)
+                .join(links, links.c.opportunity_id == Opportunity.id)
+                .join(MatchEvaluation, MatchEvaluation.id == links.c.evaluation_id)
+                .where(links.c.source_rank == 1)
                 .order_by(*order_by)
-                .limit(limit)
-                .offset(offset)
             )
         ).all()
         items: list[MatchResponse] = []
@@ -481,44 +501,30 @@ def _active_listing_conditions(
     return tuple(conditions)
 
 
-def _canonical_listing_url(source_name: str | None = None) -> ScalarSelect[str]:
+def _page_source_links(page: Subquery, source_name: str | None = None) -> Subquery:
+    # Rank only links for the selected page, without repeated correlated lookups.
+    conditions = [
+        Listing.is_active.is_(True),
+        Source.enabled.is_(True),
+        trusted_listing_condition(),
+    ]
+    if source_name is not None:
+        conditions.append(Source.name == source_name)
     return (
-        select(Listing.source_url)
+        select(
+            *page.c,
+            Listing.source_url,
+            Source.name.label("source_name"),
+            Source.display_name.label("source_display_name"),
+            func.row_number()
+            .over(partition_by=Listing.opportunity_id, order_by=canonical_source_link_order())
+            .label("source_rank"),
+        )
+        .select_from(page)
+        .join(Listing, Listing.opportunity_id == page.c.opportunity_id)
         .join(Source, Source.id == Listing.source_id)
-        .where(
-            *_active_listing_conditions(source_name),
-        )
-        .order_by(*canonical_source_link_order())
-        .limit(1)
-        .scalar_subquery()
-    )
-
-
-def _canonical_source_name(source_name: str | None = None) -> ScalarSelect[str]:
-    return (
-        select(Source.name)
-        .join(Listing, Listing.source_id == Source.id)
-        .where(
-            *_active_listing_conditions(source_name),
-        )
-        .order_by(*canonical_source_link_order())
-        .limit(1)
-        .scalar_subquery()
-    )
-
-
-def _canonical_source_display_name(
-    source_name: str | None = None,
-) -> ScalarSelect[str]:
-    return (
-        select(Source.display_name)
-        .join(Listing, Listing.source_id == Source.id)
-        .where(
-            *_active_listing_conditions(source_name),
-        )
-        .order_by(*canonical_source_link_order())
-        .limit(1)
-        .scalar_subquery()
+        .where(*conditions)
+        .subquery("page_source_links")
     )
 
 

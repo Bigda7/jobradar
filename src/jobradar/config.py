@@ -15,8 +15,10 @@ class Settings(BaseSettings):
     )
 
     app_env: Literal["development", "test", "production"] = "development"
+    service_role: Literal["api", "worker", "bot", "migration"] = "api"
     log_level: str = "INFO"
     database_url: str = "postgresql+psycopg://jobradar:your_secure_password@localhost:5432/jobradar"
+    db_enforce_service_role: bool = False
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=5, ge=0, le=100)
     db_pool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
@@ -184,6 +186,11 @@ class Settings(BaseSettings):
         if self.app_env != "production":
             return self
 
+        if self.service_role != "api":
+            if "your_secure_password" in self.database_url:
+                raise ValueError("DATABASE_URL must not use the placeholder production password.")
+            return self
+
         token = (
             self.api_bearer_token.get_secret_value().strip()
             if self.api_bearer_token is not None
@@ -202,11 +209,21 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_service_database_role(self) -> "Settings":
+        if self.db_enforce_service_role:
+            parsed = urlsplit(self.database_url)
+            if parsed.scheme != "postgresql+psycopg" or parsed.username != (
+                f"jobradar_{self.service_role}"
+            ):
+                raise ValueError("DATABASE_URL must use the matching restricted service login.")
+        return self
+
+    @model_validator(mode="after")
     def validate_telegram_configuration(self) -> "Settings":
         if self.telegram_enabled and (
             self.telegram_bot_token is None
             or not self.telegram_bot_token.get_secret_value().strip()
-            or self.telegram_chat_id is None
+            or self.telegram_chat_id in {None, 0}
         ):
             raise ValueError(
                 "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when Telegram is enabled."

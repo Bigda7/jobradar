@@ -95,6 +95,104 @@ async def test_robota_empty_reader_failure_preserves_listing_and_records_cause(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["challenge", "403", "timeout", "response_limit", "redirect"])
+async def test_workua_all_search_failure_persists_cause_and_preserves_saved_state(
+    sqlite_session_factory: async_sessionmaker[AsyncSession], failure: str
+) -> None:
+    blocked = False
+    description = "Saved full description with requirements and responsibilities"
+    search_page = """
+    <div class="card card-hover wordwrap job-link">
+      <h2><a href="/en/jobs/123/">Python Developer</a></h2>
+      <span title="Company Information"></span><span>Example, Remote</span>
+      <p class="ellipsis ellipsis-line">Short search summary</p>
+    </div>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if blocked:
+            if failure == "response_limit":
+                return httpx.Response(200, headers={"Content-Length": "100000000"})
+            if failure == "redirect":
+                return httpx.Response(302, headers={"Location": "https://untrusted.test/"})
+            if failure == "timeout":
+                raise httpx.ReadTimeout("Synthetic timeout", request=request)
+            return httpx.Response(
+                403 if failure == "403" else 200,
+                text="Work.ua performing security verification",
+            )
+        return httpx.Response(
+            200,
+            text=search_page
+            if "jobs-remote" in request.url.path
+            else (f'<div id="job-description"><p>{description}</p></div>'),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            retry_attempts=1,
+            max_pages_per_search=1,
+            client=client,
+        )
+        service = IngestionService(sqlite_session_factory)
+        initial = await service.run_source(source)
+        assert initial.status is RunStatus.SUCCEEDED and initial.discovered == 1
+        async with sqlite_session_factory() as session, session.begin():
+            listing = await session.scalar(select(Listing))
+            assert listing is not None
+            snapshot = (
+                deepcopy(listing.raw_data),
+                listing.content_hash,
+                listing.last_seen_at,
+                listing.detail_fetched_at,
+            )
+            session.add(
+                NotificationDelivery(
+                    opportunity_id=listing.opportunity_id,
+                    profile_id=BOHDAN_PROFILE.profile_id,
+                    channel="telegram",
+                    event_key="match_found",
+                    status=DeliveryStatus.SENT.value,
+                    attempts=1,
+                    sent_at=datetime.now(UTC),
+                )
+            )
+        async with sqlite_session_factory() as session:
+            delivery = await session.scalar(select(NotificationDelivery))
+            assert delivery is not None
+            sent_snapshot = delivery.id, delivery.status, delivery.attempts, delivery.sent_at
+        blocked = True
+        result = await service.run_source(source)
+
+    assert result.status is RunStatus.FAILED
+    assert result.discovered == result.deactivated == 0
+    async with sqlite_session_factory() as session:
+        listing = await session.scalar(select(Listing))
+        opportunity = await session.scalar(select(Opportunity))
+        run = await session.scalar(select(SourceRun).order_by(SourceRun.id.desc()))
+        source_row = await session.scalar(select(Source))
+        delivery = await session.scalar(select(NotificationDelivery))
+        assert listing is not None and opportunity is not None and run is not None
+        assert source_row is not None and delivery is not None
+        assert listing.is_active and opportunity.description == description
+        assert snapshot == (
+            listing.raw_data,
+            listing.content_hash,
+            listing.last_seen_at,
+            listing.detail_fetched_at,
+        )
+        assert sent_snapshot == (delivery.id, delivery.status, delivery.attempts, delivery.sent_at)
+        assert await session.scalar(select(func.count()).select_from(NotificationDelivery)) == 1
+        expected_reason = "HTTP 403" if failure == "403" else failure
+        assert run.error_message is not None and expected_reason in run.error_message
+        assert "Every configured Work.ua search page failed." in run.error_message
+        assert source_row.last_error == run.error_message
+        assert run.warning_count == 1 and run.error_count == 2
+
+
+@pytest.mark.asyncio
 async def test_workua_failed_detail_refresh_preserves_stored_text_and_recovers(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -479,6 +577,32 @@ async def test_successful_crawl_deactivates_missing_listings_and_reactivates_the
         restored = await session.scalar(select(Listing).where(Listing.external_id == "mock-002"))
         assert restored is not None
         assert restored.is_active is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incomplete", ["warning", "limit"])
+async def test_incomplete_snapshot_does_not_deactivate_previously_seen_listings(
+    sqlite_session_factory: async_sessionmaker[AsyncSession], incomplete: str
+) -> None:
+    class IncompleteSnapshot(SnapshotMockSource):
+        async def fetch(self):  # type: ignore[no-untyped-def]
+            if incomplete == "warning":
+                self.report_warning("A page could not be completely downloaded.")
+            else:
+                self.mark_limit_reached()
+            async for listing in super().fetch():
+                yield listing
+
+    service = IngestionService(sqlite_session_factory)
+    await service.run_source(SnapshotMockSource())
+    result = await service.run_source(IncompleteSnapshot((DEFAULT_LISTINGS[0],)))
+    assert result.deactivated == 0
+    assert result.errors > 0 or result.limit_reached
+    async with sqlite_session_factory() as session:
+        assert (
+            await session.scalar(select(func.count()).select_from(Listing).where(Listing.is_active))
+            == 2
+        )
 
 
 @pytest.mark.asyncio

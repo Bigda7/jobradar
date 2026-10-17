@@ -137,6 +137,20 @@ and shipped files support treating the two Scout entries as overbroad origin met
 review, not automatically as two restrictive licenses on the library. No binary metadata was
 rewritten and no exception was silently granted.
 
+## Current Delivery Status (2026-10-03)
+
+The local/pre-publication statuses below are historical review stages, not the remaining
+delivery queue. v1.2.13 is now publicly delivered, independently downloaded/verified, and
+deployed; its source gate passed for 535 artifacts, 78 coverage records, and 16 native files.
+The still-public v1.2.12 image has a separately approved, anonymously verified source/notice
+supplement with 543 artifacts. Its original bytes and missing installed JobRadar notice are
+unchanged and explicitly documented. See the workspace `HANDOFF.md` and `FOLLOW_UP.md` for
+the verified publication record. No default Scout finding has been suppressed.
+
+These deliveries close the technical packaging/public-access tasks, not legal certification.
+The original unpinned musl-cross-make checkout and full native binary reconstruction remain
+unproven. There has been no project-license change or dependency replacement.
+
 ## Completion Criteria and Current Boundary
 
 Recommended route: keep the working base and dependencies; comply with the applicable licenses

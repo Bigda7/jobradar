@@ -15,12 +15,29 @@ fi
 backup_path="$1"
 postgres_image='postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73'
 container_name="jobradar-restore-check-$$-${RANDOM}"
+container_created=0
+cgroup_arguments=()
+if [[ -n "${JOBRADAR_BACKUP_CGROUP_PARENT:-}" ]]; then
+  if [[ ! "${JOBRADAR_BACKUP_CGROUP_PARENT}" =~ ^jobradar\.slice$ &&
+        ! "${JOBRADAR_BACKUP_CGROUP_PARENT}" =~ ^/jobradar-memory-[0-9a-f]{12}$ ]]; then
+    printf 'Unsupported JobRadar backup resource group.\n' >&2
+    exit 1
+  fi
+  cgroup_arguments=(--cgroup-parent "${JOBRADAR_BACKUP_CGROUP_PARENT}")
+fi
 export POSTGRES_PASSWORD
 POSTGRES_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d '[:space:]')"
 
 cleanup() {
-  # Remove only this isolated container and its anonymous restore volume.
-  docker rm --force --volumes "${container_name}" >/dev/null 2>&1 || true
+  if [[ "${container_created}" -eq 1 ]]; then
+    owner="$(docker inspect --format '{{index .Config.Labels "jobradar.restore-check.run"}}' "${container_name}" 2>/dev/null || true)"
+    if [[ "${owner}" == "${container_name}" ]]; then
+      docker rm --force --volumes "${container_name}" >/dev/null
+    elif docker inspect "${container_name}" >/dev/null 2>&1; then
+      printf 'Refusing cleanup of an unrelated restore container.\n' >&2
+      exit 1
+    fi
+  fi
 }
 trap cleanup EXIT
 
@@ -29,11 +46,33 @@ docker run \
   --rm \
   --name "${container_name}" \
   --network none \
+  --memory 256m \
+  --memory-swap 256m \
+  --cpus 1 \
+  --pids-limit 128 \
   --label jobradar.restore-check=true \
+  --label "jobradar.restore-check.run=${container_name}" \
   --env POSTGRES_DB=jobradar \
   --env POSTGRES_USER=jobradar \
   --env POSTGRES_PASSWORD \
+  "${cgroup_arguments[@]}" \
   "${postgres_image}" >/dev/null
+container_created=1
+restore_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}' "${container_name}")"
+if [[ ! "${restore_volume}" =~ ^[0-9a-f]{64}$ ]]; then
+  printf 'Unexpected restore fixture volume.\n' >&2
+  exit 1
+fi
+printf 'Restore volume: %s\n' "${restore_volume}"
+
+if [[ -n "${JOBRADAR_BACKUP_CGROUP_PARENT:-}" ]]; then
+  actual_parent="$(docker inspect --format '{{.HostConfig.CgroupParent}}' "${container_name}")"
+  if [[ "${actual_parent}" != "${JOBRADAR_BACKUP_CGROUP_PARENT}" ]]; then
+    printf 'Backup restore resource group mismatch.\n' >&2
+    exit 1
+  fi
+  printf 'Backup restore resource group verified.\n'
+fi
 
 ready=0
 for _ in {1..30}; do

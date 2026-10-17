@@ -7,11 +7,20 @@ from jobradar.matching.freelance import score_freelance_candidate
 from jobradar.matching.locations import evaluate_location_eligibility
 from jobradar.matching.models import MatchCandidate as MatchCandidate
 from jobradar.matching.models import ScoreResult as ScoreResult
-from jobradar.matching.profile import NegativeSkillRule, SearchProfile
+from jobradar.matching.profile import SearchProfile
 from jobradar.matching.rejections import (
     hard_rejection_concern,
     has_junior_title,
     required_experience_years,
+)
+from jobradar.matching.requirements import (
+    Evidence,
+    RequirementContext,
+    mention_evidence,
+    role_title,
+)
+from jobradar.matching.requirements import (
+    string_values as _string_values,
 )
 from jobradar.matching.sanity import evaluate_sanity, monthly_salary_usd
 from jobradar.notifications.currency import ExchangeRates
@@ -31,60 +40,51 @@ INCOMPATIBLE_TITLE_TERMS = (
     "project manager",
     "product manager",
     "data scientist",
-    "machine learning",
     "embedded",
     "hardware",
     "vlsi",
-    "blockchain",
 )
 ROLE_GROUPS = (
     ("Full-stack разработка", ("full stack", "fullstack", "full-stack"), 20),
     (
         "Front-end разработка",
-        ("front end", "frontend", "front-end", "react developer", "javascript developer"),
+        (
+            "front end",
+            "frontend",
+            "front-end",
+            "react developer",
+            "javascript developer",
+            "next.js developer",
+            "nextjs developer",
+        ),
         20,
     ),
-    ("Back-end разработка на Python", ("python developer", "django developer"), 18),
+    (
+        "Backend development",
+        (
+            "python developer",
+            "django developer",
+            "fastapi developer",
+            "node.js developer",
+            "nodejs developer",
+            "backend",
+            "back-end",
+            "back end",
+            "express developer",
+        ),
+        18,
+    ),
+    (
+        "API integration and automation",
+        (
+            "api integration",
+            "integration developer",
+            "automation developer",
+            "web scraping developer",
+        ),
+        16,
+    ),
     ("Веб-разработка", ("web developer", "software developer", "software engineer"), 10),
-)
-AMBIGUOUS_NEGATIVE_SKILL_ALIASES = frozenset({"go", "spring", "vue"})
-NEGATIVE_SKILL_CORE_MARKERS = (
-    "backend",
-    "backend stack",
-    "core stack",
-    "main stack",
-    "mandatory",
-    "must",
-    "primary stack",
-    "proficient",
-    "required",
-    "requirements",
-    "solid knowledge",
-    "strong knowledge",
-    "tech stack",
-    "technology stack",
-    "необходимо",
-    "обов'язково",
-    "обязательно",
-    "обязательный",
-    "основний стек",
-    "основной стек",
-    "требуется",
-    "вимога",
-)
-NEGATIVE_SKILL_OPTIONAL_MARKERS = (
-    "advantage",
-    "bonus",
-    "good to have",
-    "nice to have",
-    "optional",
-    "plus",
-    "preferred",
-    "will be a plus",
-    "будет плюсом",
-    "желательно",
-    "необязательно",
-    "перевагою",
 )
 CZECH_DESCRIPTION_MARKERS = (
     "nabízíme",
@@ -96,11 +96,6 @@ CZECH_DESCRIPTION_MARKERS = (
     "odpovědnosti",
     "výhodou",
 )
-NODE_BACKEND_PATTERN = re.compile(
-    r"(?<!\w)(?:node(?:\.js|js)?|nestjs|express(?:\.js|js)?|fastify)(?!\w)"
-)
-PYTHON_BACKEND_PATTERN = re.compile(r"(?<!\w)(?:python|django|fastapi|flask|sqlalchemy)(?!\w)")
-BACKEND_ROLE_PATTERN = re.compile(r"(?<!\w)(?:full[- ]?stack|backend|back[- ]end)(?!\w)")
 SUSPICIOUS_APPLICATION_URL_PATTERN = re.compile(
     r"(?i)(?:job-seekers?/account/register|/(?:pricing|subscription|membership|"
     r"upgrade|checkout|payment)(?:[/?#]|$))"
@@ -142,18 +137,9 @@ def score_candidate(
         else "Office or hybrid work in Prague matches your location preference."
     ]
     concerns = list(sanity.concerns + location.concerns)
-    title = normalize_text(candidate.title)
-    searchable_text = normalize_text(
-        " ".join(
-            value
-            for value in (
-                candidate.title,
-                candidate.company,
-                candidate.description,
-                _structured_search_text(candidate.raw_data),
-            )
-            if value
-        )
+    title = role_title(candidate.title)
+    context = RequirementContext.from_text(
+        candidate.title, candidate.description, candidate.raw_data
     )
 
     if _contains_any(title, INCOMPATIBLE_TITLE_TERMS):
@@ -177,12 +163,21 @@ def score_candidate(
 
     matched_skills: list[str] = []
     skill_score = 0
+    supporting_score = 0
+    core_skills = 0
     for skill in profile.skills:
-        if _contains_any(searchable_text, skill.aliases):
-            matched_skills.append(skill.name)
-            skill_score += skill.weight
+        evidence = context.evidence(skill.aliases)
+        if evidence < Evidence.OPTIONAL:
+            continue
+        matched_skills.append(skill.name)
+        weight = min(skill.weight, 3) if evidence is Evidence.OPTIONAL else skill.weight
+        if skill.supporting:
+            supporting_score += weight
+        else:
+            skill_score += weight
+            core_skills += evidence >= Evidence.UNSPECIFIED
     if matched_skills:
-        score += min(skill_score, 45)
+        score += min(skill_score + min(supporting_score, 8), 45)
         reasons.append(f"Совпавшие навыки: {', '.join(matched_skills)}.")
     else:
         concerns.append("Не найдены ключевые слова целевого технологического стека.")
@@ -198,13 +193,20 @@ def score_candidate(
     score += sanity.score_adjustment
     score += _experience_adjustment(candidate, reasons, concerns)
     score += _salary_adjustment(candidate, profile, reasons, concerns, rates)
-    score += _language_adjustment(searchable_text, profile, concerns)
-    score += _backend_stack_adjustment(title, searchable_text, concerns)
+    score += _language_adjustment(context, profile, concerns)
     score += _application_flow_adjustment(candidate.raw_data, concerns)
-    negative_skills, has_core_negative_skill = _negative_skill_matches(
-        candidate,
-        profile.negative_skills,
+    negative_skills: list[str] = []
+    has_core_negative_skill = False
+    alternatives = tuple(
+        alias for skill in profile.skills if not skill.supporting for alias in skill.aliases
     )
+    for rule in profile.negative_skills:
+        evidence = context.evidence(rule.aliases, alternatives=alternatives)
+        if evidence is Evidence.OPTIONAL:
+            concerns.append(f"Optional technology outside your demonstrated stack: {rule.name}.")
+        elif evidence >= Evidence.UNSPECIFIED:
+            negative_skills.append(rule.name)
+            has_core_negative_skill |= evidence is Evidence.REQUIRED
     if negative_skills:
         score -= profile.negative_skill_penalty
         concerns.append(
@@ -213,6 +215,24 @@ def score_candidate(
         )
 
     final_score = max(0, min(score, 100))
+    if not core_skills:
+        final_score = min(final_score, max(0, profile.notification_threshold - 1))
+        concerns.append(
+            "No demonstrated core stack match; tools or optional skills alone are insufficient."
+        )
+    years = required_experience_years(candidate)
+    mixed_level = has_junior_title(title) and re.search(r"\b(?:middle|mid[- ]level)\b", title)
+    structured_middle = any(
+        normalize_text(value).replace("_", " ").replace("-", " ") in {"mid", "middle", "mid level"}
+        for key in ("seniority", "levels")
+        for value in _string_values(candidate.raw_data.get(key))
+    )
+    if mixed_level or structured_middle or (years is not None and 2 <= years < 3):
+        final_score = min(final_score, max(0, profile.notification_threshold - 1))
+        concerns.append(
+            "Stretch match: experience or mixed Junior/Middle level "
+            "exceeds your demonstrated background."
+        )
     if has_core_negative_skill:
         final_score = min(final_score, max(0, profile.notification_threshold - 1))
         concerns.append(
@@ -244,6 +264,9 @@ def _experience_adjustment(
     if years < 3 and has_junior_title(candidate.title):
         concerns.append("Junior-вакансия требует около двух лет опыта.")
         return -5
+    if years < 3:
+        concerns.append("The role requests about two years of experience; treat it as a stretch.")
+        return -10
     concerns.append("Требуемый опыт значительно превышает уровень Junior.")
     return -25
 
@@ -272,27 +295,6 @@ def _seniority_adjustment(
     return 0
 
 
-def _structured_search_text(raw_data: dict[str, Any]) -> str:
-    values: list[str] = []
-    for key in ("categories", "parentCategories", "tags", "skills"):
-        values.extend(_string_values(raw_data.get(key)))
-    return " ".join(values)
-
-
-def _string_values(value: Any) -> tuple[str, ...]:
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, dict):
-        return tuple(
-            item
-            for key in ("name", "short_name", "label", "title", "slug")
-            if isinstance((item := value.get(key)), str) and item.strip()
-        )
-    if not isinstance(value, list | tuple | set):
-        return ()
-    return tuple(item for child in value for item in _string_values(child))
-
-
 def _salary_adjustment(
     candidate: MatchCandidate,
     profile: SearchProfile,
@@ -312,39 +314,30 @@ def _salary_adjustment(
 
 
 def _language_adjustment(
-    searchable_text: str,
+    context: RequirementContext,
     profile: SearchProfile,
     concerns: list[str],
 ) -> int:
-    if re.search(r"english\s*(?:-|:)?\s*(?:c1|c2|advanced|fluent)", searchable_text):
+    if any(
+        re.search(r"english\s*(?:-|:)?\s*(?:c1|c2|advanced|fluent)", clause.text)
+        and mention_evidence(clause, "english") >= Evidence.UNSPECIFIED
+        for clause in context.clauses
+    ):
         concerns.append(
             f"Требуемый уровень английского выше текущего уровня {profile.english_level}."
         )
         return -10
-    czech_markers = sum(marker in searchable_text for marker in CZECH_DESCRIPTION_MARKERS)
+    czech_markers = sum(marker in context.text for marker in CZECH_DESCRIPTION_MARKERS)
     if czech_markers >= 3 and not re.search(
         r"(?:czech|čeština|český jazyk).{0,24}(?:a1|a2|basic|základní)",
-        searchable_text,
+        context.text,
     ):
         concerns.append(
             f"Описание преимущественно на чешском языке; текущий уровень — {profile.czech_level}."
         )
-        return -20
-    return 0
-
-
-def _backend_stack_adjustment(
-    title: str,
-    searchable_text: str,
-    concerns: list[str],
-) -> int:
-    if (
-        BACKEND_ROLE_PATTERN.search(title)
-        and NODE_BACKEND_PATTERN.search(searchable_text)
-        and not PYTHON_BACKEND_PATTERN.search(searchable_text)
-    ):
-        concerns.append("Backend вакансии основан на Node.js без Python в основном стеке.")
-        return -15
+        concerns.append(
+            "The language of the advertisement alone does not establish a Czech requirement."
+        )
     return 0
 
 
@@ -370,109 +363,6 @@ def _application_urls(value: Any, key: str = "") -> tuple[str, ...]:
         if any(marker in normalized_key for marker in ("url", "link", "apply", "application")):
             return (value,)
     return ()
-
-
-def _negative_skill_matches(
-    candidate: MatchCandidate,
-    rules: tuple[NegativeSkillRule, ...],
-) -> tuple[tuple[str, ...], bool]:
-    title = normalize_text(candidate.title)
-    description = normalize_text(candidate.description)
-    structured_values = tuple(
-        normalize_text(value)
-        for key in ("categories", "parentCategories", "tags", "skills")
-        for value in _string_values(candidate.raw_data.get(key))
-    )
-    matched_names: list[str] = []
-    has_core_match = False
-    for rule in rules:
-        title_match = _contains_any(title, rule.aliases)
-        structured_match = any(_contains_any(value, rule.aliases) for value in structured_values)
-        description_aliases = tuple(
-            alias
-            for alias in rule.aliases
-            if normalize_text(alias) not in AMBIGUOUS_NEGATIVE_SKILL_ALIASES
-        )
-        description_match = _contains_any(description, description_aliases) or any(
-            _ambiguous_alias_has_technology_context(description, alias)
-            for alias in rule.aliases
-            if normalize_text(alias) in AMBIGUOUS_NEGATIVE_SKILL_ALIASES
-        )
-        if not (title_match or structured_match or description_match):
-            continue
-        matched_names.append(rule.name)
-        explicitly_optional = any(
-            _negative_skill_is_explicitly_optional(description, alias)
-            for alias in rule.aliases
-            if _contains_any(description, (alias,))
-        )
-        if (
-            title_match
-            or (structured_match and not explicitly_optional)
-            or _negative_skill_is_core(description, rule.aliases)
-        ):
-            has_core_match = True
-    return tuple(matched_names), has_core_match
-
-
-def _negative_skill_is_core(description: str, aliases: tuple[str, ...]) -> bool:
-    for alias in aliases:
-        if not _contains_any(description, (alias,)):
-            continue
-        core_distance = _alias_marker_distance(description, alias, NEGATIVE_SKILL_CORE_MARKERS)
-        optional_distance = _alias_marker_distance(
-            description,
-            alias,
-            NEGATIVE_SKILL_OPTIONAL_MARKERS,
-        )
-        if core_distance is not None and (
-            optional_distance is None or core_distance < optional_distance
-        ):
-            return True
-    return False
-
-
-def _negative_skill_is_explicitly_optional(description: str, alias: str) -> bool:
-    optional_distance = _alias_marker_distance(
-        description,
-        alias,
-        NEGATIVE_SKILL_OPTIONAL_MARKERS,
-    )
-    if optional_distance is None:
-        return False
-    core_distance = _alias_marker_distance(description, alias, NEGATIVE_SKILL_CORE_MARKERS)
-    return core_distance is None or optional_distance <= core_distance
-
-
-def _alias_marker_distance(text: str, alias: str, markers: tuple[str, ...]) -> int | None:
-    alias_pattern = _term_pattern(alias)
-    marker_pattern = "(?:" + "|".join(re.escape(normalize_text(marker)) for marker in markers) + ")"
-    alias_matches = tuple(re.finditer(alias_pattern, text))
-    marker_matches = tuple(re.finditer(marker_pattern, text))
-    distances = (
-        max(alias_match.start() - marker_match.end(), marker_match.start() - alias_match.end(), 0)
-        for alias_match in alias_matches
-        for marker_match in marker_matches
-    )
-    nearby_distances = tuple(distance for distance in distances if distance <= 60)
-    return min(nearby_distances, default=None)
-
-
-def _ambiguous_alias_has_technology_context(text: str, alias: str) -> bool:
-    alias_pattern = _term_pattern(alias)
-    prefix_pattern = (
-        r"(?:experience|knowledge|proficiency|proficient|required|skills?)"
-        r"(?:\s+(?:in|of|with))?\s+"
-    )
-    suffix_pattern = (
-        r"(?:backend|developer|engineer|experience|framework|knowledge|language|"
-        r"nice to have|optional|preferred|required|skills?|stack|will be a plus|"
-        r"будет плюсом|желательно|перевагою)"
-    )
-    return (
-        re.search(rf"{prefix_pattern}{alias_pattern}", text) is not None
-        or re.search(rf"{alias_pattern}\s+(?:is\s+)?{suffix_pattern}", text) is not None
-    )
 
 
 def _contains_any(value: str, terms: tuple[str, ...]) -> bool:

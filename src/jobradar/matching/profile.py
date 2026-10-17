@@ -7,6 +7,7 @@ class SkillRule:
     name: str
     aliases: tuple[str, ...]
     weight: int
+    supporting: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +43,7 @@ class SearchProfile:
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v15-prague-location-eligibility",
+    rules_version="bohdan-multi-source-v16-context-aware-portfolio",
     residence_country_aliases=(
         "CZ",
         "CZE",
@@ -92,6 +93,31 @@ BOHDAN_PROFILE = SearchProfile(
         SkillRule("HTML/CSS", ("html5", "css3", "html", "css"), 4),
         SkillRule("Shopify/Liquid", ("shopify", "liquid", "online store 2.0"), 10),
         SkillRule("SQLAlchemy", ("sqlalchemy",), 4),
+        SkillRule("FastAPI", ("fastapi", "fast api"), 10),
+        SkillRule("Next.js", ("next.js", "nextjs", "next js"), 10),
+        SkillRule("Node.js", ("node.js", "nodejs", "node js"), 8),
+        SkillRule("Express", ("express", "express.js", "expressjs"), 6),
+        SkillRule("WebSockets", ("websocket", "websockets", "web sockets"), 4),
+        SkillRule(
+            "LLM API integration",
+            (
+                "llm api",
+                "llm integration",
+                "tool calling",
+                "function calling",
+                "openai api",
+                "deepseek",
+            ),
+            6,
+        ),
+        SkillRule("Tailwind CSS", ("tailwind", "tailwindcss"), 2, supporting=True),
+        SkillRule("Prisma", ("prisma",), 2, supporting=True),
+        SkillRule("Validation", ("zod", "pydantic"), 2, supporting=True),
+        SkillRule("Browser automation", ("playwright",), 3, supporting=True),
+        SkillRule("Testing", ("pytest", "vitest"), 2, supporting=True),
+        SkillRule("Docker", ("docker",), 2, supporting=True),
+        SkillRule("AWS", ("aws", "amazon web services"), 2, supporting=True),
+        SkillRule("CI/CD", ("github actions", "ci/cd"), 2, supporting=True),
     ),
     negative_skill_penalty=15,
     negative_skills=(
@@ -125,5 +151,25 @@ BOHDAN_PROFILE = SearchProfile(
         NegativeSkillRule("WordPress", ("wordpress", "wp developer")),
         NegativeSkillRule("Bitrix", ("bitrix", "1c-bitrix", "1c bitrix")),
         NegativeSkillRule("Magento", ("magento", "adobe commerce")),
+        NegativeSkillRule("NestJS", ("nestjs", "nest.js")),
+        NegativeSkillRule("React Native", ("react native",)),
+        NegativeSkillRule("Semantic graph engineering", ("sparql", "shacl", "metaphactory")),
+        NegativeSkillRule("Solidity", ("solidity",)),
+        NegativeSkillRule("Smart contracts", ("smart contract", "smart contracts")),
+        NegativeSkillRule(
+            "Blockchain engineering", ("blockchain developer", "blockchain engineer")
+        ),
+        NegativeSkillRule("ML engineering", ("machine learning engineer", "ml engineer")),
+        NegativeSkillRule(
+            "Model training",
+            (
+                "model training",
+                "train models",
+                "training models",
+                "pytorch",
+                "tensorflow",
+                "computer vision",
+            ),
+        ),
     ),
 )

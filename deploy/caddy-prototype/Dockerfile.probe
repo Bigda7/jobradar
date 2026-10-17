@@ -1,0 +1,7 @@
+FROM scratch
+ARG ARCH
+COPY caddy.${ARCH} /caddy
+COPY probe.${ARCH} /probe
+USER 65532:65532
+ENV HOME=/tmp XDG_DATA_HOME=/tmp/data XDG_CONFIG_HOME=/tmp/config
+ENTRYPOINT ["/probe", "/caddy"]

@@ -1,0 +1,7 @@
+# Preserve patch context whitespace; the source checksums validate exact bytes.
+upstream/*.patch -text -whitespace
+patches/*.patch text eol=lf -whitespace
+generated/*.patch text eol=lf -whitespace
+upstream/SHA256SUMS text eol=lf
+generated/SHA256SUMS text eol=lf
+builder-packages.txt text eol=lf

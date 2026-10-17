@@ -1,0 +1,33 @@
+# Opt-in 2 GiB profile. Install and verify jobradar.slice before applying this file.
+# Individual ceilings share the 1408 MiB aggregate ceiling; they are not reservations.
+services:
+  api:
+    cgroup_parent: jobradar.slice
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 1.0
+    pids_limit: 64
+  worker:
+    cgroup_parent: jobradar.slice
+    mem_limit: 448m
+    memswap_limit: 448m
+    cpus: 1.0
+    pids_limit: 64
+  bot:
+    cgroup_parent: jobradar.slice
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    pids_limit: 32
+  db:
+    cgroup_parent: jobradar.slice
+    mem_limit: 640m
+    memswap_limit: 640m
+    cpus: 1.0
+    pids_limit: 128
+  migrate:
+    cgroup_parent: jobradar.slice
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.0
+    pids_limit: 64

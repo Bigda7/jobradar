@@ -151,7 +151,7 @@ def test_matching_profile_penalizes_english_above_b2() -> None:
         "Magento",
     ),
 )
-def test_matching_profile_applies_one_negative_skill_penalty_to_optional_technology(
+def test_matching_profile_warns_without_penalizing_optional_technology(
     technology: str,
 ) -> None:
     base_candidate = _candidate(
@@ -177,8 +177,8 @@ def test_matching_profile_applies_one_negative_skill_penalty_to_optional_technol
         BOHDAN_PROFILE,
     )
 
-    assert result.score == baseline.score - BOHDAN_PROFILE.negative_skill_penalty
-    assert any("Применён штраф 15 баллов" in concern for concern in result.concerns)
+    assert result.score == baseline.score
+    assert any("Optional technology" in concern for concern in result.concerns)
     assert not any("основная или обязательная" in concern for concern in result.concerns)
 
 
@@ -624,7 +624,7 @@ def test_matching_profile_rejects_three_or_more_years_in_description(
     assert "трёх лет" in result.concerns[0]
 
 
-def test_matching_profile_rejects_two_years_without_junior_title() -> None:
+def test_matching_profile_labels_two_years_without_junior_title_as_stretch() -> None:
     result = score_candidate(
         _candidate(
             title="React Developer",
@@ -634,8 +634,8 @@ def test_matching_profile_rejects_two_years_without_junior_title() -> None:
         BOHDAN_PROFILE,
     )
 
-    assert result.score == 0
-    assert "двух лет" in result.concerns[0]
+    assert 0 < result.score < BOHDAN_PROFILE.notification_threshold
+    assert any("Stretch match" in concern for concern in result.concerns)
 
 
 def test_matching_profile_keeps_junior_role_requesting_two_years_with_concern() -> None:
@@ -744,7 +744,7 @@ def test_matching_profile_penalizes_czech_description_without_basic_level() -> N
     assert any("чешском языке" in concern for concern in result.concerns)
 
 
-def test_matching_profile_penalizes_node_only_backend_role() -> None:
+def test_matching_profile_distinguishes_node_from_unproven_nestjs() -> None:
     result = score_candidate(
         _candidate(
             title="Junior Full-Stack Developer",
@@ -754,7 +754,9 @@ def test_matching_profile_penalizes_node_only_backend_role() -> None:
         BOHDAN_PROFILE,
     )
 
-    assert any("Node.js без Python" in concern for concern in result.concerns)
+    assert "Node.js" in result.matched_skills
+    assert result.score < BOHDAN_PROFILE.notification_threshold
+    assert any("NestJS" in concern for concern in result.concerns)
 
 
 def test_matching_profile_warns_about_paid_application_flow() -> None:

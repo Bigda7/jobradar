@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -36,6 +37,17 @@ async def postgres_engine() -> AsyncIterator[AsyncEngine]:
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
         pytest.skip("TEST_DATABASE_URL is required for PostgreSQL integration tests.")
+
+    try:
+        target = make_url(database_url)
+    except Exception:
+        pytest.fail("TEST_DATABASE_URL must identify the isolated jobradar_test database.")
+    if (
+        target.get_backend_name() != "postgresql"
+        or target.database != "jobradar_test"
+        or target.host not in {"127.0.0.1", "localhost", "db-test"}
+    ):
+        pytest.fail("TEST_DATABASE_URL must identify the isolated local jobradar_test database.")
 
     engine = create_engine(database_url)
     async with engine.begin() as connection:

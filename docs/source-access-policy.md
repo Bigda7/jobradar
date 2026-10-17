@@ -1,6 +1,6 @@
 # Source Access Policy
 
-Last reviewed: 2026-10-05 (Djinni update; other source reviews unchanged)
+Last reviewed: 2026-10-16 (Robota support/export update; other source reviews unchanged)
 
 This document records the access method, attribution requirements, retention constraints, and
 commercial-use risk for the four sources supported by the current production registry. It is an
@@ -23,8 +23,19 @@ checked again before a public or commercial release.
 | --- | --- | --- | --- | --- |
 | Djinni | Official filtered RSS plus bounded public JobPosting page metadata enrichment, deployed in v1.2.15; faster scheduling/persistent budgets are a local candidate | RSS recommended and full descriptions allowed; missing-field supplementation described as acceptable in the owner-supplied follow-up | Keep attribution and original URL; up to 100 RSS requests/minute; local HTML ceilings: 100/run and at least 2 seconds spacing, with 100/hour persistence in the local candidate, not a provider allowance; no retention duration specified | Reconfirm terms for a changed commercial or multi-user scope |
 | DOU Jobs | Official vacancy RSS feed | Approved | Keep DOU attribution and the original URL | Recheck feed terms before commercial launch |
-| Robota.ua | Public search pages and public vacancy details | Conditional | Preserve the original meaning and include a mandatory source link | Confirm commercial reuse before a commercial or multi-user launch |
+| Robota.ua | Current adapter: search/details through Reader; provider-recommended replacement: partner JSON export, not implemented | Owner-supplied support reply offers integration without a contract; documented data URLs returned Cloudflare 403 on October16 | Preserve original links; export schema, coverage, retention and redistribution details need confirmation | Confirm future commercial reuse; do not infer blanket permission from a public export |
 | Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Keep current polling and coverage unchanged; reassess terms and seek explicit permission before commercial or multi-user use |
+
+## Robota.ua Partner Export Review
+
+On October16 the owner supplied a support reply distinguishing the employer-only API
+from partner aggregation access. Support supplied JSON export documentation and said
+no contract is needed for the described service. The document was successfully read;
+four bounded workstation file checks and one production-server vacancy-export probe
+returned Cloudflare 403 HTML, so record schemas and actual
+coverage remain unverified. The existing adapter and scheduling were not changed.
+See [export review and follow-up draft](robota-provider-export-review-2026-10-16.md).
+Request the supported server access procedure rather than bypassing the challenge.
 
 ## Work.ua Review for the Public Portfolio
 

@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!source.tar.gz
+!build_candidate.sh
+!verify_graph.go
+!integration_probe.go
