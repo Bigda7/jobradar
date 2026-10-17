@@ -6,6 +6,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from jobradar.http_download import bounded_get
+
 TARGET_CURRENCIES = ("USD", "UAH", "CZK")
 DEFAULT_NBU_RATES_URL = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
 USER_AGENT = "JobRadar/0.5 (personal job aggregator)"
@@ -103,7 +105,12 @@ class NbuExchangeRateClient:
 
     async def _request(self, client: httpx.AsyncClient) -> ExchangeRates:
         try:
-            response = await client.get(self._rates_url)
+            response = await bounded_get(
+                client,
+                self._rates_url,
+                timeout_seconds=self._request_timeout_seconds,
+                maximum_bytes=1_000_000,
+            )
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as error:

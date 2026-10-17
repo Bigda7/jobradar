@@ -1,0 +1,445 @@
+Subject: [PATCH] Backport security fixes to libxml2 2.13.9
+
+--- a/uri.c
++++ b/uri.c
+@@ -1704,6 +1704,8 @@
+     if (str[0] == 0)
+ 	return(xmlStrdup(str));
+     len = xmlStrlen(str);
++    if ((len == 0) || (len > INT_MAX - 20))
++        return(NULL);
+ 
+     len += 20;
+     ret = (xmlChar *) xmlMallocAtomic(len);
+@@ -1713,8 +1715,10 @@
+     out = 0;
+     while(*in != 0) {
+ 	if (len - out <= 3) {
+-            if (len > INT_MAX / 2)
++            if (len > INT_MAX / 2) {
++                xmlFree(ret);
+                 return(NULL);
++            }
+             temp = xmlRealloc(ret, len * 2);
+ 	    if (temp == NULL) {
+ 		xmlFree(ret);
+--- a/xpointer.c
++++ b/xpointer.c
+@@ -955,6 +955,12 @@
+     level = 1;
+ 
+     len = xmlStrlen(ctxt->cur);
++    if (((len == 0) && (ctxt->cur != NULL) && (*ctxt->cur != 0)) ||
++        (len == INT_MAX)) {
++        xmlXPathPErrMemory(ctxt);
++        xmlFree(name);
++        return;
++    }
+     len++;
+     buffer = (xmlChar *) xmlMallocAtomic(len);
+     if (buffer == NULL) {
+--- a/xmlIO.c
++++ b/xmlIO.c
+@@ -2538,9 +2538,14 @@
+ 	    ret = xmlCharEncOutput(out, 0);
+ 	    if (ret < 0)
+ 		return(-1);
+-            if (out->writecallback)
+-	        nbchars = xmlBufUse(out->conv);
+-            else
++            if (out->writecallback) {
++                size_t size = xmlBufUse(out->conv);
++                if (size >= INT_MAX) {
++                    out->error = XML_ERR_INTERNAL_ERROR;
++                    return(-1);
++                }
++                nbchars = (int) size;
++            } else
+                 nbchars = ret >= 0 ? ret : 0;
+ 	} else {
+ 	    ret = xmlBufAdd(out->buffer, (const xmlChar *) buf, chunk);
+@@ -2548,9 +2553,14 @@
+                 out->error = XML_ERR_NO_MEMORY;
+ 	        return(-1);
+             }
+-            if (out->writecallback)
+-	        nbchars = xmlBufUse(out->buffer);
+-            else
++            if (out->writecallback) {
++                size_t size = xmlBufUse(out->buffer);
++                if (size >= INT_MAX) {
++                    out->error = XML_ERR_INTERNAL_ERROR;
++                    return(-1);
++                }
++                nbchars = (int) size;
++            } else
+                 nbchars = chunk;
+ 	}
+ 	buf += chunk;
+@@ -2740,9 +2750,14 @@
+ 	    ret = xmlCharEncOutput(out, 0);
+ 	    if (ret < 0)
+ 		return(-1);
+-            if (out->writecallback)
+-	        nbchars = xmlBufUse(out->conv);
+-            else
++            if (out->writecallback) {
++                size_t size = xmlBufUse(out->conv);
++                if (size >= INT_MAX) {
++                    out->error = XML_ERR_INTERNAL_ERROR;
++                    return(-1);
++                }
++                nbchars = (int) size;
++            } else
+                 nbchars = ret >= 0 ? ret : 0;
+ 	} else {
+ 	    ret = escaping(xmlBufEnd(out->buffer), &chunk, str, &cons);
+@@ -2751,9 +2766,14 @@
+                 return(-1);
+             }
+             xmlBufAddLen(out->buffer, chunk);
+-            if (out->writecallback)
+-	        nbchars = xmlBufUse(out->buffer);
+-            else
++            if (out->writecallback) {
++                size_t size = xmlBufUse(out->buffer);
++                if (size >= INT_MAX) {
++                    out->error = XML_ERR_INTERNAL_ERROR;
++                    return(-1);
++                }
++                nbchars = (int) size;
++            } else
+                 nbchars = chunk;
+ 	}
+ 	str += cons;
+@@ -2909,15 +2929,25 @@
+      */
+     if ((out->conv != NULL) && (out->encoder != NULL) &&
+ 	(out->writecallback != NULL)) {
+-	ret = out->writecallback(out->context,
++        size_t size = xmlBufUse(out->conv);
++        if (size >= INT_MAX) {
++            out->error = XML_ERR_INTERNAL_ERROR;
++            return(-1);
++        }
++        ret = out->writecallback(out->context,
+                                  (const char *)xmlBufContent(out->conv),
+-                                 xmlBufUse(out->conv));
++                                 (int) size);
+ 	if (ret >= 0)
+ 	    xmlBufShrink(out->conv, ret);
+     } else if (out->writecallback != NULL) {
+-	ret = out->writecallback(out->context,
++        size_t size = xmlBufUse(out->buffer);
++        if (size >= INT_MAX) {
++            out->error = XML_ERR_INTERNAL_ERROR;
++            return(-1);
++        }
++        ret = out->writecallback(out->context,
+                                  (const char *)xmlBufContent(out->buffer),
+-                                 xmlBufUse(out->buffer));
++                                 (int) size);
+ 	if (ret >= 0)
+ 	    xmlBufShrink(out->buffer, ret);
+     }
+--- a/xinclude.c
++++ b/xinclude.c
+@@ -1655,6 +1655,7 @@
+     }
+     if (ctxt->errorHandler != NULL)
+         xmlCtxtSetErrorHandler(pctxt, ctxt->errorHandler, ctxt->errorCtxt);
++    xmlCtxtUseOptions(pctxt, ctxt->parseFlags);
+     inputStream = xmlLoadExternalEntity((const char*)url, NULL, pctxt);
+     if (inputStream == NULL) {
+         /*
+@@ -1664,7 +1665,8 @@
+             xmlXIncludeErrMemory(ctxt);
+         else if ((pctxt->errNo != XML_ERR_OK) &&
+                  (pctxt->errNo != XML_IO_ENOENT) &&
+-                 (pctxt->errNo != XML_IO_UNKNOWN))
++                 (pctxt->errNo != XML_IO_UNKNOWN) &&
++                 (pctxt->errNo != XML_IO_NETWORK_ATTEMPT))
+             xmlXIncludeErr(ctxt, NULL, pctxt->errNo, "load error", NULL);
+ 	goto error;
+     }
+@@ -2376,7 +2378,7 @@
+  */
+ int
+ xmlXIncludeProcess(xmlDocPtr doc) {
+-    return(xmlXIncludeProcessFlags(doc, 0));
++    return(xmlXIncludeProcessFlags(doc, doc ? doc->parseFlags : 0));
+ }
+ 
+ /**
+@@ -2420,7 +2422,8 @@
+  */
+ int
+ xmlXIncludeProcessTree(xmlNodePtr tree) {
+-    return(xmlXIncludeProcessTreeFlags(tree, 0));
++    return(xmlXIncludeProcessTreeFlags(tree,
++                    (tree && tree->doc) ? tree->doc->parseFlags : 0));
+ }
+ 
+ /**
+--- a/catalog.c
++++ b/catalog.c
+@@ -60,7 +60,7 @@
+ #endif
+ 
+ static xmlChar *xmlCatalogNormalizePublic(const xmlChar *pubID);
+-static int xmlExpandCatalog(xmlCatalogPtr catal, const char *filename);
++static int xmlExpandCatalog(xmlCatalogPtr catal, const char *filename, int depth);
+ 
+ /************************************************************************
+  *									*
+@@ -2287,12 +2287,14 @@
+  */
+ static int
+ xmlParseSGMLCatalog(xmlCatalogPtr catal, const xmlChar *value,
+-	            const char *file, int super) {
++	            const char *file, int super, int depth) {
+     const xmlChar *cur = value;
+     xmlChar *base = NULL;
+     int res;
+ 
+     if ((cur == NULL) || (file == NULL))
++        return(-1);
++    if (depth > MAX_CATAL_DEPTH)
+         return(-1);
+     base = xmlStrdup((const xmlChar *) file);
+ 
+@@ -2471,7 +2473,7 @@
+ 
+ 		    filename = xmlBuildURI(sysid, base);
+ 		    if (filename != NULL) {
+-			xmlExpandCatalog(catal, (const char *)filename);
++			xmlExpandCatalog(catal, (const char *)filename, depth);
+ 			xmlFree(filename);
+ 		    }
+ 		}
+@@ -2621,7 +2623,7 @@
+ 	return(NULL);
+     }
+ 
+-    ret = xmlParseSGMLCatalog(catal, content, filename, 1);
++    ret = xmlParseSGMLCatalog(catal, content, filename, 1, 0);
+     xmlFree(content);
+     if (ret < 0) {
+ 	xmlFreeCatalog(catal);
+@@ -2667,7 +2669,7 @@
+ 	    xmlFree(content);
+ 	    return(NULL);
+ 	}
+-        ret = xmlParseSGMLCatalog(catal, content, filename, 0);
++        ret = xmlParseSGMLCatalog(catal, content, filename, 0, 0);
+ 	if (ret < 0) {
+ 	    xmlFreeCatalog(catal);
+ 	    xmlFree(content);
+@@ -2697,10 +2699,12 @@
+  * Returns 0 in case of success, -1 in case of error
+  */
+ static int
+-xmlExpandCatalog(xmlCatalogPtr catal, const char *filename)
++xmlExpandCatalog(xmlCatalogPtr catal, const char *filename, int depth)
+ {
+     int ret;
+ 
++    if (depth > MAX_CATAL_DEPTH)
++        return(-1);
+     if ((catal == NULL) || (filename == NULL))
+ 	return(-1);
+ 
+@@ -2712,7 +2716,7 @@
+ 	if (content == NULL)
+ 	    return(-1);
+ 
+-        ret = xmlParseSGMLCatalog(catal, content, filename, 0);
++        ret = xmlParseSGMLCatalog(catal, content, filename, 0, depth + 1);
+ 	if (ret < 0) {
+ 	    xmlFree(content);
+ 	    return(-1);
+@@ -3154,7 +3158,7 @@
+ 	return(0);
+     }
+ 
+-    ret = xmlExpandCatalog(xmlDefaultCatalog, filename);
++    ret = xmlExpandCatalog(xmlDefaultCatalog, filename, 0);
+     xmlRMutexUnlock(xmlCatalogMutex);
+     return(ret);
+ }
+--- a/relaxng.c
++++ b/relaxng.c
+@@ -18,6 +18,8 @@
+ 
+ #ifdef LIBXML_SCHEMAS_ENABLED
+ 
++#include <errno.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <stdio.h>
+ #include <stddef.h>
+@@ -220,6 +222,7 @@
+     int incNr;                  /* Depth of the include parsing stack */
+     int incMax;                 /* Max depth of the parsing stack */
+     xmlRelaxNGIncludePtr *incTab;       /* array of incs */
++    int incLimit;               /* Maximum include nesting */
+ 
+     int idref;                  /* requires idref checking */
+ 
+@@ -1408,6 +1411,15 @@
+  *			Document functions				*
+  *									*
+  ************************************************************************/
++/* Preserve the upstream semi-private setter spelling. */
++int
++xmlRelaxParserSetIncLImit(xmlRelaxNGParserCtxtPtr ctxt, int limit) {
++    if ((ctxt == NULL) || (limit < 0))
++        return(-1);
++    ctxt->incLimit = limit;
++    return(0);
++}
++
+ static xmlDocPtr xmlRelaxNGCleanupDoc(xmlRelaxNGParserCtxtPtr ctxt,
+                                       xmlDocPtr doc);
+ 
+@@ -1468,8 +1480,13 @@
+                                                sizeof(ctxt->incTab[0]));
+         if (ctxt->incTab == NULL) {
+             xmlRngPErrMemory(ctxt);
+-            return (0);
+-        }
++            return (-1);
++        }
++    }
++    if (ctxt->incNr >= ctxt->incLimit) {
++        xmlRngPErr(ctxt, (xmlNodePtr)value->doc, XML_RNGP_PARSE_ERROR,
++                   "xmlRelaxNG: inclusion recursion limit reached\n", NULL, NULL);
++        return(-1);
+     }
+     if (ctxt->incNr >= ctxt->incMax) {
+         ctxt->incMax *= 2;
+@@ -1479,7 +1496,7 @@
+                                                 sizeof(ctxt->incTab[0]));
+         if (ctxt->incTab == NULL) {
+             xmlRngPErrMemory(ctxt);
+-            return (0);
++            return (-1);
+         }
+     }
+     ctxt->incTab[ctxt->incNr] = value;
+@@ -1649,7 +1666,8 @@
+     /*
+      * push it on the stack
+      */
+-    xmlRelaxNGIncludePush(ctxt, ret);
++    if (xmlRelaxNGIncludePush(ctxt, ret) < 0)
++        return(NULL);
+ 
+     /*
+      * Some preprocessing of the document content, this include recursing
+@@ -7378,6 +7396,25 @@
+     if (ctxt == NULL)
+         return (NULL);
+ 
++    if (ctxt->incLimit == 0) {
++        const char *value = getenv("RNG_INCLUDE_LIMIT");
++        ctxt->incLimit = 1000;
++        if (value != NULL) {
++            char *end;
++            unsigned long limit;
++            errno = 0;
++            limit = strtoul(value, &end, 10);
++            if ((errno != 0) || (*end != 0) || (limit > INT_MAX)) {
++                xmlRngPErr(ctxt, NULL, XML_RNGP_PARSE_ERROR,
++                           "xmlRelaxNGParse: invalid RNG_INCLUDE_LIMIT %s\n",
++                           (const xmlChar *)value, NULL);
++                return(NULL);
++            }
++            if (limit != 0)
++                ctxt->incLimit = (int) limit;
++        }
++    }
++
+     /*
+      * First step is to parse the input document into an DOM/Infoset
+      */
+--- a/include/libxml/relaxng.h
++++ b/include/libxml/relaxng.h
+@@ -138,6 +138,9 @@
+ 		    xmlRelaxParserSetFlag	(xmlRelaxNGParserCtxtPtr ctxt,
+ 						 int flag);
+ 
++XMLPUBFUN int
++                    xmlRelaxParserSetIncLImit(xmlRelaxNGParserCtxtPtr ctxt, int limit);
++
+ XMLPUBFUN void
+ 		    xmlRelaxNGFreeParserCtxt	(xmlRelaxNGParserCtxtPtr ctxt);
+ XMLPUBFUN void
+--- a/xmlcatalog.c
++++ b/xmlcatalog.c
+@@ -114,6 +114,12 @@
+ 	       (*cur != '\n') && (*cur != '\r')) {
+ 	    if (*cur == 0)
+ 		break;
++            /* Do not read beyond the command array capacity */
++            if (i >= (int)sizeof(command) - 2) {
++                printf("Invalid command %s\n", cur);
++                i = 0;
++                break;
++            }
+ 	    command[i++] = *cur++;
+ 	}
+ 	command[i] = 0;
+@@ -131,6 +137,11 @@
+ 	while ((*cur != '\n') && (*cur != '\r') && (*cur != 0)) {
+ 	    if (*cur == 0)
+ 		break;
++            if (i >= (int)sizeof(arg) - 2) {
++                printf("Invalid arg %s\n", arg);
++                i = 0;
++                break;
++            }
+ 	    arg[i++] = *cur++;
+ 	}
+ 	arg[i] = 0;
+@@ -143,6 +154,11 @@
+ 	cur = arg;
+ 	memset(argv, 0, sizeof(argv));
+ 	while (*cur != 0) {
++            if (i >= (int)sizeof(argv) / (int)sizeof(char*)) {
++                printf("Too much arguments\n");
++                break;
++            }
++
+ 	    while ((*cur == ' ') || (*cur == '\t')) cur++;
+ 	    if (*cur == '\'') {
+ 		cur++;
+--- a/valid.c
++++ b/valid.c
+@@ -4999,7 +4999,7 @@
+     len = strlen(buf);
+     if (glob) {
+         if (size - len < 50) {
+-            if ((size - len > 4) && (buf[len - 1] != '.'))
++            if ((size - len > 4) && ((len == 0) || (buf[len - 1] != '.')))
+                 strcat(buf, " ...");
+             return;
+         }
+@@ -5009,7 +5009,7 @@
+     while (cur != NULL) {
+ 	len = strlen(buf);
+ 	if (size - len < 50) {
+-	    if ((size - len > 4) && (buf[len - 1] != '.'))
++	    if ((size - len > 4) && ((len == 0) || (buf[len - 1] != '.')))
+ 		strcat(buf, " ...");
+ 	    return;
+ 	}
+@@ -5020,7 +5020,7 @@
+                 if ((cur->ns != NULL) && (cur->ns->prefix != NULL))
+                     qnameLen += xmlStrlen(cur->ns->prefix) + 1;
+                 if (size - len < qnameLen + 10) {
+-                    if ((size - len > 4) && (buf[len - 1] != '.'))
++                    if ((size - len > 4) && ((len == 0) || (buf[len - 1] != '.')))
+                         strcat(buf, " ...");
+                     return;
+                 }

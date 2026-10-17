@@ -356,7 +356,7 @@ wheels = [
 
 [[package]]
 name = "jobradar"
-version = "1.2.22"
+version = "1.2.23"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

@@ -10,6 +10,10 @@ retention_days="${JOBRADAR_BACKUP_RETENTION_DAYS:-14}"
 lock_file="${JOBRADAR_BACKUP_LOCK_FILE:-/tmp/jobradar-postgres-backup.lock}"
 s3_bucket="${JOBRADAR_BACKUP_S3_BUCKET:-}"
 s3_prefix="${JOBRADAR_BACKUP_S3_PREFIX:-postgres}"
+if [[ -z "${JOBRADAR_BACKUP_DB_PASSWORD:-}" ]]; then
+  printf 'JOBRADAR_BACKUP_DB_PASSWORD is required for the read-only backup role.\n' >&2
+  exit 1
+fi
 
 if [[ ! "${retention_days}" =~ ^[0-9]+$ ]]; then
   printf 'JOBRADAR_BACKUP_RETENTION_DAYS must be a non-negative integer.\n' >&2
@@ -52,8 +56,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker compose exec -T db pg_dump \
-  --username=jobradar \
+PGPASSWORD="${JOBRADAR_BACKUP_DB_PASSWORD}" docker compose exec -T --env PGPASSWORD db pg_dump \
+  --host=127.0.0.1 \
+  --username=jobradar_backup \
   --dbname=jobradar \
   --format=custom \
   --compress=6 \

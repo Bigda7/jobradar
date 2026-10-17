@@ -116,6 +116,14 @@ class IngestionService:
         )
 
     async def run_source(self, adapter: BaseSource) -> IngestionResult:
+        # A reused adapter must not retain the previous run while the new cache loads.
+        adapter.prime_listing_cache({})
+        try:
+            return await self._run_source(adapter)
+        finally:
+            adapter.prime_listing_cache({})
+
+    async def _run_source(self, adapter: BaseSource) -> IngestionResult:
         source_id, run_id = await self._start_run(adapter)
         adapter.begin_run()
         adapter.configure_request_budget(DatabaseRequestBudget(self._session_factory, source_id))
@@ -223,7 +231,13 @@ class IngestionService:
                 pages=result.pages,
             )
 
-        if terminal_error is None and adapter.deactivate_missing_listings:
+        if (
+            terminal_error is None
+            and adapter.deactivate_missing_listings
+            and not result.errors
+            and not result.detail_failures
+            and not result.limit_reached
+        ):
             try:
                 result.deactivated = await self._deactivate_missing_listings(
                     source_id,
@@ -281,17 +295,19 @@ class IngestionService:
             return source.id, run.id
 
     async def _load_listing_cache(self, source_id: int) -> dict[str, CachedListing]:
+        cache: dict[str, CachedListing] = {}
         async with self._session_factory() as session:
-            listings = (
-                await session.scalars(select(Listing).where(Listing.source_id == source_id))
-            ).all()
-        return {
-            listing.external_id: CachedListing(
-                payload=listing.raw_data,
-                detail_fetched_at=listing.detail_fetched_at,
+            rows = await session.stream(
+                select(Listing.external_id, Listing.raw_data, Listing.detail_fetched_at)
+                .where(Listing.source_id == source_id)
+                .execution_options(yield_per=200)
             )
-            for listing in listings
-        }
+            try:
+                async for external_id, payload, detail_fetched_at in rows:
+                    cache[external_id] = CachedListing(payload, detail_fetched_at)
+            finally:
+                await rows.close()
+        return cache
 
     async def _ingest_listing(
         self,

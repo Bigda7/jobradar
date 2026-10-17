@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!source.tar.gz
+!build_candidate.sh
+!verify_graph.go
+!verify_graph_test.go
+!parser_regression_test.go
+!verify_apk_packages.sh

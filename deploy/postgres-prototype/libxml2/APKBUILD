@@ -1,0 +1,16 @@
+# Maintainer: JobRadar local security prototype
+pkgname=libxml2
+pkgver=2.13.9
+pkgrel=200
+pkgdesc="XML library with reviewed JobRadar-local security backports"
+url="https://gitlab.gnome.org/GNOME/libxml2"
+arch="all"
+license="MIT"
+options="!check"
+
+# Build and behavioral checks run before this packaging-only step.
+package() {
+    install -Dm755 /work/final/.libs/libxml2.so.2.13.9 \
+        "$pkgdir/usr/lib/libxml2.so.2.13.9"
+    ln -s libxml2.so.2.13.9 "$pkgdir/usr/lib/libxml2.so.2"
+}

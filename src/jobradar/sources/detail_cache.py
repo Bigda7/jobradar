@@ -1,11 +1,13 @@
 import asyncio
 import hashlib
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 
+from jobradar.http_download import DownloadBudget, bounded_get
 from jobradar.sources.base import CachedListing
 
 
@@ -53,17 +55,34 @@ async def get_with_backoff(
     headers: dict[str, str] | None = None,
     attempts: int = 2,
     maximum_delay_seconds: float = 30.0,
+    timeout_seconds: float = 30.0,
+    budget: DownloadBudget | None = None,
 ) -> httpx.Response:
-    for attempt in range(attempts):
-        response = await client.get(url, headers=headers)
-        if response.status_code != httpx.codes.TOO_MANY_REQUESTS or attempt + 1 >= attempts:
-            return response
-        retry_after = response.headers.get("Retry-After")
-        try:
-            delay = float(retry_after) if retry_after is not None else float(2**attempt)
-        except ValueError:
-            delay = float(2**attempt)
-        if delay > maximum_delay_seconds:
-            return response
-        await asyncio.sleep(max(delay, 0))
+    try:
+        async with asyncio.timeout(timeout_seconds * attempts + maximum_delay_seconds):
+            for attempt in range(attempts):
+                response = await bounded_get(
+                    client,
+                    url,
+                    headers=headers,
+                    timeout_seconds=timeout_seconds,
+                    budget=budget,
+                )
+                if response.status_code != httpx.codes.TOO_MANY_REQUESTS or attempt + 1 >= attempts:
+                    return response
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after is not None else float(2**attempt)
+                except ValueError:
+                    delay = float(2**attempt)
+                if (
+                    not math.isfinite(delay)
+                    or delay > maximum_delay_seconds
+                    or budget is not None
+                    and delay >= budget.deadline - asyncio.get_running_loop().time()
+                ):
+                    return response
+                await asyncio.sleep(max(delay, 0))
+    except TimeoutError as error:
+        raise httpx.ReadTimeout("Source retry window exceeded its total deadline.") from error
     raise RuntimeError("Unreachable rate-limit retry state.")

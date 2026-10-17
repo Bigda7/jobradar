@@ -142,10 +142,12 @@ async def test_telegram_client_uses_bot_api_json_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prague_rules_recalculation_does_not_resend_historical_matches(
+async def test_context_rules_recalculation_does_not_resend_historical_matches(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    previous = replace(BOHDAN_PROFILE, rules_version="bohdan-multi-source-v14-live-exchange-rates")
+    previous = replace(
+        BOHDAN_PROFILE, rules_version="bohdan-multi-source-v15-prague-location-eligibility"
+    )
     await IngestionService(sqlite_session_factory).run_source(MockSource())
     matching = MatchingService(sqlite_session_factory)
     await matching.evaluate(previous)
@@ -168,6 +170,52 @@ async def test_prague_rules_recalculation_does_not_resend_historical_matches(
     assert first.sent == 2
     assert second.sent == 0 and second.failed == 0 and second.skipped_duplicate == 2
     assert len(client.messages) == 2
+
+
+@pytest.mark.parametrize(
+    "status", (DeliveryStatus.SENT, DeliveryStatus.QUEUED, DeliveryStatus.FAILED)
+)
+async def test_profile_upgrade_preserves_retries_without_creating_historical_backlog(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    status: DeliveryStatus,
+) -> None:
+    previous = replace(
+        BOHDAN_PROFILE, rules_version="bohdan-multi-source-v15-prague-location-eligibility"
+    )
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    matching = MatchingService(sqlite_session_factory)
+    await matching.evaluate(previous)
+    client = RecordingTelegramClient()
+    service = NotificationService(sqlite_session_factory, client, FixedExchangeRateProvider())
+    old = (await service.load_candidates(previous, 55))[0]
+    async with sqlite_session_factory() as session, session.begin():
+        session.add(
+            NotificationDelivery(
+                opportunity_id=old.opportunity_id,
+                profile_id=previous.profile_id,
+                channel="telegram",
+                event_key=f"match:{previous.rules_version}:{old.content_hash[:16]}",
+                status=status.value,
+                message_text="Stored before the profile upgrade",
+                source_url=old.source_url,
+                attempts=1,
+                next_attempt_at=datetime.now(UTC) - timedelta(minutes=1)
+                if status is DeliveryStatus.FAILED
+                else None,
+            )
+        )
+    cursor = datetime.now(UTC)
+    await matching.evaluate(BOHDAN_PROFILE)
+    first = await service.dispatch(BOHDAN_PROFILE, 55, 5, cursor)
+    second = await service.dispatch(BOHDAN_PROFILE, 55, 5, cursor)
+    expected = 0 if status is DeliveryStatus.SENT else 1
+    assert first.sent == expected
+    assert second.sent == 0
+    assert client.messages == ["Stored before the profile upgrade"] * expected
+    async with sqlite_session_factory() as session:
+        rows = list(await session.scalars(select(NotificationDelivery)))
+        assert len(rows) == 1
+        assert rows[0].status == DeliveryStatus.SENT.value
 
 
 @pytest.mark.asyncio

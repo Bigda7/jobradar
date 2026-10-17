@@ -92,9 +92,24 @@ running, and does nothing when usage is below 75% and at least 6 GiB is free. Re
 remain protected by Docker. Recently used/in-use cache can exceed the retention target.
 
 The installed systemd service/timer runs a daily capacity check at 04:00 UTC, after the
-existing 03:15 backup schedule. The units are enabled; a real service run passed, but the first
-calendar-triggered execution has not occurred yet. Images, containers, volumes, backups, secret configuration,
+existing 03:15 backup schedule. The units are enabled; a real service run passed. The first
+calendar-triggered execution was later verified on 2026-10-04 as recorded below.
+Images, containers, volumes, backups, secret configuration,
 deployment archives, and the current/rollback releases are not automatic deletion targets.
+
+## First Calendar Execution Verified (2026-10-04)
+
+Read-only timer/service properties and a whitelist-filtered journal confirm:
+
+- Timer last trigger and service start: 04:00:11 UTC (06:00:11 Budapest).
+- Service exit: 04:00:17 UTC; Result=success and ExecMainStatus=0.
+- The service skipped cache deletion because filesystem headroom was sufficient.
+- Next calendar trigger: 2026-10-05 04:00 UTC.
+- Current free capacity: approximately 8.27 GiB. The live database volume and deployed
+  container identities/start times remain unchanged; every restart count remains zero.
+
+This completes the first scheduled-execution check. No service, cleanup, restore, or source
+run was manually triggered during verification, and no production state was changed.
 
 ## Approved Package and Historical Targets
 

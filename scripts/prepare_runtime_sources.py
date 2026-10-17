@@ -83,11 +83,11 @@ def safe_name(name: str) -> str:
 
 
 def apk_checksums(recipe: str) -> dict[str, str]:
-    match = re.search(r'^sha512sums="\n(.*?)\n"', recipe, re.M | re.S)
+    match = re.search(r'^sha512sums="(.*?)"', recipe, re.M | re.S)
     if not match:
         raise ValueError("Recipe has no supported SHA512 source list")
     checksums = {}
-    for line in match[1].splitlines():
+    for line in match[1].strip().splitlines():
         parts = line.split()
         if len(parts) != 2 or not re.fullmatch(r"[a-f0-9]{128}", parts[0]):
             raise ValueError("Invalid APK source checksum entry")
@@ -162,13 +162,18 @@ def collect_apk(
     origin, commit = safe_name(package["origin"]), package["commit"]
     if not re.fullmatch(r"[a-f0-9]{40}", commit):
         raise ValueError(f"Missing immutable APK build commit: {origin}")
-    base = f"https://raw.githubusercontent.com/alpinelinux/aports/{commit}/main/{origin}"
+    repository = package.get("repository", "main")
+    if repository not in {"main", "community"}:
+        raise ValueError("Unsupported Alpine source repository")
+    base = f"https://raw.githubusercontent.com/alpinelinux/aports/{commit}/{repository}/{origin}"
     prefix = f"alpine/{origin}-{commit}"
     cached_records = [record for record in cached or [] if record["path"].startswith(prefix + "/")]
     recipe_path = root / prefix / "APKBUILD"
     recipe = recipe_path.read_bytes() if cached_records else fetch(f"{base}/APKBUILD")
     text = recipe.decode("utf-8")
-    if origin == "alpine-base" and not re.search(r"^(source|sha512sums)=", text, re.M):
+    if origin in {"alpine-base", "krb5-conf"} and not re.search(
+        r"^(source|sha512sums)=", text, re.M
+    ):
         # This reviewed meta-package generates release text directly in its APKBUILD.
         checksums = {}
     else:
@@ -188,9 +193,7 @@ def collect_apk(
         return cached_records
     records = [preserve(root, f"{prefix}/APKBUILD", recipe, f"{base}/APKBUILD")]
     # Preserve installation helpers and other recipe-directory files as well as listed sources.
-    listing_url = (
-        f"https://api.github.com/repos/alpinelinux/aports/contents/main/{origin}?ref={commit}"
-    )
+    listing_url = f"https://api.github.com/repos/alpinelinux/aports/contents/{repository}/{origin}?ref={commit}"
     listing = json.loads(fetch(listing_url))
     extras = []
     for item in listing:
@@ -280,6 +283,13 @@ def collect_image(image: str, platform: str) -> dict[str, Any]:
         ],
     )
     return cast(dict[str, Any], json.loads(result))
+
+
+def image_revision(image: str) -> str:
+    template = (
+        '{{with index .Config "Labels"}}{{index . "org.opencontainers.image.revision"}}{{end}}'
+    )
+    return run_tool("docker", ["image", "inspect", "--format", template, image]).decode().strip()
 
 
 def collect_python_base(root: Path, image: str, version: str) -> list[dict[str, str]]:
@@ -587,20 +597,7 @@ def prepare(
             image,
         )
     )
-    revision = (
-        run_tool(
-            "docker",
-            [
-                "image",
-                "inspect",
-                "--format",
-                '{{index .Config.Labels "org.opencontainers.image.revision"}}',
-                image,
-            ],
-        )
-        .decode()
-        .strip()
-    )
+    revision = image_revision(image)
     build_files = {}
     for name in ("Dockerfile", "uv.lock", "pyproject.toml", "LICENSE"):
         if re.fullmatch(r"[a-f0-9]{40}", revision):

@@ -16,6 +16,86 @@ x-app-security: &app-security
     - ALL
   init: true
 
+x-common-environment: &common-environment
+  DB_ENFORCE_SERVICE_ROLE: "true"
+  APP_ENV: "${APP_ENV-development}"
+  LOG_LEVEL: "${LOG_LEVEL-INFO}"
+  DB_POOL_SIZE: "${DB_POOL_SIZE-5}"
+  DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW-5}"
+  DB_POOL_TIMEOUT_SECONDS: "${DB_POOL_TIMEOUT_SECONDS-10.0}"
+  DB_POOL_RECYCLE_SECONDS: "${DB_POOL_RECYCLE_SECONDS-1800}"
+  DB_CONNECT_TIMEOUT_SECONDS: "${DB_CONNECT_TIMEOUT_SECONDS-10}"
+  DB_STATEMENT_TIMEOUT_MILLISECONDS: "${DB_STATEMENT_TIMEOUT_MILLISECONDS-30000}"
+
+x-telegram-environment: &telegram-environment
+  MATCHING_MIN_SCORE: "${MATCHING_MIN_SCORE-55}"
+  TELEGRAM_ENABLED: "${TELEGRAM_ENABLED-false}"
+  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN-}"
+  TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID-0}"
+  TELEGRAM_NOTIFY_EXISTING: "${TELEGRAM_NOTIFY_EXISTING-false}"
+  TELEGRAM_SOURCE_HEALTH_ALERTS_ENABLED: "${TELEGRAM_SOURCE_HEALTH_ALERTS_ENABLED-true}"
+  TELEGRAM_MAX_MESSAGES_PER_CYCLE: "${TELEGRAM_MAX_MESSAGES_PER_CYCLE-3}"
+  TELEGRAM_REQUEST_TIMEOUT_SECONDS: "${TELEGRAM_REQUEST_TIMEOUT_SECONDS-20.0}"
+  TELEGRAM_POLLING_ENABLED: "${TELEGRAM_POLLING_ENABLED-false}"
+  TELEGRAM_POLL_TIMEOUT_SECONDS: "${TELEGRAM_POLL_TIMEOUT_SECONDS-15}"
+  TELEGRAM_LATEST_LIMIT: "${TELEGRAM_LATEST_LIMIT-5}"
+  TELEGRAM_ALL_MESSAGE_DELAY_SECONDS: "${TELEGRAM_ALL_MESSAGE_DELAY_SECONDS-1.0}"
+  NBU_RATES_URL: "${NBU_RATES_URL-https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json}"
+  NBU_REQUEST_TIMEOUT_SECONDS: "${NBU_REQUEST_TIMEOUT_SECONDS-20.0}"
+
+x-worker-environment: &worker-environment
+  MOCK_SOURCE_ENABLED: "${MOCK_SOURCE_ENABLED-false}"
+  DJINNI_SOURCE_ENABLED: "${DJINNI_SOURCE_ENABLED-true}"
+  DJINNI_JOBS_URL: "${DJINNI_JOBS_URL-https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote}"
+  DJINNI_ADDITIONAL_JOBS_URLS: "${DJINNI_ADDITIONAL_JOBS_URLS-https://djinni.co/jobs/rss/?editorial=nonhr&employment=office&country=CZE}"
+  DJINNI_REMOTE_ONLY: "${DJINNI_REMOTE_ONLY-true}"
+  DJINNI_REQUEST_TIMEOUT_SECONDS: "${DJINNI_REQUEST_TIMEOUT_SECONDS-20.0}"
+  DJINNI_MAX_ITEMS: "${DJINNI_MAX_ITEMS-10000}"
+  DJINNI_MAX_PAGES: "${DJINNI_MAX_PAGES-20}"
+  DJINNI_MAX_FEED_REQUESTS: "${DJINNI_MAX_FEED_REQUESTS-512}"
+  DJINNI_REQUEST_DELAY_SECONDS: "${DJINNI_REQUEST_DELAY_SECONDS-0.631578947368421}"
+  DJINNI_RUN_TIMEOUT_SECONDS: "${DJINNI_RUN_TIMEOUT_SECONDS-600.0}"
+  DJINNI_METADATA_ENABLED: "${DJINNI_METADATA_ENABLED-true}"
+  DJINNI_MAX_METADATA_REQUESTS: "${DJINNI_MAX_METADATA_REQUESTS-100}"
+  DJINNI_METADATA_REQUEST_DELAY_SECONDS: "${DJINNI_METADATA_REQUEST_DELAY_SECONDS-2.0}"
+  DJINNI_METADATA_CACHE_SECONDS: "${DJINNI_METADATA_CACHE_SECONDS-86400}"
+  DJINNI_POLL_INTERVAL_SECONDS: "${DJINNI_POLL_INTERVAL_SECONDS-900}"
+  WORKUA_SOURCE_ENABLED: "${WORKUA_SOURCE_ENABLED-true}"
+  WORKUA_READER_BASE_URL: "${WORKUA_READER_BASE_URL-https://r.jina.ai/http://www.work.ua}"
+  WORKUA_SEARCH_URLS: "${WORKUA_SEARCH_URLS-https://www.work.ua/en/jobs-remote-programmer/;https://www.work.ua/en/jobs-remote-developer/;https://www.work.ua/en/jobs-remote-junior+developer/;https://www.work.ua/en/jobs-remote-front-end+developer/;https://www.work.ua/en/jobs-remote-back-end+developer/;https://www.work.ua/en/jobs-remote-full-stack+developer/;https://www.work.ua/en/jobs-remote-python/;https://www.work.ua/en/jobs-remote-django/;https://www.work.ua/en/jobs-remote-fastapi/;https://www.work.ua/en/jobs-remote-react/;https://www.work.ua/en/jobs-remote-javascript/;https://www.work.ua/en/jobs-remote-typescript/;https://www.work.ua/en/jobs-remote-node.js/;https://www.work.ua/en/jobs-remote-shopify/}"
+  WORKUA_REQUEST_TIMEOUT_SECONDS: "${WORKUA_REQUEST_TIMEOUT_SECONDS-30.0}"
+  WORKUA_MAX_PAGES_PER_SEARCH: "${WORKUA_MAX_PAGES_PER_SEARCH-2}"
+  WORKUA_MAX_ITEMS: "${WORKUA_MAX_ITEMS-75}"
+  WORKUA_REMOTE_ONLY: "${WORKUA_REMOTE_ONLY-true}"
+  WORKUA_DETAIL_CACHE_TTL_SECONDS: "${WORKUA_DETAIL_CACHE_TTL_SECONDS-86400}"
+  WORKUA_DETAIL_REQUEST_DELAY_SECONDS: "${WORKUA_DETAIL_REQUEST_DELAY_SECONDS-1.5}"
+  WORKUA_RETRY_ATTEMPTS: "${WORKUA_RETRY_ATTEMPTS-2}"
+  WORKUA_POLL_INTERVAL_SECONDS: "${WORKUA_POLL_INTERVAL_SECONDS-21600}"
+  ROBOTA_UA_SOURCE_ENABLED: "${ROBOTA_UA_SOURCE_ENABLED-true}"
+  ROBOTA_UA_READER_BASE_URL: "${ROBOTA_UA_READER_BASE_URL-https://r.jina.ai/http://robota.ua}"
+  ROBOTA_UA_API_READER_BASE_URL: "${ROBOTA_UA_API_READER_BASE_URL-https://r.jina.ai/http://api.robota.ua}"
+  ROBOTA_UA_SEARCH_URLS: "${ROBOTA_UA_SEARCH_URLS-https://robota.ua/zapros/developer-remote/ukraine;https://robota.ua/zapros/junior-developer-remote/ukraine;https://robota.ua/zapros/frontend-developer-remote/ukraine;https://robota.ua/zapros/backend-developer-remote/ukraine;https://robota.ua/zapros/full-stack-developer-remote/ukraine;https://robota.ua/zapros/python-remote/ukraine;https://robota.ua/zapros/react-remote/ukraine}"
+  ROBOTA_UA_REQUEST_TIMEOUT_SECONDS: "${ROBOTA_UA_REQUEST_TIMEOUT_SECONDS-30.0}"
+  ROBOTA_UA_MAX_PAGES_PER_SEARCH: "${ROBOTA_UA_MAX_PAGES_PER_SEARCH-2}"
+  ROBOTA_UA_MAX_ITEMS: "${ROBOTA_UA_MAX_ITEMS-100}"
+  ROBOTA_UA_REMOTE_ONLY: "${ROBOTA_UA_REMOTE_ONLY-true}"
+  ROBOTA_UA_DETAIL_CACHE_TTL_SECONDS: "${ROBOTA_UA_DETAIL_CACHE_TTL_SECONDS-86400}"
+  ROBOTA_UA_DETAIL_REQUEST_DELAY_SECONDS: "${ROBOTA_UA_DETAIL_REQUEST_DELAY_SECONDS-1.5}"
+  ROBOTA_UA_RETRY_ATTEMPTS: "${ROBOTA_UA_RETRY_ATTEMPTS-2}"
+  ROBOTA_UA_POLL_INTERVAL_SECONDS: "${ROBOTA_UA_POLL_INTERVAL_SECONDS-21600}"
+  DOU_JOBS_SOURCE_ENABLED: "${DOU_JOBS_SOURCE_ENABLED-true}"
+  DOU_JOBS_FEED_URL: "${DOU_JOBS_FEED_URL-https://jobs.dou.ua/vacancies/feeds/?remote}"
+  DOU_JOBS_REQUEST_TIMEOUT_SECONDS: "${DOU_JOBS_REQUEST_TIMEOUT_SECONDS-30.0}"
+  DOU_JOBS_MAX_ITEMS: "${DOU_JOBS_MAX_ITEMS-100}"
+  DOU_JOBS_POLL_INTERVAL_SECONDS: "${DOU_JOBS_POLL_INTERVAL_SECONDS-1800}"
+  MATCHING_ENABLED: "${MATCHING_ENABLED-true}"
+  EMPLOYMENT_STALE_AFTER_DAYS: "${EMPLOYMENT_STALE_AFTER_DAYS-30}"
+  FREELANCE_STALE_AFTER_DAYS: "${FREELANCE_STALE_AFTER_DAYS-30}"
+  SOURCE_RECONCILIATION_MAX_MISSING_RATIO: "${SOURCE_RECONCILIATION_MAX_MISSING_RATIO-0.8}"
+  SOURCE_POLL_JITTER_RATIO: "${SOURCE_POLL_JITTER_RATIO-0.15}"
+  WORKER_INTERVAL_SECONDS: "${WORKER_INTERVAL_SECONDS-300}"
+  WORKER_FAILURE_RETRY_SECONDS: "${WORKER_FAILURE_RETRY_SECONDS-30}"
+
 services:
   db:
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
@@ -39,12 +119,16 @@ services:
     build:
       context: .
       target: runtime
-    env_file:
-      - path: .env
-        required: false
     environment:
-      DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/jobradar
-    command: ["sh", "-c", "alembic upgrade head && uvicorn jobradar.api.app:app --host 0.0.0.0 --port 8000 --no-server-header"]
+      <<: *common-environment
+      SERVICE_ROLE: api
+      DATABASE_URL: ${API_DATABASE_URL:?API_DATABASE_URL is required}
+      TELEGRAM_ENABLED: "false"
+      API_ALLOWED_HOSTS: "${API_ALLOWED_HOSTS-localhost;127.0.0.1;test}"
+      API_BEARER_TOKEN: "${API_BEARER_TOKEN-}"
+      READINESS_TIMEOUT_SECONDS: "${READINESS_TIMEOUT_SECONDS-3.0}"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS-http://localhost:5173}"
+    command: ["uvicorn", "jobradar.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
     depends_on:
       db:
         condition: service_healthy
@@ -64,11 +148,10 @@ services:
     build:
       context: .
       target: runtime
-    env_file:
-      - path: .env
-        required: false
     environment:
-      DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/jobradar
+      <<: [*common-environment, *worker-environment, *telegram-environment]
+      SERVICE_ROLE: worker
+      DATABASE_URL: ${WORKER_DATABASE_URL:?WORKER_DATABASE_URL is required}
     command: ["python", "-m", "jobradar.worker"]
     depends_on:
       api:
@@ -82,17 +165,35 @@ services:
     build:
       context: .
       target: runtime
-    env_file:
-      - path: .env
-        required: false
     environment:
-      DATABASE_URL: postgresql+psycopg://jobradar:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/jobradar
+      <<: [*common-environment, *telegram-environment]
+      SERVICE_ROLE: bot
+      DATABASE_URL: ${BOT_DATABASE_URL:?BOT_DATABASE_URL is required}
     command: ["python", "-m", "jobradar.bot"]
     depends_on:
       api:
         condition: service_healthy
     logging: *default-logging
     restart: unless-stopped
+
+  migrate:
+    <<: *app-security
+    image: jobradar-app:1.2.18
+    build:
+      context: .
+      target: runtime
+    profiles: ["maintenance"]
+    environment:
+      <<: *common-environment
+      SERVICE_ROLE: migration
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}
+      TELEGRAM_ENABLED: "false"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    logging: *default-logging
+    restart: "no"
 
   db-test:
     image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73

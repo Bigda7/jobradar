@@ -41,3 +41,19 @@ def test_dependency_audits_are_required_before_tests_and_image_build() -> None:
         assert not audit.get("continue-on-error", False)
         assert "--ignore-vuln" not in audit["run"]
         assert "||" not in audit["run"]
+
+
+def test_ci_scans_all_history_and_refs_with_required_redaction() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    job = workflow["jobs"]["verify"]
+    steps = {step["name"]: step for step in job["steps"]}
+    assert steps["Check out repository"]["with"]["fetch-depth"] == 0
+    scan = steps["Scan Git history for secrets"]
+    assert (
+        'git /repo --redact=100 --no-banner --log-opts="--all --full-history -m" --exit-code=1'
+        in scan["run"]
+    )
+    assert "if" not in scan
+    assert not job.get("continue-on-error", False)
+    assert not scan.get("continue-on-error", False)
+    assert "||" not in scan["run"]

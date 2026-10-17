@@ -19,6 +19,7 @@ from defusedxml.common import DefusedXmlException
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
+from jobradar.http_download import DownloadLimitError, bounded_get
 from jobradar.sources.base import BaseSource
 from jobradar.sources.djinni_rss import (
     FEED_SATURATION,
@@ -625,36 +626,25 @@ class DjinniSource(BaseSource):
                 if not metadata:
                     self._feed_request_attempts += 1
                 self.record_page()
-                async with (
-                    asyncio.timeout(
-                        min(self._request_timeout_seconds, effective_deadline - monotonic())
+                response = await bounded_get(
+                    client,
+                    url,
+                    timeout_seconds=max(
+                        0.001, min(self._request_timeout_seconds, effective_deadline - monotonic())
                     ),
-                    client.stream(
-                        "GET",
-                        url,
-                        follow_redirects=False,
-                        headers={
-                            "Accept": "text/html"
-                            if metadata
-                            else "application/rss+xml, application/xml"
-                        },
-                        timeout=self._request_timeout_seconds,
-                    ) as response,
-                ):
-                    response.raise_for_status()
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                        if len(content) + len(chunk) > (1_000_000 if metadata else MAX_FEED_BYTES):
-                            raise DjinniSourceError(
-                                f"Djinni {label} exceeds the response byte limit."
-                            )
-                        self._run_bytes += len(chunk)
-                        if self._run_bytes > MAX_RUN_BYTES:
-                            raise DjinniSourceError(
-                                "Djinni RSS traversal exceeds its byte budget.", stop_traversal=True
-                            )
-                        content.extend(chunk)
-            return bytes(content)
+                    maximum_bytes=1_000_000 if metadata else MAX_FEED_BYTES,
+                    follow_redirects=False,
+                    headers={
+                        "Accept": "text/html"
+                        if metadata
+                        else "application/rss+xml, application/xml"
+                    },
+                    on_bytes=self._count_download_bytes,
+                )
+                response.raise_for_status()
+            return response.content
+        except DownloadLimitError as error:
+            raise DjinniSourceError(f"Djinni {label} download stopped: {error}") from error
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             raise DjinniSourceError(
@@ -669,6 +659,13 @@ class DjinniSource(BaseSource):
                 retryable=not metadata and isinstance(error, (httpx.TransportError, TimeoutError)),
                 stop_traversal=monotonic() >= effective_deadline,
             ) from error
+
+    def _count_download_bytes(self, count: int) -> None:
+        self._run_bytes += count
+        if self._run_bytes > MAX_RUN_BYTES:
+            raise DjinniSourceError(
+                "Djinni RSS traversal exceeds its byte budget.", stop_traversal=True
+            )
 
     def _rss_listing(self, item: Element, feed_url: str) -> RawListing:
         source_url = _required_string(item.findtext("link") or item.findtext("guid"), "link")

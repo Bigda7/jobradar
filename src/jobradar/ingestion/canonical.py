@@ -45,6 +45,8 @@ async def refresh_opportunity_from_best_listing(
     session: AsyncSession,
     opportunity_id: int,
 ) -> Listing | None:
+    # Sessions disable autoflush; predicates must see freshly reopened/normalized listings.
+    await session.flush()
     opportunity = await session.get(Opportunity, opportunity_id)
     if opportunity is None:
         return None

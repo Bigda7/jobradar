@@ -4,6 +4,14 @@ from decimal import Decimal
 from jobradar.domain.enums import OpportunityKind
 from jobradar.domain.normalization import normalize_text
 from jobradar.matching.models import MatchCandidate
+from jobradar.matching.requirements import (
+    Clause,
+    Evidence,
+    mention_evidence,
+    requirement_clauses,
+    role_title,
+    string_values,
+)
 
 VOLUNTEER_PATTERN = re.compile(r"(?<!\w)(?:волонтер\w*|волонтёр\w*|volunteer\w*)(?!\w)")
 FREE_WORK_PATTERN = re.compile(r"(?<!\w)(?:бесплатн\w*|безкоштовн\w*|unpaid)(?!\w)")
@@ -41,14 +49,18 @@ SENIORITY_TITLE_PATTERN = re.compile(
 )
 NON_DEVELOPMENT_TITLE_PATTERNS = (
     re.compile(r"(?<!\w)(?:designer|ui[/ -]?ux)(?!\w)"),
-    re.compile(r"(?<!\w)(?:ppc|media\s+buyer|seo|smm|affiliate|marketing|marketer)(?!\w)"),
+    re.compile(
+        r"(?<!\w)(?:ppc|media\s+buyer|seo|search engine optimization|smm|affiliate|"
+        r"marketing|marketer)(?!\w)"
+    ),
     re.compile(
         r"(?<!\w)(?:recruiter|recruitment|human\s+resources|hr|sales|"
         r"account\s+manager|customer\s+(?:service|support)|support)(?!\w)"
     ),
     re.compile(
         r"(?<!\w)(?:soc\s+analyst|security\s+operations|cybersecurity|"
-        r"information\s+security)(?!\w)"
+        r"information\s+security|application security researcher|"
+        r"reverse engineering specialist)(?!\w)"
     ),
     re.compile(r"(?<!\w)(?:qa|quality\s+assurance|manual\s+tester|tester)(?!\w)"),
     re.compile(
@@ -60,9 +72,16 @@ NON_DEVELOPMENT_TITLE_PATTERNS = (
 ANALYST_TITLE_PATTERN = re.compile(r"(?<!\w)(?:product|business|bi)\s+analyst(?!\w)")
 ENGINEERING_TITLE_PATTERN = re.compile(r"(?<!\w)(?:developer|engineer)(?!\w)")
 EXPERIENCE_VALUE_PATTERN = re.compile(
-    r"(?<!\w)(?P<years>\d{1,2})(?:\s*\+|\s*(?:-|–|—|to)\s*\d{1,2})?\s*"
+    r"(?<!\w)(?P<years>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
+    r"(?:\s*\+|\s*(?:-|–|—|to)\s*\d{1,2})?\s*"
     r"(?:years?|yrs?|рок(?:и|ів)?|года?|лет|roky?|roků|let)(?!\w)"
 )
+EXPERIENCE_WORD_VALUES = {
+    word: index
+    for index, word in enumerate(
+        ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"), start=1
+    )
+}
 EXPERIENCE_CONTEXT_PATTERN = re.compile(
     r"(?<!\w)(?:experience|requirements?|commercial|professional|hands[- ]on|"
     r"досвід|опыт|комерційн\w*|коммерческ\w*|praxe|zkušenost\w*|"
@@ -118,7 +137,7 @@ def hard_rejection_concern(candidate: MatchCandidate) -> str | None:
     if MILITARY_PATTERN.search(f"{title_and_company} {description_without_equal_opportunity}"):
         return "Отклонено: военный рекрутинг, мобилизация или служба в армии."
     if candidate.kind is OpportunityKind.EMPLOYMENT:
-        employment_rejection = _employment_rejection_concern(candidate, description)
+        employment_rejection = _employment_rejection_concern(candidate)
         if employment_rejection is not None:
             return employment_rejection
     return None
@@ -132,13 +151,25 @@ def required_experience_years(candidate: MatchCandidate) -> float | None:
         if isinstance(months, int | float) and not isinstance(months, bool) and months >= 0:
             values.append(float(months) / 12)
 
-    text = normalize_text(" ".join((candidate.title, candidate.description or "")))
-    for match in EXPERIENCE_VALUE_PATTERN.finditer(text):
-        if EXPERIENCE_HISTORY_PATTERN.search(text[match.end() : match.end() + 24]):
-            continue
-        context = text[max(0, match.start() - 70) : min(len(text), match.end() + 70)]
-        if EXPERIENCE_CONTEXT_PATTERN.search(context):
-            values.append(float(match.group("years")))
+    clauses = (Clause(role_title(candidate.title)), *requirement_clauses(candidate.description))
+    for clause in clauses:
+        for match in EXPERIENCE_VALUE_PATTERN.finditer(clause.text):
+            if EXPERIENCE_HISTORY_PATTERN.search(clause.text[match.end() : match.end() + 24]):
+                continue
+            evidence = mention_evidence(clause, match.group())
+            if evidence < Evidence.UNSPECIFIED:
+                continue
+            if (
+                EXPERIENCE_CONTEXT_PATTERN.search(clause.text)
+                or clause.section is Evidence.REQUIRED
+                or re.search(r"\b(?:development|engineering|skills|expertise)\b", clause.text)
+            ):
+                value = match.group("years")
+                values.append(
+                    float(EXPERIENCE_WORD_VALUES[value])
+                    if value in EXPERIENCE_WORD_VALUES
+                    else float(value)
+                )
     return max(values, default=None)
 
 
@@ -146,13 +177,20 @@ def has_junior_title(title: str) -> bool:
     return JUNIOR_TITLE_PATTERN.search(normalize_text(title)) is not None
 
 
-def _employment_rejection_concern(
-    candidate: MatchCandidate,
-    description: str,
-) -> str | None:
-    title = normalize_text(candidate.title)
-    if SENIORITY_TITLE_PATTERN.search(title):
+def _employment_rejection_concern(candidate: MatchCandidate) -> str | None:
+    title = role_title(candidate.title)
+    seniority_text = title
+    if has_junior_title(title):
+        seniority_text = re.sub(r"\b(?:middle|mid[- ]level)\b", "", title)
+    if SENIORITY_TITLE_PATTERN.search(seniority_text):
         return "Отклонено: вакансия рассчитана на уровень Middle, Senior или выше."
+    levels = {
+        normalize_text(value).replace("_", " ").replace("-", " ")
+        for key in ("seniority", "levels")
+        for value in string_values(candidate.raw_data.get(key))
+    }
+    if levels & {"senior", "senior level", "lead", "staff", "principal", "director", "executive"}:
+        return "Rejected: structured seniority requires Senior or above."
     if _is_non_development_title(title):
         return "Отклонено: специализация вакансии не соответствует профилю разработчика."
     if _has_zero_salary(candidate):
@@ -161,10 +199,7 @@ def _employment_rejection_concern(
     years = required_experience_years(candidate)
     if years is not None and years >= 3:
         return "Отклонено: вакансия требует не менее трёх лет опыта."
-    if years is not None and years >= 2 and not has_junior_title(candidate.title):
-        return "Отклонено: вакансия требует не менее двух лет опыта без уровня Junior."
-
-    language = _required_unsupported_language(f"{title} {description}")
+    language = _required_unsupported_language(f"{title}\n{candidate.description or ''}")
     if language is not None:
         return f"Отклонено: вакансия требует рабочее владение языком: {language}."
     return None
@@ -184,22 +219,12 @@ def _has_zero_salary(candidate: MatchCandidate) -> bool:
 
 
 def _required_unsupported_language(text: str) -> str | None:
-    normalized = normalize_text(text)
+    clauses = requirement_clauses(text)
     for label, aliases in FOREIGN_LANGUAGE_ALIASES.items():
-        if label == "чешский" and BASIC_CZECH_PATTERN.search(normalized):
-            continue
-        for alias in aliases:
-            language_position = normalized.find(alias)
-            if language_position < 0:
+        for clause in clauses:
+            if label == "чешский" and BASIC_CZECH_PATTERN.search(clause.text):
                 continue
-            language_tail = normalized[
-                language_position + len(alias) : language_position + len(alias) + 60
-            ]
-            if OPTIONAL_LANGUAGE_PATTERN.search(language_tail):
-                continue
-            context = normalized[
-                max(0, language_position - 45) : language_position + len(alias) + 45
-            ]
-            if any(marker in context for marker in LANGUAGE_REQUIREMENT_MARKERS):
-                return label
+            if any(mention_evidence(clause, alias) >= Evidence.UNSPECIFIED for alias in aliases):
+                if any(marker in clause.text for marker in LANGUAGE_REQUIREMENT_MARKERS):
+                    return label
     return None

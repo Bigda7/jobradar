@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from time import monotonic
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -12,6 +13,7 @@ import httpx
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
+from jobradar.http_download import MAX_RUN_SECONDS, DownloadBudget, DownloadLimitError
 from jobradar.sources.base import BaseSource
 from jobradar.sources.detail_cache import (
     can_reuse_detail,
@@ -132,6 +134,7 @@ class RobotaUaSource(BaseSource):
         self._client = client
 
     async def fetch(self) -> AsyncIterator[RawListing]:
+        self._download_budget = DownloadBudget(monotonic() + MAX_RUN_SECONDS)
         seen: set[str] = set()
         yielded = 0
         card_batches: list[list[RobotaUaCard]] = []
@@ -321,8 +324,12 @@ class RobotaUaSource(BaseSource):
                 client,
                 request_url,
                 attempts=self._retry_attempts,
+                timeout_seconds=self._request_timeout_seconds,
+                budget=getattr(self, "_download_budget", None),
             )
             response.raise_for_status()
+        except DownloadLimitError as error:
+            raise RobotaUaSourceError(f"Robota.ua download stopped: {error}") from error
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             error_type = RobotaUaAccessError if status in {401, 403, 429} else RobotaUaSourceError

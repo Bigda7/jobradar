@@ -1,0 +1,14 @@
+[Unit]
+Description=Shared resource budget for JobRadar services
+
+[Slice]
+MemoryAccounting=yes
+CPUAccounting=yes
+TasksAccounting=yes
+MemoryMax=1408M
+MemorySwapMax=0
+CPUQuota=200%
+TasksMax=512
+
+[Install]
+WantedBy=slices.target

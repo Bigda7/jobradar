@@ -15,6 +15,7 @@ from defusedxml.common import DefusedXmlException
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
 from jobradar.domain.normalization import normalize_text
+from jobradar.http_download import bounded_get
 from jobradar.sources.base import BaseSource
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
 from jobradar.sources.structured_data import html_to_text
@@ -117,7 +118,12 @@ class DouJobsSource(BaseSource):
     async def _fetch_with_client(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
         self.record_page()
         try:
-            response = await client.get(self._feed_url)
+            response = await bounded_get(
+                client,
+                self._feed_url,
+                timeout_seconds=self._request_timeout_seconds,
+                maximum_bytes=MAX_FEED_BYTES,
+            )
             response.raise_for_status()
             if len(response.content) > MAX_FEED_BYTES:
                 raise DouJobsSourceError("DOU Jobs RSS response exceeded the size limit.")

@@ -41,6 +41,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
@@ -125,4 +127,4 @@ jobs:
           docker run --rm
           --volume "${PWD}:/repo"
           zricethezav/gitleaks:v8.30.0@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
-          git /repo --redact --no-banner
+          git /repo --redact=100 --no-banner --log-opts="--all --full-history -m" --exit-code=1

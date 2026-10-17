@@ -17,6 +17,45 @@ from jobradar.matching.service import MatchingService
 from jobradar.sources.mock import DEFAULT_LISTINGS, MockSource
 
 
+@pytest.mark.parametrize(("score", "expected"), ((34, 0), (35, 1), (54, 1), (55, 0)))
+async def test_matches_exploration_range_filters_before_count_and_pagination(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    score: int,
+    expected: int,
+) -> None:
+    await IngestionService(sqlite_session_factory).run_source(MockSource())
+    await MatchingService(sqlite_session_factory).evaluate(BOHDAN_PROFILE)
+    async with sqlite_session_factory() as session, session.begin():
+        rows = list(await session.scalars(select(MatchEvaluation).order_by(MatchEvaluation.id)))
+        rows[0].score = score
+        rows[1].score = 99
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(sqlite_session_factory)), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/matches", params={"min_score": 35, "max_score": 54, "limit": 1}
+        )
+        next_page = await client.get(
+            "/matches", params={"min_score": 35, "max_score": 54, "offset": 1}
+        )
+        bad_range = await client.get("/matches", params={"min_score": 55, "max_score": 54})
+        missing_source = await client.get(
+            "/matches",
+            params={
+                "min_score": 35,
+                "max_score": 54,
+                "source": "missing",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["total"] == expected
+    assert len(response.json()["items"]) == expected
+    assert next_page.json()["total"] == expected
+    assert next_page.json()["items"] == []
+    assert bad_range.status_code == 422
+    assert missing_source.json()["total"] == 0
+
+
 @pytest.mark.asyncio
 async def test_api_returns_update_dates_and_uses_them_for_newest_order(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
@@ -520,6 +559,70 @@ async def test_data_endpoints_require_configured_bearer_token(
     assert unauthorized_response.headers["www-authenticate"] == "Bearer"
     assert invalid_response.status_code == 401
     assert authorized_response.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/jobs", "/matches", "/sources"])
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        None,
+        b"",
+        b"Bearer",
+        b"Bearer ",
+        b"Bearer invalid",
+        b"Basic " + b"a" * 32,
+        b"Bearer  " + b"a" * 32,
+        b"Bearer " + b"a" * 32 + b" ",
+        b"Bearer\t" + b"a" * 32,
+        b"Bearer \xe9",
+        b"Bearer \xf0\x9f\x94\x92",
+    ],
+)
+async def test_invalid_authorization_is_a_safe_401(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+    path: str,
+    authorization: bytes | None,
+) -> None:
+    application = create_app(
+        sqlite_session_factory, application_settings=Settings(api_bearer_token="a" * 32)
+    )
+    headers = [] if authorization is None else [(b"authorization", authorization)]
+    async with AsyncClient(
+        transport=ASGITransport(app=application, raise_app_exceptions=False), base_url="http://test"
+    ) as client:
+        response = await client.get(path, headers=headers)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json() == {"detail": "Authentication is required."}
+    assert "a" * 32 not in response.text
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "bEaReR"])
+async def test_authorization_keeps_case_insensitive_scheme(
+    sqlite_session_factory: async_sessionmaker[AsyncSession], scheme: str
+) -> None:
+    application = create_app(
+        sqlite_session_factory, application_settings=Settings(api_bearer_token="a" * 32)
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://test"
+    ) as client:
+        response = await client.get("/jobs", headers={"Authorization": f"{scheme} {'a' * 32}"})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/health", "/ready"])
+async def test_public_probes_do_not_require_authorization(
+    sqlite_session_factory: async_sessionmaker[AsyncSession], path: str
+) -> None:
+    application = create_app(
+        sqlite_session_factory, application_settings=Settings(api_bearer_token="a" * 32)
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://test"
+    ) as client:
+        response = await client.get(path, headers=[(b"authorization", b"Bearer \xe9")])
+    assert response.status_code == 200
 
 
 @pytest.mark.asyncio
