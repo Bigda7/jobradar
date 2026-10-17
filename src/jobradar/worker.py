@@ -133,6 +133,7 @@ async def run_cycle(*, force_sources: bool = False) -> None:
         minimum_first_seen_at=(
             None if settings.telegram_notify_existing else minimum_first_seen_at
         ),
+        explore_since=settings.telegram_explore_since,
     )
     if notification_cursor is not None:
         await notification_cursor.complete_cycle(

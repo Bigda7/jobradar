@@ -1,9 +1,10 @@
 import re
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -106,6 +107,7 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: int | None = None
     telegram_notify_existing: bool = False
+    telegram_explore_since: datetime | None = None
     telegram_source_health_alerts_enabled: bool = True
     telegram_max_messages_per_cycle: int = Field(default=3, ge=1, le=20)
     telegram_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
@@ -229,6 +231,20 @@ class Settings(BaseSettings):
                 "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when Telegram is enabled."
             )
         return self
+
+    @field_validator("telegram_explore_since", mode="before")
+    @classmethod
+    def normalize_empty_explore_cutoff(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("telegram_explore_since")
+    @classmethod
+    def validate_explore_cutoff(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("TELEGRAM_EXPLORE_SINCE must include an explicit timezone.")
+        return value.astimezone(UTC)
 
     @property
     def djinni_additional_urls(self) -> tuple[str, ...]:

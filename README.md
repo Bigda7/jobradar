@@ -353,6 +353,10 @@ immediately if it may have been exposed.
 
 ## Telegram bot
 
+Optional [new Explore notifications](docs/telegram-explore.md) add scores35..54 only
+for opportunities first seen after an explicit activation timestamp. The main website
+threshold remains55; existing message limits and delivery history are preserved.
+
 Interrupted match deliveries recover automatically during the next unpaused notification cycle.
 If a Telegram message ID was saved, the delivery is marked sent without resending. Otherwise the
 worker schedules another attempt. Before the first send, the message and source link are stored

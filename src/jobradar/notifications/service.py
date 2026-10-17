@@ -37,6 +37,8 @@ from jobradar.notifications.telegram import (
 )
 
 logger = structlog.get_logger(__name__)
+EXPLORE_MIN_SCORE = 35
+EXPLORE_MAX_SCORE = 54
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +76,17 @@ class NotificationSummary:
     retry_deferred: int = 0
 
 
+def _is_within_notification_window(
+    candidate: NotificationCandidate,
+    minimum_first_seen_at: datetime | None,
+    explore_since: datetime | None,
+) -> bool:
+    cutoff = minimum_first_seen_at
+    if explore_since is not None and EXPLORE_MIN_SCORE <= candidate.score <= EXPLORE_MAX_SCORE:
+        cutoff = explore_since
+    return cutoff is None or _as_utc(candidate.first_seen_at) >= _as_utc(cutoff)
+
+
 class NotificationService:
     def __init__(
         self,
@@ -93,9 +106,11 @@ class NotificationService:
         minimum_score: int,
         max_messages: int,
         minimum_first_seen_at: datetime | None,
+        *,
+        explore_since: datetime | None = None,
     ) -> NotificationSummary:
         summary = NotificationSummary()
-        candidates = await self.load_candidates(profile, minimum_score)
+        candidates = await self.load_candidates(profile, minimum_score, explore_since=explore_since)
         pause_state = await self._preferences.get_state(profile.profile_id, "telegram")
         if pause_state.is_paused:
             for candidate in candidates:
@@ -139,9 +154,7 @@ class NotificationService:
                 )
         unqueueable_ids: set[int] = set()
         for candidate in candidates:
-            if minimum_first_seen_at is not None and _as_utc(candidate.first_seen_at) < _as_utc(
-                minimum_first_seen_at
-            ):
+            if not _is_within_notification_window(candidate, minimum_first_seen_at, explore_since):
                 continue
             try:
                 await self._queue_delivery(
@@ -161,9 +174,8 @@ class NotificationService:
                 )
         prioritized_candidates = sorted(
             candidates,
-            key=lambda candidate: (
-                minimum_first_seen_at is None
-                or _as_utc(candidate.first_seen_at) >= _as_utc(minimum_first_seen_at)
+            key=lambda candidate: _is_within_notification_window(
+                candidate, minimum_first_seen_at, explore_since
             ),
         )
         for candidate in prioritized_candidates:
@@ -179,8 +191,7 @@ class NotificationService:
                 DeliveryStatus.QUEUED.value,
             }
             if (
-                minimum_first_seen_at is not None
-                and _as_utc(candidate.first_seen_at) < _as_utc(minimum_first_seen_at)
+                not _is_within_notification_window(candidate, minimum_first_seen_at, explore_since)
                 and not is_retry
             ):
                 summary.skipped_historical += 1
@@ -376,19 +387,32 @@ class NotificationService:
         *,
         latest_first: bool = False,
         limit: int | None = None,
+        explore_since: datetime | None = None,
     ) -> list[NotificationCandidate]:
         async with self._session_factory() as session:
             hidden_state = select(OpportunityUserState.opportunity_id).where(
                 OpportunityUserState.opportunity_id == MatchEvaluation.opportunity_id,
                 OpportunityUserState.disposition == OpportunityDisposition.HIDDEN.value,
             )
+            score_eligibility = MatchEvaluation.score >= minimum_score
+            if explore_since is not None:
+                first_seen_after_activation = select(Opportunity.id).where(
+                    Opportunity.id == MatchEvaluation.opportunity_id,
+                    Opportunity.first_seen_at >= _as_utc(explore_since),
+                )
+                score_eligibility = or_(
+                    score_eligibility
+                    & ~MatchEvaluation.score.between(EXPLORE_MIN_SCORE, EXPLORE_MAX_SCORE),
+                    MatchEvaluation.score.between(EXPLORE_MIN_SCORE, EXPLORE_MAX_SCORE)
+                    & first_seen_after_activation.exists(),
+                )
             evaluations = (
                 await session.scalars(
                     select(MatchEvaluation)
                     .where(
                         MatchEvaluation.profile_id == profile.profile_id,
                         MatchEvaluation.rules_version == profile.rules_version,
-                        MatchEvaluation.score >= minimum_score,
+                        score_eligibility,
                         ~hidden_state.exists(),
                     )
                     .order_by(MatchEvaluation.score.desc(), MatchEvaluation.opportunity_id.desc())
@@ -791,8 +815,12 @@ def format_match_message(
     rates: ExchangeRates | None = None,
 ) -> str:
     if candidate.kind is OpportunityKind.FREELANCE_PROJECT:
-        return _format_freelance_match_message(candidate, rates)
-    return _format_employment_match_message(candidate, rates)
+        message = _format_freelance_match_message(candidate, rates)
+    else:
+        message = _format_employment_match_message(candidate, rates)
+    if EXPLORE_MIN_SCORE <= candidate.score <= EXPLORE_MAX_SCORE:
+        return "<b>Explore: possible match, review the requirements and concerns.</b>\n\n" + message
+    return message
 
 
 def opportunity_keyboard(
