@@ -190,6 +190,7 @@ def test_compose_environment_is_an_explicit_service_allowlist() -> None:
             "TELEGRAM_BOT_TOKEN": "synthetic-telegram-token",
             "TELEGRAM_CHAT_ID": "123",
             "TELEGRAM_ENABLED": "true",
+            "TELEGRAM_EXPLORE_SINCE": "2026-10-18T00:00:00+02:00",
             "APP_ENV": "production",
             "API_ALLOWED_HOSTS": "api.example.invalid",
             "UNRELATED_PRIVATE_SECRET": "must-not-be-injected",
@@ -245,6 +246,10 @@ def test_compose_environment_is_an_explicit_service_allowlist() -> None:
             assert values["TELEGRAM_ENABLED"] == "true"
         if service != "api":
             assert "API_BEARER_TOKEN" not in values
+        if service == "worker":
+            assert values["TELEGRAM_EXPLORE_SINCE"] == environment["TELEGRAM_EXPLORE_SINCE"]
+        else:
+            assert "TELEGRAM_EXPLORE_SINCE" not in values
         Settings(_env_file=None, **{name.lower(): value for name, value in values.items()})
     assert "alembic" not in " ".join(services["api"]["command"])
     assert services["migrate"]["command"] == ["alembic", "upgrade", "head"]

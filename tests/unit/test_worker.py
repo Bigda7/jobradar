@@ -23,6 +23,7 @@ from jobradar.db.models import (
 from jobradar.domain.enums import DeliveryStatus, RunStatus
 from jobradar.ingestion.service import IngestionService
 from jobradar.matching.profile import BOHDAN_PROFILE
+from jobradar.matching.service import MatchingService
 from jobradar.notifications.currency import CurrencyConversionError, ExchangeRates
 from jobradar.notifications.scan_cursor import NotificationScanCursorService
 from jobradar.sources.mock import MockSource
@@ -225,9 +226,11 @@ async def test_worker_cycle_refuses_to_overlap(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_explore", [False, True])
 async def test_worker_delivers_new_matches_once_after_exchange_rate_outage(
     monkeypatch: pytest.MonkeyPatch,
     sqlite_session_factory: async_sessionmaker[AsyncSession],
+    include_explore: bool,
 ) -> None:
     settings = SimpleNamespace(
         source_reconciliation_max_missing_ratio=0.8,
@@ -244,10 +247,24 @@ async def test_worker_delivers_new_matches_once_after_exchange_rate_outage(
         matching_min_score=55,
         telegram_max_messages_per_cycle=5,
         telegram_notify_existing=False,
+        telegram_explore_since=datetime.now(UTC) - timedelta(minutes=1)
+        if include_explore
+        else None,
         nbu_rates_url="https://bank.test/rates",
         nbu_request_timeout_seconds=1.0,
     )
     messages: list[str] = []
+    original_evaluate = MatchingService.evaluate
+
+    async def evaluate_with_controlled_score(self, profile):  # type: ignore[no-untyped-def]
+        summary = await original_evaluate(self, profile)
+        if include_explore:
+            async with sqlite_session_factory() as session, session.begin():
+                for evaluation in (await session.scalars(select(MatchEvaluation))).all():
+                    evaluation.score = 45
+        return summary
+
+    monkeypatch.setattr(MatchingService, "evaluate", evaluate_with_controlled_score)
 
     class FakeTelegramClient:
         def __init__(self, **kwargs: object) -> None:
@@ -307,6 +324,7 @@ async def test_worker_delivers_new_matches_once_after_exchange_rate_outage(
         assert cursor.minimum_first_seen_at == pending_cutoff
     assert await worker.run_worker_cycle(force_sources=False, failure_retry_seconds=1) is False
     assert len(messages) == 2
+    assert all(message.startswith("<b>Explore:") for message in messages) is include_explore
     async with sqlite_session_factory() as session:
         cursor = await session.get(NotificationScanCursor, ("bohdan", "telegram"))
         assert cursor is not None
@@ -360,6 +378,7 @@ async def test_worker_retries_stored_delivery_before_exchange_rate_failure(
         matching_min_score=55,
         telegram_max_messages_per_cycle=5,
         telegram_notify_existing=False,
+        telegram_explore_since=None,
         nbu_rates_url="https://bank.test/rates",
         nbu_request_timeout_seconds=1.0,
     )
