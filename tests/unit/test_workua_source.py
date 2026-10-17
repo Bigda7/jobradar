@@ -989,6 +989,105 @@ async def test_unavailable_search_is_reported_without_discarding_other_results()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["challenge", "403", "502", "timeout"])
+@pytest.mark.parametrize("new_instance", [False, True])
+async def test_next_run_recovers_a_missed_second_page_and_cached_details(
+    failure: str, new_instance: bool
+) -> None:
+    recovered = False
+    requests: list[tuple[str, str, str]] = []
+    old_fetched_at = datetime.now(UTC) - timedelta(days=2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        page = request.url.params.get("page", "1")
+        requests.append((path, page, request.headers.get("X-Return-Format", "")))
+        if path == "/en/jobs-remote-python/":
+            if page == "1":
+                return httpx.Response(200, text=SEARCH_PAGE)
+            if not recovered:
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("Synthetic timeout", request=request)
+                if failure.isdigit():
+                    return httpx.Response(int(failure))
+                return httpx.Response(200, text=CHALLENGE_PAGE)
+            return httpx.Response(200, text=SEARCH_PAGE.replace("8441545", "8441550"))
+        if path == "/en/jobs-remote-django/":
+            return httpx.Response(
+                200,
+                text=SEARCH_PAGE.replace("8441545", "8441560") if page == "1" else "No jobs",
+            )
+        if path == "/en/jobs/8441545/" and not recovered:
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        return httpx.Response(200, text=DETAIL_PAGE)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+
+        def create_source() -> WorkUaSource:
+            return WorkUaSource(
+                search_urls=(
+                    "https://www.work.ua/en/jobs-remote-python/",
+                    "https://www.work.ua/en/jobs-remote-django/",
+                ),
+                reader_base_url="https://reader.test",
+                max_pages_per_search=2,
+                retry_attempts=1,
+                client=client,
+            )
+
+        source = create_source()
+        source.begin_run()
+        source.prime_listing_cache(
+            {
+                "8441545": CachedListing(
+                    payload={"description": "Previously saved full description"},
+                    detail_fetched_at=old_fetched_at,
+                )
+            }
+        )
+        first = [listing async for listing in source.fetch()]
+        assert [listing.external_id for listing in first] == ["8441545", "8441560"]
+        assert first[0].payload["description"] == "Previously saved full description"
+        assert first[0].payload["detail_status"] == "cached"
+        assert first[0].detail_fetched_at == old_fetched_at
+        assert source.consume_run_metrics().detail_failure_count == 1
+        warnings = source.consume_warnings()
+        assert len(warnings) == 2
+        assert "jobs-remote-python/?page=2" in warnings[0]
+        assert "retained cached description" in warnings[1]
+
+        recovered = True
+        requests.clear()
+        if new_instance:
+            source = create_source()
+        source.begin_run()
+        source.prime_listing_cache(
+            {
+                listing.external_id: CachedListing(
+                    payload=listing.payload, detail_fetched_at=listing.detail_fetched_at
+                )
+                for listing in first
+            }
+        )
+        second = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in second] == ["8441545", "8441550", "8441560"]
+    assert all(listing.payload["detail_status"] == "complete" for listing in second)
+    assert all("Write tests" in listing.payload["description"] for listing in second)
+    assert second[0].detail_fetched_at is not None
+    assert second[0].detail_fetched_at > old_fetched_at
+    assert requests.count(("/en/jobs-remote-python/", "2", "html")) == 1
+    assert requests.count(("/en/jobs/8441545/", "1", "html")) == 1
+    assert not any(path == "/en/jobs/8441560/" for path, _, _ in requests)
+    assert source.consume_warnings() == ()
+    metrics = source.consume_run_metrics()
+    assert metrics.page_count == 4
+    assert metrics.detail_failure_count == 0
+    assert metrics.limit_reached is False
+    assert source.deactivate_missing_listings is False
+
+
+@pytest.mark.asyncio
 async def test_workua_source_continues_when_one_search_page_is_empty() -> None:
     empty_attempts = 0
 
