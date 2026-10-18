@@ -23,6 +23,7 @@ from jobradar.sources.detail_cache import (
 )
 from jobradar.sources.discovery import ROBOTA_SEARCH_URLS, search_batch
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
+from jobradar.sources.reader_pacing import ReaderRequestPacer
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://robota.ua"
@@ -114,6 +115,7 @@ class RobotaUaSource(BaseSource):
         retry_attempts: int = 2,
         client: httpx.AsyncClient | None = None,
         max_searches_per_run: int | None = None,
+        reader_pacer: ReaderRequestPacer | None = None,
     ) -> None:
         self._search_urls = search_urls
         self._reader_base_url = reader_base_url.rstrip("/")
@@ -127,6 +129,7 @@ class RobotaUaSource(BaseSource):
         self._retry_attempts = retry_attempts
         self._client = client
         self._max_searches_per_run = max_searches_per_run
+        self._reader_pacer = reader_pacer
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         self._download_budget = DownloadBudget(monotonic() + MAX_RUN_SECONDS)
@@ -327,6 +330,12 @@ class RobotaUaSource(BaseSource):
                 attempts=self._retry_attempts,
                 timeout_seconds=self._request_timeout_seconds,
                 budget=getattr(self, "_download_budget", None),
+                wait_before_request=(
+                    self._reader_pacer.wait if self._reader_pacer is not None else None
+                ),
+                on_response=(
+                    self._reader_pacer.observe if self._reader_pacer is not None else None
+                ),
             )
             response.raise_for_status()
         except DownloadLimitError as error:

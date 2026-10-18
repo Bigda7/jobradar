@@ -249,12 +249,14 @@ def test_compose_environment_is_an_explicit_service_allowlist() -> None:
         if service == "worker":
             assert values["TELEGRAM_EXPLORE_SINCE"] == environment["TELEGRAM_EXPLORE_SINCE"]
             assert values["SOURCE_SEARCH_PROFILE"] == "portfolio"
+            assert values["READER_REQUEST_INTERVAL_SECONDS"] == "3.2"
             assert values["WORKUA_MAX_SEARCHES_PER_RUN"] == "5"
             assert values["ROBOTA_UA_MAX_SEARCHES_PER_RUN"] == "7"
             assert values["DOU_JOBS_MAX_FEEDS_PER_RUN"] == "8"
         else:
             assert "TELEGRAM_EXPLORE_SINCE" not in values
             assert "SOURCE_SEARCH_PROFILE" not in values
+            assert "READER_REQUEST_INTERVAL_SECONDS" not in values
             assert "DOU_JOBS_ADDITIONAL_FEED_URLS" not in values
         Settings(_env_file=None, **{name.lower(): value for name, value in values.items()})
     assert "alembic" not in " ".join(services["api"]["command"])

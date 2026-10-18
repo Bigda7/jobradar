@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = "http://localhost:5173"
     mock_source_enabled: bool = False
     source_search_profile: Literal["portfolio", "custom"] = "portfolio"
+    reader_request_interval_seconds: float = Field(default=3.2, ge=3.1, le=30)
     djinni_source_enabled: bool = True
     djinni_jobs_url: str = "https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote"
     djinni_additional_jobs_urls: str = (

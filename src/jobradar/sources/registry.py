@@ -6,6 +6,7 @@ from jobradar.sources.base import BaseSource
 from jobradar.sources.djinni import DjinniSource
 from jobradar.sources.dou_jobs import DouJobsSource
 from jobradar.sources.mock import MockSource
+from jobradar.sources.reader_pacing import ReaderRequestPacer
 from jobradar.sources.robota_ua import RobotaUaSource
 from jobradar.sources.workua import WorkUaSource
 
@@ -20,6 +21,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
         djinni_category_allowlist=False,
     )
     sources: list[BaseSource] = []
+    reader_pacer = ReaderRequestPacer(settings.reader_request_interval_seconds)
     if settings.djinni_source_enabled:
         sources.append(
             DjinniSource(
@@ -51,6 +53,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 detail_request_delay_seconds=settings.workua_detail_request_delay_seconds,
                 retry_attempts=settings.workua_retry_attempts,
                 max_searches_per_run=settings.workua_max_searches_per_run,
+                reader_pacer=reader_pacer,
             )
         )
     if settings.robota_ua_source_enabled:
@@ -67,6 +70,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 detail_request_delay_seconds=(settings.robota_ua_detail_request_delay_seconds),
                 retry_attempts=settings.robota_ua_retry_attempts,
                 max_searches_per_run=settings.robota_ua_max_searches_per_run,
+                reader_pacer=reader_pacer,
             )
         )
     if settings.dou_jobs_source_enabled:

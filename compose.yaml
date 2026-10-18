@@ -46,6 +46,7 @@ x-telegram-environment: &telegram-environment
 x-worker-environment: &worker-environment
   MOCK_SOURCE_ENABLED: "${MOCK_SOURCE_ENABLED-false}"
   SOURCE_SEARCH_PROFILE: "${SOURCE_SEARCH_PROFILE-portfolio}"
+  READER_REQUEST_INTERVAL_SECONDS: "${READER_REQUEST_INTERVAL_SECONDS-3.2}"
   DJINNI_SOURCE_ENABLED: "${DJINNI_SOURCE_ENABLED-true}"
   DJINNI_JOBS_URL: "${DJINNI_JOBS_URL-https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote}"
   DJINNI_ADDITIONAL_JOBS_URLS: "${DJINNI_ADDITIONAL_JOBS_URLS-https://djinni.co/jobs/rss/?editorial=nonhr&employment=office&country=CZE}"

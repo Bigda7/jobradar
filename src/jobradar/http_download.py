@@ -3,7 +3,7 @@
 import asyncio
 import math
 import zlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
 
@@ -108,6 +108,7 @@ async def bounded_get(
     budget: DownloadBudget | None = None,
     on_bytes: Callable[[int], None] | None = None,
     before_request: Callable[[], None] | None = None,
+    wait_before_request: Callable[[float], Awaitable[None]] | None = None,
 ) -> httpx.Response:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or maximum_bytes <= 0:
         raise ValueError("Download limits must be positive and finite.")
@@ -127,6 +128,14 @@ async def bounded_get(
             for redirect in range(MAX_REDIRECTS + 1):
                 if monotonic() >= deadline:
                     raise TimeoutError
+                if wait_before_request is not None:
+                    await wait_before_request(deadline)
+                if monotonic() >= deadline:
+                    raise TimeoutError
+                if budget is not None and budget.consumed_bytes >= budget.maximum_bytes:
+                    raise DownloadLimitError(
+                        "Source run exhausted its decoded byte budget.", reason="run_limit"
+                    )
                 if before_request is not None:
                     before_request()
                 async with client.stream(
