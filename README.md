@@ -328,6 +328,12 @@ filter uses the registered source name and returns that source's active listing 
 health checks; the three data endpoints require `Authorization: Bearer <token>` when a token is
 configured.
 
+Match `reasons` and `concerns` present recognized legacy explanations in English
+at the API response boundary, including existing stored evaluations. Unknown
+messages are preserved rather than hidden. This presentation does not rescore
+vacancies, change the rules version, rewrite stored evaluations or alter Telegram
+messages. Original vacancy titles and descriptions retain their source language.
+
 The worker fetches one NBU exchange-rate snapshot per matching cycle and uses that same
 snapshot for salary scoring and Telegram formatting. A changed USD conversion rate
 re-evaluates only affected foreign-currency opportunities. If the rate request fails,
