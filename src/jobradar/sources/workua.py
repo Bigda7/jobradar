@@ -24,25 +24,11 @@ from jobradar.sources.detail_cache import (
     discovery_fingerprint,
     polite_delay,
 )
+from jobradar.sources.discovery import WORKUA_SEARCH_URLS, search_batch
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://www.work.ua"
-DEFAULT_SEARCH_URLS = (
-    "https://www.work.ua/en/jobs-remote-programmer/",
-    "https://www.work.ua/en/jobs-remote-developer/",
-    "https://www.work.ua/en/jobs-remote-junior+developer/",
-    "https://www.work.ua/en/jobs-remote-front-end+developer/",
-    "https://www.work.ua/en/jobs-remote-back-end+developer/",
-    "https://www.work.ua/en/jobs-remote-full-stack+developer/",
-    "https://www.work.ua/en/jobs-remote-python/",
-    "https://www.work.ua/en/jobs-remote-django/",
-    "https://www.work.ua/en/jobs-remote-fastapi/",
-    "https://www.work.ua/en/jobs-remote-react/",
-    "https://www.work.ua/en/jobs-remote-javascript/",
-    "https://www.work.ua/en/jobs-remote-typescript/",
-    "https://www.work.ua/en/jobs-remote-node.js/",
-    "https://www.work.ua/en/jobs-remote-shopify/",
-)
+DEFAULT_SEARCH_URLS = WORKUA_SEARCH_URLS
 USER_AGENT = "JobRadar/0.5 (personal job aggregator)"
 JOB_PATH_PATTERN = re.compile(r"/(?:en/)?jobs/(?P<id>\d+)/")
 NUMBER_PATTERN = re.compile(r"\d+(?:[\s\u00a0\u2009\u202f.,]\d+)*")
@@ -123,6 +109,7 @@ class WorkUaSource(BaseSource):
         detail_request_delay_seconds: float = 0.0,
         retry_attempts: int = 2,
         client: httpx.AsyncClient | None = None,
+        max_searches_per_run: int | None = None,
     ) -> None:
         self._search_urls = search_urls
         self._reader_base_url = reader_base_url.rstrip("/")
@@ -134,6 +121,7 @@ class WorkUaSource(BaseSource):
         self._detail_request_delay_seconds = detail_request_delay_seconds
         self._retry_attempts = retry_attempts
         self._client = client
+        self._max_searches_per_run = max_searches_per_run
         self._run_stop_error: WorkUaSourceError | None = None
 
     async def fetch(self) -> AsyncIterator[RawListing]:
@@ -151,7 +139,20 @@ class WorkUaSource(BaseSource):
         successful_search_pages = 0
         card_batches: list[list[WorkUaCard]] = []
         first_search_failure: tuple[WorkUaSourceError, str] | None = None
-        for search_url in self._search_urls:
+        selected_urls = search_batch(
+            self._search_urls,
+            self._max_searches_per_run,
+            getattr(self, "_discovery_run_index", 0),
+            pinned=1,
+        )
+        logger.info(
+            "source_search_plan",
+            source=self.name,
+            configured=len(self._search_urls),
+            selected=len(selected_urls),
+            run_index=getattr(self, "_discovery_run_index", 0),
+        )
+        for search_url in selected_urls:
             query_ids: set[str] = set()
             for page_number in range(1, self._max_pages_per_search + 1):
                 page_url = _page_url(search_url, page_number)

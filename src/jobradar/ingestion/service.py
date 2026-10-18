@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import structlog
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from jobradar.db.models import Listing, Opportunity, Source, SourceRun
@@ -126,6 +126,13 @@ class IngestionService:
     async def _run_source(self, adapter: BaseSource) -> IngestionResult:
         source_id, run_id = await self._start_run(adapter)
         adapter.begin_run()
+        async with self._session_factory() as session:
+            run_index = await session.scalar(
+                select(func.count(SourceRun.id)).where(
+                    SourceRun.source_id == source_id, SourceRun.id < run_id
+                )
+            )
+        adapter.configure_discovery_run(int(run_index or 0))
         adapter.configure_request_budget(DatabaseRequestBudget(self._session_factory, source_id))
         adapter.prime_listing_cache(await self._load_listing_cache(source_id))
         result = IngestionResult(

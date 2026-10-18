@@ -1,5 +1,8 @@
 # JobRadar Backend
 
+The local portfolio discovery candidate and its verification/rollout limits are
+documented in [source discovery coverage](docs/source-discovery-coverage.md).
+
 Production backend for JobRadar, a self-hosted job intelligence platform that collects remote
 employment opportunities, normalizes heterogeneous source data, reconciles and
 deduplicates listings, applies deterministic matching rules, and exposes ranked results to a web

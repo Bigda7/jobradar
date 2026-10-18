@@ -1,6 +1,15 @@
 # Source Access Policy
 
-Last reviewed: 2026-10-16 (Robota support/export update; other source reviews unchanged)
+Last updated: 2026-10-18 (owner-approved discovery scope; provider permissions unchanged)
+
+October18 implementation note: the owner requested an all-source discovery
+review and correction of missed stack coverage, then explicitly approved publication
+and production deployment. The portfolio profile, bounded
+rotation and official DOU supplementation are described in
+[discovery coverage](source-discovery-coverage.md). The approved rollout expands the
+query pool without increasing per-run search counts or polling frequency. Provider
+permissions are unchanged. Work.ua
+access remains unresolved; no access-bypass method is added.
 
 This document records the access method, attribution requirements, retention constraints, and
 commercial-use risk for the four sources supported by the current production registry. It is an
@@ -11,6 +20,7 @@ checked again before a public or commercial release.
 
 - Preserve the canonical source URL and show the source name wherever a listing is displayed.
 - Do not increase request frequency or pagination for a permission-required source.
+  The October18 owner-approved query rotation retains those limits; it is not provider permission.
 - Prefer documented public APIs and RSS feeds over HTML or undocumented frontend APIs.
 - Respect upstream request limits even when the adapter can technically request more data.
 - Re-review this table before using a source in any public, commercial, or multi-user product.
@@ -24,7 +34,7 @@ checked again before a public or commercial release.
 | Djinni | Official filtered RSS plus bounded public JobPosting page metadata enrichment, deployed in v1.2.15; faster scheduling/persistent budgets are a local candidate | RSS recommended and full descriptions allowed; missing-field supplementation described as acceptable in the owner-supplied follow-up | Keep attribution and original URL; up to 100 RSS requests/minute; local HTML ceilings: 100/run and at least 2 seconds spacing, with 100/hour persistence in the local candidate, not a provider allowance; no retention duration specified | Reconfirm terms for a changed commercial or multi-user scope |
 | DOU Jobs | Official vacancy RSS feed | Approved | Keep DOU attribution and the original URL | Recheck feed terms before commercial launch |
 | Robota.ua | Current adapter: search/details through Reader; provider-recommended replacement: partner JSON export, not implemented | Owner-supplied support reply offers integration without a contract; documented data URLs returned Cloudflare 403 on October16 | Preserve original links; export schema, coverage, retention and redistribution details need confirmation | Confirm future commercial reuse; do not infer blanket permission from a public export |
-| Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Keep current polling and coverage unchanged; reassess terms and seek explicit permission before commercial or multi-user use |
+| Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Retain polling, pagination and per-run limits; October18 broader query rotation is owner-approved only; seek explicit permission before commercial or multi-user use |
 
 ## Robota.ua Partner Export Review
 
@@ -59,7 +69,10 @@ documented permission grant to JobRadar for this use, and this repository contai
 such a grant. The engineering status is therefore **unresolved for the intentionally public
 portfolio**. On 2026-09-28, the owner decided to keep Work.ua collection and display enabled
 for the existing public personal portfolio. This operating decision is not authorization from
-Work.ua. Keep the current polling, search coverage, and data reuse unchanged. Reassess the
+Work.ua. On October18 the owner separately approved broader portfolio query rotation
+with unchanged polling, pagination and per-run search limits. This supersedes the
+earlier instruction to freeze the exact query list, not the unresolved permission
+status. Data reuse remains unchanged. Reassess the
 integration if upstream terms, access controls, or product scope change, and review the terms
 again before another public release. This decision changes documentation only; it does not
 alter the running source, remove stored listings, or make a legal determination.

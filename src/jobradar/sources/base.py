@@ -34,6 +34,9 @@ class BaseSource(ABC):
     poll_from_start: bool = False
     allowed_listing_hosts: ClassVar[frozenset[str]] = frozenset()
 
+    def configure_discovery_run(self, run_index: int) -> None:
+        self._discovery_run_index = run_index
+
     def validate_listing_url(self, raw_listing: RawListing) -> None:
         if self.allowed_listing_hosts and not is_trusted_source_link(
             str(raw_listing.source_url), self.allowed_listing_hosts

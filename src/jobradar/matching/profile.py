@@ -8,6 +8,7 @@ class SkillRule:
     aliases: tuple[str, ...]
     weight: int
     supporting: bool = False
+    discovery: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,22 +82,22 @@ BOHDAN_PROFILE = SearchProfile(
     minimum_freelance_fixed_usd=Decimal("75"),
     preferred_freelance_fixed_usd=Decimal("150"),
     skills=(
-        SkillRule("React", ("react", "react.js", "reactjs"), 10),
-        SkillRule("JavaScript", ("javascript", "js es6", "es6+"), 8),
-        SkillRule("TypeScript", ("typescript",), 5),
-        SkillRule("Python", ("python",), 10),
-        SkillRule("Django", ("django",), 12),
+        SkillRule("React", ("react", "react.js", "reactjs"), 10, discovery=True),
+        SkillRule("JavaScript", ("javascript", "js es6", "es6+"), 8, discovery=True),
+        SkillRule("TypeScript", ("typescript",), 5, discovery=True),
+        SkillRule("Python", ("python",), 10, discovery=True),
+        SkillRule("Django", ("django",), 12, discovery=True),
         SkillRule("Django REST Framework", ("django rest framework", "drf"), 6),
         SkillRule("PostgreSQL", ("postgresql", "postgres"), 6),
         SkillRule("REST APIs", ("rest api", "restful api", "rest apis"), 5),
         SkillRule("Vite", ("vite",), 4),
         SkillRule("HTML/CSS", ("html5", "css3", "html", "css"), 4),
-        SkillRule("Shopify/Liquid", ("shopify", "liquid", "online store 2.0"), 10),
+        SkillRule("Shopify/Liquid", ("shopify", "liquid", "online store 2.0"), 10, discovery=True),
         SkillRule("SQLAlchemy", ("sqlalchemy",), 4),
-        SkillRule("FastAPI", ("fastapi", "fast api"), 10),
-        SkillRule("Next.js", ("next.js", "nextjs", "next js"), 10),
-        SkillRule("Node.js", ("node.js", "nodejs", "node js"), 8),
-        SkillRule("Express", ("express", "express.js", "expressjs"), 6),
+        SkillRule("FastAPI", ("fastapi", "fast api"), 10, discovery=True),
+        SkillRule("Next.js", ("next.js", "nextjs", "next js"), 10, discovery=True),
+        SkillRule("Node.js", ("node.js", "nodejs", "node js"), 8, discovery=True),
+        SkillRule("Express", ("express", "express.js", "expressjs"), 6, discovery=True),
         SkillRule("WebSockets", ("websocket", "websockets", "web sockets"), 4),
         SkillRule(
             "LLM API integration",
@@ -109,6 +110,7 @@ BOHDAN_PROFILE = SearchProfile(
                 "deepseek",
             ),
             6,
+            discovery=True,
         ),
         SkillRule("Tailwind CSS", ("tailwind", "tailwindcss"), 2, supporting=True),
         SkillRule("Prisma", ("prisma",), 2, supporting=True),
