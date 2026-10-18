@@ -1,7 +1,9 @@
 # JobRadar Backend
 
-The local portfolio discovery candidate and its verification/rollout limits are
+Portfolio discovery and its verification/rollout limits are
 documented in [source discovery coverage](docs/source-discovery-coverage.md).
+Shared Reader pacing is documented in
+[Reader request pacing](docs/reader-request-pacing.md); production rollout is manual.
 
 Production backend for JobRadar, a self-hosted job intelligence platform that collects remote
 employment opportunities, normalizes heterogeneous source data, reconciles and

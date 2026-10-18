@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import math
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -57,6 +58,8 @@ async def get_with_backoff(
     maximum_delay_seconds: float = 30.0,
     timeout_seconds: float = 30.0,
     budget: DownloadBudget | None = None,
+    wait_before_request: Callable[[float], Awaitable[None]] | None = None,
+    on_response: Callable[[httpx.Response], None] | None = None,
 ) -> httpx.Response:
     try:
         async with asyncio.timeout(timeout_seconds * attempts + maximum_delay_seconds):
@@ -67,7 +70,10 @@ async def get_with_backoff(
                     headers=headers,
                     timeout_seconds=timeout_seconds,
                     budget=budget,
+                    wait_before_request=wait_before_request,
                 )
+                if on_response is not None:
+                    on_response(response)
                 if response.status_code != httpx.codes.TOO_MANY_REQUESTS or attempt + 1 >= attempts:
                     return response
                 retry_after = response.headers.get("Retry-After")

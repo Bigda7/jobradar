@@ -26,6 +26,7 @@ from jobradar.sources.detail_cache import (
 )
 from jobradar.sources.discovery import WORKUA_SEARCH_URLS, search_batch
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
+from jobradar.sources.reader_pacing import ReaderRequestPacer
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://www.work.ua"
 DEFAULT_SEARCH_URLS = WORKUA_SEARCH_URLS
@@ -110,6 +111,7 @@ class WorkUaSource(BaseSource):
         retry_attempts: int = 2,
         client: httpx.AsyncClient | None = None,
         max_searches_per_run: int | None = None,
+        reader_pacer: ReaderRequestPacer | None = None,
     ) -> None:
         self._search_urls = search_urls
         self._reader_base_url = reader_base_url.rstrip("/")
@@ -122,6 +124,7 @@ class WorkUaSource(BaseSource):
         self._retry_attempts = retry_attempts
         self._client = client
         self._max_searches_per_run = max_searches_per_run
+        self._reader_pacer = reader_pacer
         self._run_stop_error: WorkUaSourceError | None = None
 
     async def fetch(self) -> AsyncIterator[RawListing]:
@@ -129,22 +132,22 @@ class WorkUaSource(BaseSource):
         self._run_deadline = monotonic() + 600.0
         self._download_budget = DownloadBudget(self._run_deadline)
         self._network_requests = 0
-        self._network_request_limit = (
-            2
-            * self._retry_attempts
-            * (len(self._search_urls) * self._max_pages_per_search + self._max_items)
-        )
-        seen: set[str] = set()
-        yielded = 0
-        successful_search_pages = 0
-        card_batches: list[list[WorkUaCard]] = []
-        first_search_failure: tuple[WorkUaSourceError, str] | None = None
         selected_urls = search_batch(
             self._search_urls,
             self._max_searches_per_run,
             getattr(self, "_discovery_run_index", 0),
             pinned=1,
         )
+        self._network_request_limit = (
+            2
+            * self._retry_attempts
+            * (len(selected_urls) * self._max_pages_per_search + self._max_items)
+        )
+        seen: set[str] = set()
+        yielded = 0
+        successful_search_pages = 0
+        card_batches: list[list[WorkUaCard]] = []
+        first_search_failure: tuple[WorkUaSourceError, str] | None = None
         logger.info(
             "source_search_plan",
             source=self.name,
@@ -439,8 +442,10 @@ class WorkUaSource(BaseSource):
             getattr(self, "_run_deadline", math.inf),
             monotonic() + min(120.0, self._request_timeout_seconds * self._retry_attempts + 30),
         )
+        last_failure: WorkUaSourceError | None = None
         for attempt in range(self._retry_attempts):
             self._raise_if_stopped()
+            started = monotonic()
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise WorkUaSourceError("Work.ua request deadline reached.", reason="deadline")
@@ -454,15 +459,32 @@ class WorkUaSource(BaseSource):
                         timeout_seconds=min(self._request_timeout_seconds, remaining),
                         budget=getattr(self, "_download_budget", None),
                         before_request=self._reserve_network_request,
+                        wait_before_request=(
+                            self._reader_pacer.wait if self._reader_pacer is not None else None
+                        ),
                     )
+                if self._reader_pacer is not None:
+                    self._reader_pacer.observe(response)
                 response.raise_for_status()
+                self._log_request_attempt(
+                    request_url, headers, attempt, started, "success", response
+                )
                 return response.text
             except DownloadLimitError as error:
                 failure = WorkUaSourceError(
                     f"Work.ua download stopped: {error}", reason=error.reason
                 )
-                if error.reason == "run_limit":
-                    self._stop_run(failure, reason="run_limit")
+                self._log_request_attempt(
+                    request_url, headers, attempt, started, error.reason, response
+                )
+                if error.reason == "deadline" and last_failure is not None:
+                    self._stop_run(
+                        last_failure,
+                        reason="rate_limit" if last_failure.status_code == 429 else "deadline",
+                    )
+                    raise last_failure from error
+                if error.reason in {"run_limit", "deadline"}:
+                    self._stop_run(failure, reason=error.reason)
                 raise failure from error
             except httpx.HTTPStatusError as error:
                 status = error.response.status_code
@@ -470,13 +492,30 @@ class WorkUaSource(BaseSource):
                     f"Work.ua reader returned HTTP {status}.", status_code=status
                 )
                 if status not in {429, 500, 502, 503, 504}:
+                    self._log_request_attempt(
+                        request_url, headers, attempt, started, "http_error", response
+                    )
                     raise failure from error
             except (httpx.TimeoutException, TimeoutError):
                 failure = WorkUaSourceError("Work.ua reader timed out.", reason="timeout")
             except httpx.TransportError:
                 failure = WorkUaSourceError("Work.ua reader transport failed.", reason="transport")
             except httpx.HTTPError as error:
+                self._log_request_attempt(
+                    request_url, headers, attempt, started, "invalid_response", response
+                )
                 raise WorkUaSourceError("Work.ua reader response is unavailable.") from error
+            self._log_request_attempt(
+                request_url,
+                headers,
+                attempt,
+                started,
+                "http_error"
+                if failure.status_code is not None
+                else failure.reason or "unavailable",
+                response,
+            )
+            last_failure = failure
             delay = float(2**attempt)
             has_retry_after = (
                 response is not None and response.headers.get("Retry-After") is not None
@@ -506,6 +545,31 @@ class WorkUaSource(BaseSource):
                 raise failure
             await asyncio.sleep(max(0.0, delay))
         raise WorkUaSourceError("Work.ua retry attempts exhausted.")
+
+    def _log_request_attempt(
+        self,
+        request_url: str,
+        headers: dict[str, str],
+        attempt: int,
+        started: float,
+        outcome: str,
+        response: httpx.Response | None,
+    ) -> None:
+        path = urlsplit(request_url).path
+        page_kind = "detail" if JOB_PATH_PATTERN.search(path) else "search"
+        response_format = headers.get("X-Return-Format", "unknown")
+        logger.info(
+            "workua_request_attempt",
+            page_kind=page_kind,
+            response_format=response_format
+            if response_format in {"html", "markdown"}
+            else "unknown",
+            attempt=attempt + 1,
+            outcome=outcome,
+            status_code=response.status_code if response is not None else None,
+            elapsed_seconds=round(max(0.0, monotonic() - started), 3),
+            network_requests=getattr(self, "_network_requests", 0),
+        )
 
     def _reserve_network_request(self) -> None:
         self._raise_if_stopped()

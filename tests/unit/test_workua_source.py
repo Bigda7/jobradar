@@ -608,7 +608,8 @@ async def test_explicit_security_text_is_rejected_even_with_listing_shaped_conte
                 else:
                     await source._fetch_description("https://www.work.ua/en/jobs/8441545/")
     assert failure.value.reason == "challenge"
-    assert all(log["classification"] == "challenge" for log in logs)
+    classified = [log for log in logs if log["event"] == "workua_response_classified"]
+    assert classified and all(log["classification"] == "challenge" for log in classified)
 
 
 @pytest.mark.parametrize(

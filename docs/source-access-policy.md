@@ -11,6 +11,10 @@ query pool without increasing per-run search counts or polling frequency. Provid
 permissions are unchanged. Work.ua
 access remains unresolved; no access-bypass method is added.
 
+The subsequent [shared Reader pacing package](reader-request-pacing.md)
+reduces burst traffic across Work.ua and Robota without increasing search budgets.
+It requires an approved rollout and does not change provider permissions or solve challenges.
+
 This document records the access method, attribution requirements, retention constraints, and
 commercial-use risk for the four sources supported by the current production registry. It is an
 engineering decision record, not legal advice. Terms and robots directives can change and must be
