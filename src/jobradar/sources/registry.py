@@ -1,4 +1,7 @@
+import structlog
+
 from jobradar.config import Settings
+from jobradar.matching.profile import BOHDAN_PROFILE
 from jobradar.sources.base import BaseSource
 from jobradar.sources.djinni import DjinniSource
 from jobradar.sources.dou_jobs import DouJobsSource
@@ -8,6 +11,14 @@ from jobradar.sources.workua import WorkUaSource
 
 
 def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
+    structlog.get_logger(__name__).info(
+        "source_discovery_profile",
+        profile=settings.source_search_profile,
+        workua_queries=len(settings.workua_urls),
+        robota_queries=len(settings.robota_ua_urls),
+        dou_feeds=len(settings.dou_urls),
+        djinni_category_allowlist=False,
+    )
     sources: list[BaseSource] = []
     if settings.djinni_source_enabled:
         sources.append(
@@ -39,6 +50,7 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 detail_cache_ttl_seconds=settings.workua_detail_cache_ttl_seconds,
                 detail_request_delay_seconds=settings.workua_detail_request_delay_seconds,
                 retry_attempts=settings.workua_retry_attempts,
+                max_searches_per_run=settings.workua_max_searches_per_run,
             )
         )
     if settings.robota_ua_source_enabled:
@@ -54,14 +66,23 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 detail_cache_ttl_seconds=settings.robota_ua_detail_cache_ttl_seconds,
                 detail_request_delay_seconds=(settings.robota_ua_detail_request_delay_seconds),
                 retry_attempts=settings.robota_ua_retry_attempts,
+                max_searches_per_run=settings.robota_ua_max_searches_per_run,
             )
         )
     if settings.dou_jobs_source_enabled:
         sources.append(
             DouJobsSource(
-                feed_url=settings.dou_jobs_feed_url,
+                feed_url=settings.dou_urls[0],
                 request_timeout_seconds=settings.dou_jobs_request_timeout_seconds,
                 max_items=settings.dou_jobs_max_items,
+                additional_feed_urls=settings.dou_additional_urls,
+                max_feeds_per_run=settings.dou_jobs_max_feeds_per_run,
+                feed_delay_seconds=settings.dou_jobs_feed_delay_seconds,
+                local_city_aliases=(
+                    BOHDAN_PROFILE.local_city_aliases
+                    if settings.source_search_profile == "portfolio"
+                    else ()
+                ),
             )
         )
     if settings.mock_source_enabled:

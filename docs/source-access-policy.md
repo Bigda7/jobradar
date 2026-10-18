@@ -2,6 +2,13 @@
 
 Last reviewed: 2026-10-16 (Robota support/export update; other source reviews unchanged)
 
+October18 local implementation note: the owner requested an all-source discovery
+review and correction of missed stack coverage. The local portfolio profile, bounded
+rotation and official DOU supplementation are described in
+[discovery coverage](source-discovery-coverage.md). Production coverage/polling and
+provider permissions are unchanged until a separately approved rollout. Work.ua
+access remains unresolved; no access-bypass method is added.
+
 This document records the access method, attribution requirements, retention constraints, and
 commercial-use risk for the four sources supported by the current production registry. It is an
 engineering decision record, not legal advice. Terms and robots directives can change and must be

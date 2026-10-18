@@ -21,20 +21,13 @@ from jobradar.sources.detail_cache import (
     get_with_backoff,
     polite_delay,
 )
+from jobradar.sources.discovery import ROBOTA_SEARCH_URLS, search_batch
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://robota.ua"
 DEFAULT_API_READER_BASE_URL = "https://r.jina.ai/http://api.robota.ua"
-DEFAULT_SEARCH_URLS = (
-    "https://robota.ua/zapros/developer-remote/ukraine",
-    "https://robota.ua/zapros/junior-developer-remote/ukraine",
-    "https://robota.ua/zapros/frontend-developer-remote/ukraine",
-    "https://robota.ua/zapros/backend-developer-remote/ukraine",
-    "https://robota.ua/zapros/full-stack-developer-remote/ukraine",
-    "https://robota.ua/zapros/python-remote/ukraine",
-    "https://robota.ua/zapros/react-remote/ukraine",
-)
+DEFAULT_SEARCH_URLS = ROBOTA_SEARCH_URLS
 USER_AGENT = "JobRadar/0.5 (personal job aggregator)"
 VACANCY_URL_PATTERN = re.compile(
     r"https?://(?:www\.)?robota\.ua/company\d+/vacancy(?P<id>\d+)(?:\?[^)\s]*)?",
@@ -120,6 +113,7 @@ class RobotaUaSource(BaseSource):
         detail_request_delay_seconds: float = 0.0,
         retry_attempts: int = 2,
         client: httpx.AsyncClient | None = None,
+        max_searches_per_run: int | None = None,
     ) -> None:
         self._search_urls = search_urls
         self._reader_base_url = reader_base_url.rstrip("/")
@@ -132,6 +126,7 @@ class RobotaUaSource(BaseSource):
         self._detail_request_delay_seconds = detail_request_delay_seconds
         self._retry_attempts = retry_attempts
         self._client = client
+        self._max_searches_per_run = max_searches_per_run
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         self._download_budget = DownloadBudget(monotonic() + MAX_RUN_SECONDS)
@@ -139,8 +134,14 @@ class RobotaUaSource(BaseSource):
         yielded = 0
         card_batches: list[list[RobotaUaCard]] = []
         semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
+        selected_urls = search_batch(
+            self._search_urls,
+            self._max_searches_per_run,
+            getattr(self, "_discovery_run_index", 0),
+            pinned=1,
+        )
         search_results = await asyncio.gather(
-            *(self._collect_search(search_url, semaphore) for search_url in self._search_urls)
+            *(self._collect_search(search_url, semaphore) for search_url in selected_urls)
         )
         successful_search_pages = sum(result[0] for result in search_results)
         for _, batches, _ in search_results:

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
+from time import monotonic
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -15,9 +16,11 @@ from defusedxml.common import DefusedXmlException
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
 from jobradar.domain.normalization import normalize_text
-from jobradar.http_download import bounded_get
+from jobradar.http_download import DownloadBudget, bounded_get
 from jobradar.sources.base import BaseSource
-from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
+from jobradar.sources.detail_cache import polite_delay
+from jobradar.sources.discovery import search_batch
+from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_FEED_URL = "https://jobs.dou.ua/vacancies/feeds/?remote"
@@ -74,11 +77,21 @@ class DouJobsSource(BaseSource):
         request_timeout_seconds: float = 30.0,
         max_items: int = 100,
         client: httpx.AsyncClient | None = None,
+        additional_feed_urls: tuple[str, ...] = (),
+        max_feeds_per_run: int | None = None,
+        feed_delay_seconds: float = 0,
+        local_city_aliases: tuple[str, ...] = (),
     ) -> None:
         self._feed_url = feed_url
         self._request_timeout_seconds = request_timeout_seconds
         self._max_items = max_items
         self._client = client
+        self._feed_urls = tuple(dict.fromkeys((feed_url, *additional_feed_urls)))
+        if len(self._feed_urls) > 64:
+            raise ValueError("At most 64 DOU feeds may be configured.")
+        self._max_feeds_per_run = max_feeds_per_run
+        self._feed_delay_seconds = feed_delay_seconds
+        self._local_city_aliases = local_city_aliases
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         if self._client is not None:
@@ -106,7 +119,7 @@ class DouJobsSource(BaseSource):
             company=company,
             description=html_to_text(description_html),
             location_text=_location_text(details),
-            work_mode=WorkMode.REMOTE,
+            work_mode=WorkMode(payload.get("work_mode", WorkMode.REMOTE.value)),
             employment_type=_employment_type(description_html),
             salary_min=salary_min,
             salary_max=salary_max,
@@ -116,31 +129,80 @@ class DouJobsSource(BaseSource):
         )
 
     async def _fetch_with_client(self, client: httpx.AsyncClient) -> AsyncIterator[RawListing]:
+        urls = search_batch(
+            self._feed_urls,
+            self._max_feeds_per_run,
+            getattr(self, "_discovery_run_index", 0),
+            pinned=2,
+        )
+        budget = DownloadBudget(monotonic() + 600)
+        listings: dict[str, RawListing] = {}
+        succeeded = 0
+        for index, url in enumerate(urls):
+            if (
+                budget.consumed_bytes >= budget.maximum_bytes
+                or monotonic() + (self._feed_delay_seconds if index else 0) >= budget.deadline
+            ):
+                self.report_warning("DOU Jobs feed traversal stopped at its run budget.")
+                break
+            if index:
+                await polite_delay(self._feed_delay_seconds)
+            try:
+                rows = await self._fetch_feed(client, url, budget)
+            except DouJobsSourceError as error:
+                self.report_warning(str(error))
+                continue
+            succeeded += 1
+            for listing in rows:
+                if listing.external_id in listings:
+                    self.record_filtered()
+                else:
+                    listings[listing.external_id] = listing
+        if not succeeded:
+            raise DouJobsSourceError("Every configured DOU Jobs RSS feed failed.")
+        # New identities take precedence over already known records when a run is capped.
+        ordered = sorted(
+            listings.values(), key=lambda row: self.cached_listing(row.external_id) is not None
+        )
+        for index, listing in enumerate(ordered):
+            if index >= self._max_items:
+                break
+            yield listing
+        if len(ordered) >= self._max_items:
+            self.mark_limit_reached()
+
+    async def _fetch_feed(
+        self, client: httpx.AsyncClient, url: str, budget: DownloadBudget
+    ) -> list[RawListing]:
         self.record_page()
         try:
             response = await bounded_get(
                 client,
-                self._feed_url,
+                url,
                 timeout_seconds=self._request_timeout_seconds,
                 maximum_bytes=MAX_FEED_BYTES,
+                budget=budget,
             )
             response.raise_for_status()
             if len(response.content) > MAX_FEED_BYTES:
                 raise DouJobsSourceError("DOU Jobs RSS response exceeded the size limit.")
             root = ElementTree.fromstring(response.content)
         except (httpx.HTTPError, ElementTree.ParseError, DefusedXmlException) as error:
-            raise DouJobsSourceError(f"DOU Jobs RSS request failed: {error}") from error
+            raise DouJobsSourceError(
+                f"DOU Jobs RSS request failed ({type(error).__name__})."
+            ) from error
 
         items = root.findall("./channel/item")
         self.record_candidates(len(items))
         seen: set[str] = set()
-        yielded = 0
+        listings: list[RawListing] = []
         malformed = 0
         for item in items:
             payload = {child.tag: child.text or "" for child in item}
             headline = _decode_html(_optional_string(payload.get("title")) or "")
             description = html_to_text(_optional_string(payload.get("description")) or "")
-            if not _is_strict_remote(headline, description):
+            mode = _work_mode(headline, description, self._local_city_aliases)
+            if mode is None:
                 self.record_filtered()
                 continue
             source_url = _optional_string(payload.get("link")) or _optional_string(
@@ -150,7 +212,10 @@ class DouJobsSource(BaseSource):
                 self.record_filtered()
                 continue
             try:
+                if not is_trusted_source_link(source_url, self.allowed_listing_hosts):
+                    raise ValueError("Untrusted DOU vacancy URL.")
                 external_id = _external_id(source_url)
+                payload["work_mode"] = mode.value
                 raw_listing = RawListing(
                     external_id=external_id,
                     source_url=source_url,
@@ -164,15 +229,29 @@ class DouJobsSource(BaseSource):
                 self.record_filtered()
                 continue
             seen.add(external_id)
-            yield raw_listing
-            yielded += 1
-            if yielded >= self._max_items:
-                self.mark_limit_reached()
-                if malformed:
-                    self.report_warning(f"DOU Jobs skipped {malformed} malformed RSS items.")
-                return
+            listings.append(raw_listing)
         if malformed:
             self.report_warning(f"DOU Jobs skipped {malformed} malformed RSS items.")
+        return listings
+
+
+def _work_mode(
+    headline: str, description: str, local_city_aliases: tuple[str, ...]
+) -> WorkMode | None:
+    if _is_strict_remote(headline, description):
+        return WorkMode.REMOTE
+    _, _, details = parse_dou_headline(headline)
+    location = normalize_text(details or "")
+    if not any(
+        re.search(rf"(?<!\w){re.escape(alias.casefold())}(?!\w)", location)
+        for alias in local_city_aliases
+    ):
+        return None
+    if HYBRID_WORK_PATTERN.search(normalize_text(f"{headline} {description}")) or re.search(
+        r"(?<!\w)hybrid(?!\w)", location
+    ):
+        return WorkMode.HYBRID
+    return WorkMode.ONSITE
 
 
 def parse_dou_headline(value: str) -> tuple[str, str | None, str | None]:

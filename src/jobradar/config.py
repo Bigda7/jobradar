@@ -7,6 +7,14 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from jobradar.sources.discovery import (
+    DOU_ADDITIONAL_FEEDS,
+    DOU_FEED_URL,
+    ROBOTA_SEARCH_URLS,
+    WORKUA_SEARCH_URLS,
+    merge_searches,
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -33,6 +41,7 @@ class Settings(BaseSettings):
     readiness_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     cors_allowed_origins: str = "http://localhost:5173"
     mock_source_enabled: bool = False
+    source_search_profile: Literal["portfolio", "custom"] = "portfolio"
     djinni_source_enabled: bool = True
     djinni_jobs_url: str = "https://djinni.co/jobs/rss/?editorial=nonhr&employment=remote"
     djinni_additional_jobs_urls: str = (
@@ -52,25 +61,11 @@ class Settings(BaseSettings):
     djinni_poll_interval_seconds: int = Field(default=900, ge=900)
     workua_source_enabled: bool = True
     workua_reader_base_url: str = "https://r.jina.ai/http://www.work.ua"
-    workua_search_urls: str = (
-        "https://www.work.ua/en/jobs-remote-programmer/;"
-        "https://www.work.ua/en/jobs-remote-developer/;"
-        "https://www.work.ua/en/jobs-remote-junior+developer/;"
-        "https://www.work.ua/en/jobs-remote-front-end+developer/;"
-        "https://www.work.ua/en/jobs-remote-back-end+developer/;"
-        "https://www.work.ua/en/jobs-remote-full-stack+developer/;"
-        "https://www.work.ua/en/jobs-remote-python/;"
-        "https://www.work.ua/en/jobs-remote-django/;"
-        "https://www.work.ua/en/jobs-remote-fastapi/;"
-        "https://www.work.ua/en/jobs-remote-react/;"
-        "https://www.work.ua/en/jobs-remote-javascript/;"
-        "https://www.work.ua/en/jobs-remote-typescript/;"
-        "https://www.work.ua/en/jobs-remote-node.js/;"
-        "https://www.work.ua/en/jobs-remote-shopify/"
-    )
+    workua_search_urls: str = ""
     workua_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     workua_max_pages_per_search: int = Field(default=2, ge=1, le=5)
     workua_max_items: int = Field(default=75, ge=1, le=200)
+    workua_max_searches_per_run: int = Field(default=5, ge=2, le=20)
     workua_remote_only: bool = True
     workua_detail_cache_ttl_seconds: int = Field(default=86400, ge=3600)
     workua_detail_request_delay_seconds: float = Field(default=1.5, ge=0, le=10)
@@ -79,18 +74,11 @@ class Settings(BaseSettings):
     robota_ua_source_enabled: bool = True
     robota_ua_reader_base_url: str = "https://r.jina.ai/http://robota.ua"
     robota_ua_api_reader_base_url: str = "https://r.jina.ai/http://api.robota.ua"
-    robota_ua_search_urls: str = (
-        "https://robota.ua/zapros/developer-remote/ukraine;"
-        "https://robota.ua/zapros/junior-developer-remote/ukraine;"
-        "https://robota.ua/zapros/frontend-developer-remote/ukraine;"
-        "https://robota.ua/zapros/backend-developer-remote/ukraine;"
-        "https://robota.ua/zapros/full-stack-developer-remote/ukraine;"
-        "https://robota.ua/zapros/python-remote/ukraine;"
-        "https://robota.ua/zapros/react-remote/ukraine"
-    )
+    robota_ua_search_urls: str = ""
     robota_ua_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     robota_ua_max_pages_per_search: int = Field(default=2, ge=1, le=5)
     robota_ua_max_items: int = Field(default=100, ge=1, le=200)
+    robota_ua_max_searches_per_run: int = Field(default=7, ge=2, le=20)
     robota_ua_remote_only: bool = True
     robota_ua_detail_cache_ttl_seconds: int = Field(default=86400, ge=3600)
     robota_ua_detail_request_delay_seconds: float = Field(default=1.5, ge=0, le=10)
@@ -98,6 +86,9 @@ class Settings(BaseSettings):
     robota_ua_poll_interval_seconds: int = Field(default=21600, ge=3600)
     dou_jobs_source_enabled: bool = True
     dou_jobs_feed_url: str = "https://jobs.dou.ua/vacancies/feeds/?remote"
+    dou_jobs_additional_feed_urls: str = ""
+    dou_jobs_max_feeds_per_run: int = Field(default=8, ge=3, le=20)
+    dou_jobs_feed_delay_seconds: float = Field(default=2.0, ge=0, le=30)
     dou_jobs_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     dou_jobs_max_items: int = Field(default=100, ge=1, le=200)
     dou_jobs_poll_interval_seconds: int = Field(default=1800, ge=900)
@@ -254,11 +245,51 @@ class Settings(BaseSettings):
 
     @property
     def workua_urls(self) -> tuple[str, ...]:
-        return tuple(url.strip() for url in self.workua_search_urls.split(";") if url.strip())
+        return merge_searches(
+            self.workua_search_urls,
+            WORKUA_SEARCH_URLS,
+            portfolio=self.source_search_profile == "portfolio",
+        )
 
     @property
     def robota_ua_urls(self) -> tuple[str, ...]:
-        return tuple(url.strip() for url in self.robota_ua_search_urls.split(";") if url.strip())
+        return merge_searches(
+            self.robota_ua_search_urls,
+            ROBOTA_SEARCH_URLS,
+            portfolio=self.source_search_profile == "portfolio",
+        )
+
+    @property
+    def dou_additional_urls(self) -> tuple[str, ...]:
+        return self.dou_urls[1:]
+
+    @property
+    def dou_urls(self) -> tuple[str, ...]:
+        return merge_searches(
+            ";".join((self.dou_jobs_feed_url, self.dou_jobs_additional_feed_urls)),
+            (DOU_FEED_URL, *DOU_ADDITIONAL_FEEDS),
+            portfolio=self.source_search_profile == "portfolio",
+        )
+
+    @model_validator(mode="after")
+    def validate_dou_configuration(self) -> "Settings":
+        if self.dou_jobs_source_enabled and not self.dou_urls:
+            raise ValueError("At least one DOU feed is required when the source is enabled.")
+        for url in self.dou_urls:
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "jobs.dou.ua"
+                or parsed.username
+                or parsed.password
+                or parsed.port not in (None, 443)
+                or parsed.path != "/vacancies/feeds/"
+                or parsed.fragment
+            ):
+                raise ValueError("DOU feeds must use the official HTTPS vacancy RSS endpoint.")
+        if len(self.dou_additional_urls) > 63:
+            raise ValueError("At most 64 DOU feeds may be configured.")
+        return self
 
     @model_validator(mode="after")
     def validate_workua_configuration(self) -> "Settings":
