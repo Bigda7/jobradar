@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 
+from jobradar.api.explanations import english_explanation
+
 
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None or value.tzinfo is not None:
@@ -61,6 +63,11 @@ class MatchResponse(JobResponse):
     concerns: list[str]
     matched_skills: list[str]
     rules_version: str
+
+    @field_validator("reasons", "concerns")
+    @classmethod
+    def present_explanations(cls, values: list[str]) -> list[str]:
+        return [english_explanation(value) for value in values]
 
 
 class MatchListResponse(BaseModel):
