@@ -161,7 +161,8 @@ def test_provisioning_requires_all_distinct_passwords() -> None:
         validate_passwords(dict.fromkeys(ROLES, "synthetic" * 8))
 
 
-def test_compose_environment_is_an_explicit_service_allowlist() -> None:
+@pytest.mark.parametrize("dou_cap", (None, "100", "175"))
+def test_compose_environment_is_an_explicit_service_allowlist(dou_cap: str | None) -> None:
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("Docker CLI is required to render Compose, not a running daemon.")
@@ -200,6 +201,8 @@ def test_compose_environment_is_an_explicit_service_allowlist() -> None:
         environment[f"{role.upper()}_DATABASE_URL"] = (
             f"postgresql+psycopg://jobradar_{role}:synthetic-{role}@db/jobradar"
         )
+    if dou_cap is not None:
+        environment["DOU_JOBS_MAX_ITEMS"] = dou_cap
     result = subprocess.run(
         [
             docker,
@@ -253,6 +256,7 @@ def test_compose_environment_is_an_explicit_service_allowlist() -> None:
             assert values["WORKUA_MAX_SEARCHES_PER_RUN"] == "5"
             assert values["ROBOTA_UA_MAX_SEARCHES_PER_RUN"] == "7"
             assert values["DOU_JOBS_MAX_FEEDS_PER_RUN"] == "8"
+            assert values["DOU_JOBS_MAX_ITEMS"] == (dou_cap or "200")
         else:
             assert "TELEGRAM_EXPLORE_SINCE" not in values
             assert "SOURCE_SEARCH_PROFILE" not in values

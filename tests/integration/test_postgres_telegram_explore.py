@@ -57,6 +57,6 @@ async def test_postgres_explore_cutoff_deduplication_and_main_threshold(
     assert first.sent == expected
     assert second.sent == 0
     assert len(client.messages) == expected
-    assert all(message.startswith("<b>Explore:") for message in client.messages) is (
-        35 <= score <= 54 or expected == 0
-    )
+    assert all(
+        message.splitlines()[0].endswith("/100 (Explore)</b>") for message in client.messages
+    ) is (35 <= score <= 54 or expected == 0)

@@ -117,7 +117,7 @@ def test_active_source_coverage_defaults_use_audited_balanced_limits() -> None:
     assert settings.djinni_max_pages == 20
     assert settings.workua_max_items == 75
     assert settings.robota_ua_max_items == 100
-    assert settings.dou_jobs_max_items == 100
+    assert settings.dou_jobs_max_items == 200
 
 
 def test_djinni_rss_limit_accepts_more_than_200_and_preserves_explicit_old_limit() -> None:

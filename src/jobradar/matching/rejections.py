@@ -71,6 +71,7 @@ NON_DEVELOPMENT_TITLE_PATTERNS = (
 )
 ANALYST_TITLE_PATTERN = re.compile(r"(?<!\w)(?:product|business|bi)\s+analyst(?!\w)")
 ENGINEERING_TITLE_PATTERN = re.compile(r"(?<!\w)(?:developer|engineer)(?!\w)")
+ACQUISITION_TITLE_PATTERN = re.compile(r"(?<!\w)(?:talent|user)[-\s]+acquisition(?!\w)")
 EXPERIENCE_VALUE_PATTERN = re.compile(
     r"(?<!\w)(?P<years>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
     r"(?:\s*\+|\s*(?:-|–|—|to)\s*\d{1,2})?\s*"
@@ -206,6 +207,8 @@ def _employment_rejection_concern(candidate: MatchCandidate) -> str | None:
 
 
 def _is_non_development_title(title: str) -> bool:
+    if ACQUISITION_TITLE_PATTERN.search(title) and not ENGINEERING_TITLE_PATTERN.search(title):
+        return True
     if ANALYST_TITLE_PATTERN.search(title) and not ENGINEERING_TITLE_PATTERN.search(title):
         return True
     return any(pattern.search(title) is not None for pattern in NON_DEVELOPMENT_TITLE_PATTERNS)

@@ -54,7 +54,7 @@ Do not increase batches/frequency without a separate review. Shared Reader pacin
 
 The13-feed pool comprises the general remote feed, Prague city feed and11remote
 keyword feeds with `descr=1`. At most8are read/run,2seconds apart; root and Prague
-are pinned, other feeds rotate over2ordinary runs (~1h). The100-item ceiling is
+are pinned, other feeds rotate over2ordinary runs (~1h). The default200-item ceiling is
 shared, duplicate IDs are removed and uncached identities take priority. One failed
 feed retains valid others and remains observable as a warning/partial source.
 
@@ -64,6 +64,14 @@ HTTPS DOU RSS endpoint. Prague office/hybrid requires positive headline-location
 evidence, not a Prague office mentioned in company prose. Other offices remain
 excluded. Explicit remote/hybrid/onsite mode reaches existing matching/geography
 checks; legal work authorization is never inferred.
+
+The October19 [local reliability package](dou-rss-reliability.md) raises the
+processing default from100to200 without extra feed requests, interprets explicit
+remote choices and adds a persistent90-attempt rolling-hour DOU guard (provider
+ceiling100/hour total). Feed-query rotation is not the same as per-record refresh:
+the captured11-ordinal baseline had up to7-run refresh gaps under the100-item cap;
+the candidate replay reduced that to2, without promising complete live coverage.
+An explicit deployment value100 remains effective until a separately approved rollout.
 
 Three bounded official RSS reads on October18 verified: general remote25records,
 FastAPI25(all contain FastAPI), Prague11. Their union had35distinct IDs absent from

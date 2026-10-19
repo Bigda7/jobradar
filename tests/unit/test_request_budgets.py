@@ -24,6 +24,20 @@ async def test_rss_window_is_shared_by_concurrent_reservations_and_expires() -> 
 
 
 @pytest.mark.asyncio
+async def test_dou_has_a_distinct_rolling_hour_window_with_headroom() -> None:
+    import asyncio
+
+    clock = [1000.0]
+    budget = MemoryRequestBudget(lambda: clock[0])
+    assert sum(await asyncio.gather(*(budget.reserve("dou_rss") for _ in range(96)))) == 90
+    assert await budget.reserve("rss")
+    clock[0] += 3599.999
+    assert not await budget.reserve("dou_rss")
+    clock[0] = 4600.0
+    assert await budget.reserve("dou_rss")
+
+
+@pytest.mark.asyncio
 async def test_metadata_has_separate_hourly_and_spacing_limits() -> None:
     clock = [1000.0]
     budget = MemoryRequestBudget(lambda: clock[0])

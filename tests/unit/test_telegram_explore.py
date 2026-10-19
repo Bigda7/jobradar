@@ -120,7 +120,9 @@ async def test_explore_is_labeled_queued_within_the_existing_limit_and_sent_once
     third = await service.dispatch(BOHDAN_PROFILE, 55, 1, activation, explore_since=activation)
 
     assert (first.sent, second.sent, third.sent) == (1, 1, 0)
-    assert all(message.startswith("<b>Explore:") for message in client.messages)
+    assert all(
+        message.splitlines()[0].endswith("45/100 (Explore)</b>") for message in client.messages
+    )
     assert all("Synthetic uncertainty" in message for message in client.messages)
     async with sqlite_session_factory() as session:
         deliveries = (await session.scalars(select(NotificationDelivery))).all()
@@ -148,7 +150,9 @@ async def test_explore_failed_delivery_retains_the_existing_retry_path(
     retried = await service.retry_due(BOHDAN_PROFILE.profile_id, 5)
     assert retried.sent == 1
     assert len(client.messages) == 2
-    assert all(message.startswith("<b>Explore:") for message in client.messages)
+    assert all(
+        message.splitlines()[0].endswith("54/100 (Explore)</b>") for message in client.messages
+    )
 
 
 async def test_timezone_offset_does_not_change_activation_boundary(

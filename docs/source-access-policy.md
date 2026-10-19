@@ -1,6 +1,11 @@
 # Source Access Policy
 
-Last updated: 2026-10-18 (owner-approved discovery scope; provider permissions unchanged)
+Last updated: 2026-10-19 (owner-supplied DOU clarification and local reliability package)
+
+The October19 DOU reply clarifies the supported RSS route and project scope.
+The [DOU reliability package](dou-rss-reliability.md) implements a separate
+90-request rolling-hour safety budget locally. This is not a deployment record
+and does not change other providers' access positions.
 
 October18 implementation note: the owner requested an all-source discovery
 review and correction of missed stack coverage, then explicitly approved publication
@@ -36,7 +41,7 @@ checked again before a public or commercial release.
 | Source | Access method | Current position | Attribution and retention | Commercial or multi-user action |
 | --- | --- | --- | --- | --- |
 | Djinni | Official filtered RSS plus bounded public JobPosting page metadata enrichment, deployed in v1.2.15; faster scheduling/persistent budgets are a local candidate | RSS recommended and full descriptions allowed; missing-field supplementation described as acceptable in the owner-supplied follow-up | Keep attribution and original URL; up to 100 RSS requests/minute; local HTML ceilings: 100/run and at least 2 seconds spacing, with 100/hour persistence in the local candidate, not a provider allowance; no retention duration specified | Reconfirm terms for a changed commercial or multi-user scope |
-| DOU Jobs | Official vacancy RSS feed | Approved | Keep DOU attribution and the original URL | Recheck feed terms before commercial launch |
+| DOU Jobs | Official vacancy RSS feeds; local candidate adds a persistent 90/hour safety guard | Owner-supplied October19 reply supports education, hobby/pet and personal use; no API or expanded fields planned | Keep DOU attribution and original URLs; provider ceiling is 100 RSS requests/hour in total; no retention duration or separate public-description reuse terms specified | Commercial use and commercial services are not provided for in the reply; obtain a separate arrangement or replace this source before commercial use |
 | Robota.ua | Current adapter: search/details through Reader; provider-recommended replacement: partner JSON export, not implemented | Owner-supplied support reply offers integration without a contract; documented data URLs returned Cloudflare 403 on October16 | Preserve original links; export schema, coverage, retention and redistribution details need confirmation | Confirm future commercial reuse; do not infer blanket permission from a public export |
 | Work.ua | Search and vacancy pages through a third-party read-only text reader | Enabled for the existing public personal portfolio; permission unverified | Keep Work.ua attribution and the original URL; the public JobRadar API also exposes vacancy descriptions | Retain polling, pagination and per-run limits; October18 broader query rotation is owner-approved only; seek explicit permission before commercial or multi-user use |
 
