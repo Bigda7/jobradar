@@ -44,7 +44,7 @@ class SearchProfile:
 
 BOHDAN_PROFILE = SearchProfile(
     profile_id="bohdan",
-    rules_version="bohdan-multi-source-v16-context-aware-portfolio",
+    rules_version="bohdan-multi-source-v17-dou-and-role-context",
     residence_country_aliases=(
         "CZ",
         "CZE",

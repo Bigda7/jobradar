@@ -142,12 +142,18 @@ async def test_telegram_client_uses_bot_api_json_contract() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "previous_rules",
+    (
+        "bohdan-multi-source-v15-prague-location-eligibility",
+        "bohdan-multi-source-v16-context-aware-portfolio",
+    ),
+)
 async def test_context_rules_recalculation_does_not_resend_historical_matches(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
+    previous_rules: str,
 ) -> None:
-    previous = replace(
-        BOHDAN_PROFILE, rules_version="bohdan-multi-source-v15-prague-location-eligibility"
-    )
+    previous = replace(BOHDAN_PROFILE, rules_version=previous_rules)
     await IngestionService(sqlite_session_factory).run_source(MockSource())
     matching = MatchingService(sqlite_session_factory)
     await matching.evaluate(previous)
@@ -175,13 +181,19 @@ async def test_context_rules_recalculation_does_not_resend_historical_matches(
 @pytest.mark.parametrize(
     "status", (DeliveryStatus.SENT, DeliveryStatus.QUEUED, DeliveryStatus.FAILED)
 )
+@pytest.mark.parametrize(
+    "previous_rules",
+    (
+        "bohdan-multi-source-v15-prague-location-eligibility",
+        "bohdan-multi-source-v16-context-aware-portfolio",
+    ),
+)
 async def test_profile_upgrade_preserves_retries_without_creating_historical_backlog(
     sqlite_session_factory: async_sessionmaker[AsyncSession],
     status: DeliveryStatus,
+    previous_rules: str,
 ) -> None:
-    previous = replace(
-        BOHDAN_PROFILE, rules_version="bohdan-multi-source-v15-prague-location-eligibility"
-    )
+    previous = replace(BOHDAN_PROFILE, rules_version=previous_rules)
     await IngestionService(sqlite_session_factory).run_source(MockSource())
     matching = MatchingService(sqlite_session_factory)
     await matching.evaluate(previous)

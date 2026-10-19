@@ -324,7 +324,10 @@ async def test_worker_delivers_new_matches_once_after_exchange_rate_outage(
         assert cursor.minimum_first_seen_at == pending_cutoff
     assert await worker.run_worker_cycle(force_sources=False, failure_retry_seconds=1) is False
     assert len(messages) == 2
-    assert all(message.startswith("<b>Explore:") for message in messages) is include_explore
+    assert (
+        all(message.splitlines()[0].endswith("/100 (Explore)</b>") for message in messages)
+        is include_explore
+    )
     async with sqlite_session_factory() as session:
         cursor = await session.get(NotificationScanCursor, ("bohdan", "telegram"))
         assert cursor is not None

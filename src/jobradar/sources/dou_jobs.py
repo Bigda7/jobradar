@@ -21,6 +21,7 @@ from jobradar.sources.base import BaseSource
 from jobradar.sources.detail_cache import polite_delay
 from jobradar.sources.discovery import search_batch
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS, is_trusted_source_link
+from jobradar.sources.request_budget import MemoryRequestBudget
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_FEED_URL = "https://jobs.dou.ua/vacancies/feeds/?remote"
@@ -28,6 +29,12 @@ USER_AGENT = "JobRadar/1.4 (personal job aggregator)"
 MAX_FEED_BYTES = 5_000_000
 
 REMOTE_HEADLINE_PATTERN = re.compile(r"(?<!\w)(?:віддалено|remote)(?!\w)", re.IGNORECASE)
+OFFICE_DAYS_PATTERN = (
+    r"(?:one|two|three|four|five|\d+)\s+days?\s+(?:per\s+week\s+)?"
+    r"(?:in|at)\s+(?:the\s+)?office|"
+    r"(?:один|два|три|чотири|п'ять|кілька|\d+)\s+дн\w*\s+"
+    r"(?:на\s+тиждень\s+)?(?:в|у)\s+(?:офіс\w*|офис\w*)"
+)
 HYBRID_WORK_PATTERN = re.compile(
     r"(?<!\w)(?:"
     r"гібридн\w*\s+(?:формат\w*|графік\w*|режим\w*|модел\w*|робот\w*)|"
@@ -36,12 +43,41 @@ HYBRID_WORK_PATTERN = re.compile(
     r"(?:work\w*|format|mode|model|schedule)[-\s]+hybrid|"
     r"частков\w*\s+віддален\w*|частичн\w*\s+удален\w*|"
     r"part(?:ial|ially)[-\s]+remote|"
-    r"(?:one|two|three|four|five|\d+)\s+days?\s+(?:per\s+week\s+)?"
-    r"(?:in|at)\s+(?:the\s+)?office|"
-    r"(?:один|два|три|чотири|п'ять|кілька|\d+)\s+дн\w*\s+"
-    r"(?:на\s+тиждень\s+)?(?:в|у)\s+офіс\w*"
+    rf"{OFFICE_DAYS_PATTERN}"
     r")(?!\w)",
     re.IGNORECASE,
+)
+REMOTE_WORD = r"(?:remote(?:ly)?|віддален\w*|дистанційн\w*|удален\w*|удалён\w*)"
+HYBRID_WORD = r"(?:hybrid|гібридн\w*|гибридн\w*)"
+CHOICE_WORD = r"(?:or|або|чи|или)"
+REMOTE_CHOICE_PATTERN = re.compile(
+    rf"(?<!\w)(?:{REMOTE_WORD}[^.!?;\n]{{0,90}}?\b{CHOICE_WORD}\b"
+    rf"[^.!?;\n]{{0,45}}?{HYBRID_WORD}|"
+    rf"{HYBRID_WORD}[^.!?;\n]{{0,90}}?\b{CHOICE_WORD}\b"
+    rf"[^.!?;\n]{{0,45}}?{REMOTE_WORD})(?!\w)"
+)
+ATTENDANCE_WORD = r"(?:office|on[- ]?site|in[- ]person|офіс\w*|офис\w*)"
+REQUIRED_WORD = r"(?:must|required|mandatory|have\s+to|обов['’ʼ]?язков\w*|обязательн\w*)"
+ATTENDANCE_CONNECTOR = (
+    r"(?:to|work|working|attend|attendance|visits?|presence|at|in|the|our|be|present|"
+    r"from|an?|is|are|присутність|відвідування|робота|працювати|в|у|на|є|"
+    r"присутствие|посещение|работа|работать)"
+)
+HYBRID_CONNECTOR = (
+    r"(?:work|working|format|model|schedule|is|are|режим\w*|формат\w*|робот\w*|"
+    r"работ\w*|графік\w*|график\w*|є|буде|является)"
+)
+REQUIRED_ATTENDANCE_PATTERN = re.compile(
+    rf"(?<!\w)(?:{REQUIRED_WORD}(?:\s+{ATTENDANCE_CONNECTOR}){{0,6}}\s+{ATTENDANCE_WORD}|"
+    rf"{ATTENDANCE_WORD}(?:\s+{ATTENDANCE_CONNECTOR}){{0,4}}\s+{REQUIRED_WORD}|"
+    rf"{REQUIRED_WORD}(?:\s+{HYBRID_CONNECTOR}){{0,3}}\s+{HYBRID_WORD}|"
+    rf"{HYBRID_WORD}(?:\s+{HYBRID_CONNECTOR}){{0,4}}\s+{REQUIRED_WORD}|"
+    rf"{OFFICE_DAYS_PATTERN})(?!\w)"
+)
+REMOTE_DENIAL_PATTERN = re.compile(
+    rf"(?<!\w)(?:no|not|without|немає|нема|без|не)\s+(?:fully\s+)?{REMOTE_WORD}|"
+    rf"{REMOTE_WORD}(?:\s+or\s+{HYBRID_WORD})?\s+(?:work\s+)?(?:is\s+)?"
+    r"not\s+(?:available|allowed|possible)"
 )
 HEADLINE_PATTERN = re.compile(
     r"^(?P<title>.+)\s+в\s+(?P<company>[^,]+)(?:,\s*(?P<details>.+))?$",
@@ -64,6 +100,10 @@ class DouJobsSourceError(RuntimeError):
     pass
 
 
+class DouJobsRequestBudgetExceeded(DouJobsSourceError):
+    pass
+
+
 class DouJobsSource(BaseSource):
     name = "dou_jobs"
     display_name = "DOU Jobs"
@@ -75,7 +115,7 @@ class DouJobsSource(BaseSource):
         self,
         feed_url: str = DEFAULT_FEED_URL,
         request_timeout_seconds: float = 30.0,
-        max_items: int = 100,
+        max_items: int = 200,
         client: httpx.AsyncClient | None = None,
         additional_feed_urls: tuple[str, ...] = (),
         max_feeds_per_run: int | None = None,
@@ -92,6 +132,7 @@ class DouJobsSource(BaseSource):
         self._max_feeds_per_run = max_feeds_per_run
         self._feed_delay_seconds = feed_delay_seconds
         self._local_city_aliases = local_city_aliases
+        self._request_budget = MemoryRequestBudget()
 
     async def fetch(self) -> AsyncIterator[RawListing]:
         if self._client is not None:
@@ -149,6 +190,11 @@ class DouJobsSource(BaseSource):
                 await polite_delay(self._feed_delay_seconds)
             try:
                 rows = await self._fetch_feed(client, url, budget)
+            except DouJobsRequestBudgetExceeded as error:
+                if not succeeded:
+                    raise
+                self.report_warning(str(error))
+                break
             except DouJobsSourceError as error:
                 self.report_warning(str(error))
                 continue
@@ -168,13 +214,19 @@ class DouJobsSource(BaseSource):
             if index >= self._max_items:
                 break
             yield listing
-        if len(ordered) >= self._max_items:
+        if len(ordered) > self._max_items:
             self.mark_limit_reached()
+
+    async def _reserve_request(self, deadline: float) -> None:
+        if monotonic() >= deadline:
+            raise httpx.ReadTimeout("DOU Jobs request deadline expired before reservation.")
+        if not await self._request_budget.reserve("dou_rss"):
+            raise DouJobsRequestBudgetExceeded("DOU Jobs hourly RSS request budget exhausted.")
+        self.record_page()
 
     async def _fetch_feed(
         self, client: httpx.AsyncClient, url: str, budget: DownloadBudget
     ) -> list[RawListing]:
-        self.record_page()
         try:
             response = await bounded_get(
                 client,
@@ -182,6 +234,7 @@ class DouJobsSource(BaseSource):
                 timeout_seconds=self._request_timeout_seconds,
                 maximum_bytes=MAX_FEED_BYTES,
                 budget=budget,
+                wait_before_request=self._reserve_request,
             )
             response.raise_for_status()
             if len(response.content) > MAX_FEED_BYTES:
@@ -294,7 +347,16 @@ def _is_strict_remote(headline: str, description: str) -> bool:
     if REMOTE_HEADLINE_PATTERN.search(headline) is None:
         return False
     searchable_text = normalize_text(f"{headline} {description}")
-    return HYBRID_WORK_PATTERN.search(searchable_text) is None
+    if REMOTE_DENIAL_PATTERN.search(searchable_text):
+        return False
+    if any(
+        re.search(r"(?<!\w)(?:no|not|without|без|не)\s*$", searchable_text[: match.start()]) is None
+        for match in REQUIRED_ATTENDANCE_PATTERN.finditer(searchable_text)
+    ):
+        return False
+    if HYBRID_WORK_PATTERN.search(searchable_text) is None:
+        return True
+    return REMOTE_CHOICE_PATTERN.search(searchable_text) is not None
 
 
 def _location_text(details: str | None) -> str:

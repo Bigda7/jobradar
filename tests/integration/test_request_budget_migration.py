@@ -122,18 +122,28 @@ async def test_request_budget_migration_seeds_recent_attempts_and_preserves_exis
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_name,category,limit", (("djinni", "rss", 100), ("dou_jobs", "dou_rss", 90))
+)
 async def test_postgres_row_lock_prevents_concurrent_request_budget_overrun(
     postgres_session_factory: async_sessionmaker[AsyncSession],
+    source_name: str,
+    category: str,
+    limit: int,
 ) -> None:
     now = datetime.now(UTC).timestamp()
     async with postgres_session_factory() as session, session.begin():
-        source = Source(name="djinni", display_name="Djinni", request_budget={"rss": [now] * 99})
+        source = Source(
+            name=source_name,
+            display_name=source_name,
+            request_budget={category: [now] * (limit - 1)},
+        )
         session.add(source)
         await session.flush()
         source_id = source.id
     budgets = [DatabaseRequestBudget(postgres_session_factory, source_id) for _ in range(8)]
-    assert sum(await asyncio.gather(*(budget.reserve("rss") for budget in budgets))) == 1
-    assert not await DatabaseRequestBudget(postgres_session_factory, source_id).reserve("rss")
+    assert sum(await asyncio.gather(*(budget.reserve(category) for budget in budgets))) == 1
+    assert not await DatabaseRequestBudget(postgres_session_factory, source_id).reserve(category)
     async with postgres_session_factory() as session:
         source = await session.get(Source, source_id)
-        assert source is not None and len(source.request_budget["rss"]) == 100
+        assert source is not None and len(source.request_budget[category]) == limit

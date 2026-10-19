@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
-REQUEST_WINDOWS = {"rss": (100, 60.0), "metadata": (100, 3600.0)}
+REQUEST_WINDOWS = {"rss": (100, 60.0), "metadata": (100, 3600.0), "dou_rss": (90, 3600.0)}
 
 
 def reserve_timestamp(

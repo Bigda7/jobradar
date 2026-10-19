@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     dou_jobs_max_feeds_per_run: int = Field(default=8, ge=3, le=20)
     dou_jobs_feed_delay_seconds: float = Field(default=2.0, ge=0, le=30)
     dou_jobs_request_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
-    dou_jobs_max_items: int = Field(default=100, ge=1, le=200)
+    dou_jobs_max_items: int = Field(default=200, ge=1, le=200)
     dou_jobs_poll_interval_seconds: int = Field(default=1800, ge=900)
     matching_enabled: bool = True
     matching_min_score: int = Field(default=55, ge=0, le=100)

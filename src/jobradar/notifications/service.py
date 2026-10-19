@@ -28,6 +28,7 @@ from jobradar.notifications.currency import (
     format_converted_range,
     format_original_range,
 )
+from jobradar.notifications.localization import localize_match_explanation
 from jobradar.notifications.messages import TelegramMessageRegistry
 from jobradar.notifications.preferences import NotificationPreferenceService
 from jobradar.notifications.telegram import (
@@ -815,12 +816,13 @@ def format_match_message(
     rates: ExchangeRates | None = None,
 ) -> str:
     if candidate.kind is OpportunityKind.FREELANCE_PROJECT:
-        message = _format_freelance_match_message(candidate, rates)
-    else:
-        message = _format_employment_match_message(candidate, rates)
-    if EXPLORE_MIN_SCORE <= candidate.score <= EXPLORE_MAX_SCORE:
-        return "<b>Explore: possible match, review the requirements and concerns.</b>\n\n" + message
-    return message
+        return _format_freelance_match_message(candidate, rates)
+    return _format_employment_match_message(candidate, rates)
+
+
+def _format_match_score(score: int) -> str:
+    suffix = " (Explore)" if EXPLORE_MIN_SCORE <= score <= EXPLORE_MAX_SCORE else ""
+    return f"{score}/100{suffix}"
 
 
 def opportunity_keyboard(
@@ -864,7 +866,8 @@ def _format_employment_match_message(
     employment = escape(_format_employment_type(candidate.employment_type))
     title = _format_linked_title(candidate.title, candidate.source_url)
     lines = [
-        f"<b>[{escape(candidate.source_display_name)}] Вакансия: {candidate.score}/100</b>",
+        f"<b>[{escape(candidate.source_display_name)}] Вакансия: "
+        f"{_format_match_score(candidate.score)}</b>",
         title,
         f"Компания: {company}",
         f"Локация: {location}",
@@ -874,10 +877,14 @@ def _format_employment_match_message(
     if salary:
         lines.extend(("<b>Зарплата</b>", *(f"- {escape(value)}" for value in salary)))
     lines.extend(("", "<b>Почему подходит</b>"))
-    lines.extend(f"- {escape(reason)}" for reason in candidate.reasons[:3])
+    lines.extend(
+        f"- {escape(localize_match_explanation(reason))}" for reason in candidate.reasons[:3]
+    )
     if candidate.concerns:
         lines.extend(("", "<b>На что обратить внимание</b>"))
-        lines.extend(f"- {escape(concern)}" for concern in candidate.concerns[:2])
+        lines.extend(
+            f"- {escape(localize_match_explanation(concern))}" for concern in candidate.concerns[:2]
+        )
     lines.extend(("", f'<a href="{escape(candidate.source_url, quote=True)}">Открыть вакансию</a>'))
     return "\n".join(lines)
 
@@ -889,7 +896,8 @@ def _format_freelance_match_message(
     contract_type = _format_contract_type(candidate.contract_type)
     title = _format_linked_title(candidate.title, candidate.source_url)
     lines = [
-        (f"<b>[{escape(candidate.source_display_name)}] Фриланс-проект: {candidate.score}/100</b>"),
+        f"<b>[{escape(candidate.source_display_name)}] Фриланс-проект: "
+        f"{_format_match_score(candidate.score)}</b>",
         title,
         f"Заказчик: {escape(candidate.company or 'Не указан')}",
         f"Тип проекта: {escape(contract_type)}",
@@ -905,10 +913,14 @@ def _format_freelance_match_message(
         lines.append(f"Статус заказчика: {escape(employer_status)}")
 
     lines.extend(("", "<b>Почему подходит</b>"))
-    lines.extend(f"- {escape(reason)}" for reason in candidate.reasons[:3])
+    lines.extend(
+        f"- {escape(localize_match_explanation(reason))}" for reason in candidate.reasons[:3]
+    )
     if candidate.concerns:
         lines.extend(("", "<b>На что обратить внимание</b>"))
-        lines.extend(f"- {escape(concern)}" for concern in candidate.concerns[:2])
+        lines.extend(
+            f"- {escape(localize_match_explanation(concern))}" for concern in candidate.concerns[:2]
+        )
     lines.extend(("", f'<a href="{escape(candidate.source_url, quote=True)}">Открыть проект</a>'))
     return "\n".join(lines)
 

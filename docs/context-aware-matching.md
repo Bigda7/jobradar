@@ -1,8 +1,21 @@
 # Context-aware portfolio matching
 
-Implemented locally on October 16, 2026. Not committed, published or deployed.
+The v16 portfolio package was initially implemented on October16, 2026 and is
+the deployed baseline recorded in the workspace handoff. The October19 local
+follow-up below is not published or deployed.
 
-Rules version: `bohdan-multi-source-v16-context-aware-portfolio`.
+Current local rules version: `bohdan-multi-source-v17-dou-and-role-context`.
+The evidence/scoring design below originated in v16.
+
+## October19 follow-up
+
+Nontechnical Talent Acquisition and User Acquisition roles are rejected based
+on the role title, while engineering roles and company/product-domain mentions
+remain eligible for ordinary scoring. Skill weights and thresholds are unchanged.
+Profile-upgrade tests cover v15/v16 to current without historical resends and
+preserve queued/failed message snapshots. The [DOU and Telegram package](dou-rss-reliability.md)
+also updates remote-choice interpretation and localizes known explanations only
+when formatting new Telegram messages; stored API evaluations are not translated.
 
 ## Evidence and scoring
 

@@ -31,10 +31,12 @@ async def test_postgres_profile_upgrade_retry(
     postgres_session_factory: async_sessionmaker[AsyncSession],
     status: DeliveryStatus,
 ) -> None:
-    await _verify_retry(postgres_session_factory, status)
+    await _verify_retry(
+        postgres_session_factory, status, "bohdan-multi-source-v16-context-aware-portfolio"
+    )
 
 
 async def test_postgres_profile_upgrade_sent(
     postgres_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _verify_sent(postgres_session_factory)
+    await _verify_sent(postgres_session_factory, "bohdan-multi-source-v16-context-aware-portfolio")
