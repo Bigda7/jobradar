@@ -7,7 +7,11 @@ from jobradar.sources.djinni import DjinniSource
 from jobradar.sources.dou_jobs import DouJobsSource
 from jobradar.sources.mock import MockSource
 from jobradar.sources.reader_pacing import ReaderRequestPacer
-from jobradar.sources.robota_ua import RobotaUaSource
+from jobradar.sources.robota_ua import (
+    DEFAULT_DIRECT_API_BASE_URL,
+    DEFAULT_EXPORT_URL,
+    RobotaUaSource,
+)
 from jobradar.sources.workua import WorkUaSource
 
 
@@ -71,6 +75,8 @@ def build_source_registry(settings: Settings) -> tuple[BaseSource, ...]:
                 retry_attempts=settings.robota_ua_retry_attempts,
                 max_searches_per_run=settings.robota_ua_max_searches_per_run,
                 reader_pacer=reader_pacer,
+                direct_api_base_url=DEFAULT_DIRECT_API_BASE_URL,
+                export_url=DEFAULT_EXPORT_URL,
             )
         )
     if settings.dou_jobs_source_enabled:

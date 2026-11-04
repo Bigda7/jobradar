@@ -508,3 +508,160 @@ def test_registry_builds_robota_ua_with_safe_poll_interval() -> None:
     assert sources[0].name == "robota_ua"
     assert sources[0].display_name == "Robota.ua"
     assert settings.source_poll_interval_seconds("robota_ua") == 21600
+
+
+def test_robota_ua_api_parser_detects_remote_cluster_group() -> None:
+    payload = {
+        "id": 999,
+        "name": "Backend Python Developer",
+        "companyName": "Cluster Corp",
+        "description": "<p>Build distributed Python backends.</p>",
+        "cityName": "Київ",
+        "date": "2026-10-20T12:00:00",
+        "salary": 0,
+        "salaryFrom": 50000,
+        "salaryTo": 70000,
+        "salaryComment": "",
+        "scheduleId": 1,
+        "isActive": True,
+        "clusters": [
+            {
+                "id": 52,
+                "name": "Вид занятости",
+                "groups": [{"id": 2004, "name": "Удаленная работа"}],
+            }
+        ],
+    }
+    detail = parse_robota_ua_api_detail(
+        json.dumps(payload, ensure_ascii=False),
+        expected_external_id="999",
+        is_remote=False,
+    )
+    assert detail is not None
+    assert detail.is_remote is True
+    assert detail.company == "Cluster Corp"
+
+
+@pytest.mark.asyncio
+async def test_robota_ua_partner_export_syncs_snapshot_and_direct_api_details() -> None:
+    export_payload = [
+        {
+            "Sitename": "robota.ua",
+            "CityId": 1,
+            "CompanyId": 123,
+            "RubricId": 1,
+            "BranchId": 2,
+            "DescriptionShort": "Junior Python Developer (Remote)",
+            "Description": "<p>Remote Python FastAPI developer vacancy.</p>",
+            "WorkType": "Повна",
+            "Salary": 0,
+            "SalaryFrom": 45000,
+            "SalaryTo": 65000,
+            "SalaryTxt": "",
+            "Url": (
+                "https://robota.ua/company123/vacancy777"
+                "?utm_source=referal&utm_medium=dodomu&utm_campaign=dodomu_site"
+            ),
+            "LastUpdate": "2026-10-20T08:50:00",
+        },
+        {
+            "Sitename": "robota.ua",
+            "CityId": 1,
+            "CompanyId": 456,
+            "RubricId": 5,
+            "BranchId": 5,
+            "DescriptionShort": "Бухгалтер в офіс",
+            "Description": "<p>Офісна робота у Києві.</p>",
+            "WorkType": "Повна",
+            "Salary": 25000,
+            "SalaryFrom": 0,
+            "SalaryTo": 0,
+            "SalaryTxt": "",
+            "Url": "https://robota.ua/company456/vacancy888",
+            "LastUpdate": "2026-10-20T08:50:00",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://export.test/vacancies_dodomu.json":
+            return httpx.Response(200, json=export_payload)
+        if request.url.host == "api.robota.ua" and request.url.path == "/vacancy":
+            vid = request.url.params["id"]
+            return httpx.Response(
+                200,
+                json={
+                    "id": int(vid),
+                    "name": "Junior Python Developer (Remote)",
+                    "companyName": "Export Labs",
+                    "description": "<p>Remote Python FastAPI developer vacancy.</p>",
+                    "cityName": "Київ",
+                    "date": "2026-10-20T08:50:00",
+                    "salary": 0,
+                    "salaryFrom": 45000,
+                    "salaryTo": 65000,
+                    "salaryComment": "",
+                    "scheduleId": 1,
+                    "isActive": True,
+                    "clusters": [
+                        {
+                            "id": 52,
+                            "name": "Вид занятости",
+                            "groups": [{"id": 2004, "name": "Удаленная работа"}],
+                        }
+                    ],
+                },
+            )
+        if request.url.host == "reader.test":
+            return httpx.Response(200, text="Markdown Content:\nNo vacancies found.")
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            search_urls=("https://robota.ua/zapros/python-remote/ukraine",),
+            reader_base_url="https://reader.test",
+            api_reader_base_url="https://api-reader.test",
+            direct_api_base_url="https://api.robota.ua",
+            export_url="https://export.test/vacancies_dodomu.json",
+            max_pages_per_search=1,
+            client=client,
+        )
+        source.begin_run()
+        listings = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in listings] == ["777"]
+    assert listings[0].payload["company"] == "Export Labs"
+    assert source.consume_snapshot_external_ids() == frozenset({"777", "888"})
+    assert source.consume_warnings() == ()
+
+
+@pytest.mark.asyncio
+async def test_robota_ua_truncated_partner_export_does_not_record_snapshot() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://export.test/vacancies_dodomu.json":
+            return httpx.Response(
+                200,
+                text='[{"Url":"https://robota.ua/company1/vacancy111","DescriptionShort":"Dev"',
+            )
+        if request.url.path == "/zapros/python-remote/ukraine":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.url.host == "api-reader.test" and request.url.path == "/vacancy":
+            return httpx.Response(200, text=api_detail_response(request.url.params["id"]))
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            search_urls=("https://robota.ua/zapros/python-remote/ukraine",),
+            reader_base_url="https://reader.test",
+            api_reader_base_url="https://api-reader.test",
+            export_url="https://export.test/vacancies_dodomu.json",
+            max_pages_per_search=1,
+            client=client,
+        )
+        source.begin_run()
+        listings = [listing async for listing in source.fetch()]
+
+    assert [listing.external_id for listing in listings] == ["111", "222"]
+    assert source.consume_snapshot_external_ids() is None
+    warnings = source.consume_warnings()
+    assert len(warnings) == 1
+    assert "truncated" in warnings[0]

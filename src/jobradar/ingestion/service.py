@@ -238,7 +238,31 @@ class IngestionService:
                 pages=result.pages,
             )
 
-        if (
+        snapshot_external_ids = adapter.consume_snapshot_external_ids()
+        if terminal_error is None and snapshot_external_ids is not None:
+            try:
+                result.deactivated = await self._deactivate_missing_listings(
+                    source_id,
+                    set(snapshot_external_ids) | seen_external_ids,
+                    archive_reason="source_closed",
+                )
+            except SuspiciousSourceInventoryError as error:
+                result.errors += 1
+                result.warnings.append(str(error))
+                logger.warning(
+                    "source_snapshot_reconciliation_skipped",
+                    source=adapter.name,
+                    error=redact_sensitive_text(str(error)),
+                )
+            except Exception as error:
+                terminal_error = error
+                result.errors += 1
+                logger.exception(
+                    "source_deactivation_failed",
+                    source=adapter.name,
+                    error=redact_sensitive_text(str(error)),
+                )
+        elif (
             terminal_error is None
             and adapter.deactivate_missing_listings
             and not result.errors
@@ -402,6 +426,8 @@ class IngestionService:
         self,
         source_id: int,
         seen_external_ids: set[str],
+        *,
+        archive_reason: str = "missing",
     ) -> int:
         async with self._session_factory() as session, session.begin():
             statement = select(Listing).where(
@@ -431,7 +457,7 @@ class IngestionService:
             opportunity_ids = {listing.opportunity_id for listing in listings}
             for listing in listings:
                 listing.is_active = False
-                listing.archive_reason = "missing"
+                listing.archive_reason = archive_reason
                 listing.archived_at = datetime.now(UTC)
             await session.flush()
             for opportunity_id in opportunity_ids:
