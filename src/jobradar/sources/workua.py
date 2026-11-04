@@ -47,7 +47,32 @@ SECURITY_TEXT_MARKERS = (
     "performing security verification",
     "work.ua має перевірити безпеку",
 )
-CLOUDFLARE_MARKERS = ("challenges.cloudflare.com", "cf-chl-", *SECURITY_TEXT_MARKERS)
+CLOUDFLARE_MARKERS = (
+    "challenges.cloudflare.com",
+    "cf-chl-",
+    "target url returned error 403",
+    "cloudflare ray id:",
+    *SECURITY_TEXT_MARKERS,
+)
+MARKDOWN_DESCRIPTION_START_MARKERS = (
+    "## About the job",
+    "## Про вакансію",
+    "## Опис вакансії",
+)
+MARKDOWN_DESCRIPTION_END_MARKERS = (
+    "### Key requirements and skills",
+    "### Ключові вимоги і навички",
+    "### Ключові вимоги та навички",
+    "## Similar jobs",
+    "## Схожі вакансії",
+    "## Similar positions",
+    "## Схожі посади",
+    "## Jobs in the category",
+    "## Вакансії в категорії",
+    "Apply now",
+    "Apply for this job at:",
+    "Відгукнутися",
+)
 logger = structlog.get_logger(__name__)
 
 
@@ -207,6 +232,7 @@ class WorkUaSource(BaseSource):
                 )
             raise WorkUaSourceError("Every configured Work.ua search page failed.")
 
+        selected_cards: list[WorkUaCard] = []
         for cards in card_batches:
             for card in cards:
                 if card.external_id in seen:
@@ -221,100 +247,132 @@ class WorkUaSource(BaseSource):
                 if self._remote_only and not _is_remote(card.location_text):
                     self.record_filtered()
                     continue
-                discovery_payload = _card_payload(card)
-                fingerprint = discovery_fingerprint(discovery_payload)
-                cached = self.cached_listing(card.external_id)
-                cached_description = _cached_description(cached)
-                now = datetime.now(UTC)
-                detail_status = "complete"
-                detail_error: str | None = None
-                description: str | None
-                if (
-                    cached is not None
-                    and cached_description is not None
-                    and cached.payload.get("detail_status") not in ("cached", "summary")
-                    and can_reuse_detail(
-                        cached,
-                        fingerprint=fingerprint,
-                        cached_fingerprint=(
-                            discovery_fingerprint(_discovery_payload(cached.payload))
-                            if cached is not None
-                            else None
-                        ),
-                        required_fields=("description",),
-                        ttl_seconds=self._detail_cache_ttl_seconds,
-                        now=now,
-                    )
-                ):
-                    description = cached_description
-                    detail_fetched_at = cached.detail_fetched_at
-                else:
-                    detail_fetched_at = None
-                    try:
-                        self._raise_if_stopped()
-                        if self._detail_request_delay_seconds >= self._run_deadline - monotonic():
-                            self._stop_run(
-                                WorkUaSourceError(
-                                    "Work.ua detail pacing exceeds the remaining run window.",
-                                    reason="deadline",
-                                ),
-                                reason="deadline",
-                            )
-                            self._raise_if_stopped()
-                        await polite_delay(self._detail_request_delay_seconds)
-                        description = await self._fetch_description(card.url)
-                    except WorkUaSourceError as error:
-                        logger.warning(
-                            "workua_detail_fallback",
-                            vacancy_url=card.url,
-                            error=str(error),
-                            status_code=error.status_code,
-                        )
-                        self.record_detail_failure()
-                        detail_error = _failure_reason(error)
-                        description = cached_description or card.description
-                        detail_status = "cached" if cached_description is not None else "summary"
-                        if cached_description is not None and cached is not None:
-                            detail_fetched_at = cached.detail_fetched_at
-                    else:
-                        if description is None:
-                            logger.warning(
-                                "workua_detail_fallback",
-                                vacancy_url=card.url,
-                                reason="missing_description",
-                            )
-                            self.record_detail_failure()
-                            detail_error = "missing_description"
-                            description = cached_description or card.description
-                            detail_status = (
-                                "cached" if cached_description is not None else "summary"
-                            )
-                            if cached_description is not None and cached is not None:
-                                detail_fetched_at = cached.detail_fetched_at
-                        else:
-                            detail_fetched_at = datetime.now(UTC)
-                if detail_error is not None:
-                    retained = "cached description" if detail_status == "cached" else "summary"
-                    self.report_warning(
-                        f"Work.ua detail unavailable ({detail_error}): "
-                        f"{redact_sensitive_text(card.url)[:300]}; "
-                        f"retained {retained}."
-                    )
-                yield RawListing(
+                selected_cards.append(card)
+                yielded += 1
+                if yielded >= self._max_items:
+                    self.mark_limit_reached()
+                    break
+            if yielded >= self._max_items:
+                break
+
+        now = datetime.now(UTC)
+        prepared_listings: list[RawListing | None] = [None] * len(selected_cards)
+        pending_warnings: list[str | None] = [None] * len(selected_cards)
+        detail_queue: list[
+            tuple[int, int, WorkUaCard, dict[str, Any], CachedListing | None, str | None]
+        ] = []
+
+        for index, card in enumerate(selected_cards):
+            discovery_payload = _card_payload(card)
+            fingerprint = discovery_fingerprint(_discovery_payload(discovery_payload))
+            cached = self.cached_listing(card.external_id)
+            cached_description = _cached_description(cached)
+            if (
+                cached is not None
+                and cached_description is not None
+                and cached.payload.get("detail_status") not in ("cached", "summary")
+                and can_reuse_detail(
+                    cached,
+                    fingerprint=fingerprint,
+                    cached_fingerprint=(
+                        discovery_fingerprint(_discovery_payload(cached.payload))
+                        if cached is not None
+                        else None
+                    ),
+                    required_fields=("description",),
+                    ttl_seconds=self._detail_cache_ttl_seconds,
+                    now=now,
+                )
+            ):
+                prepared_listings[index] = RawListing(
                     external_id=card.external_id,
                     source_url=card.url,
                     payload={
                         **discovery_payload,
-                        "description": description,
-                        "detail_status": detail_status,
-                        "detail_error": detail_error,
+                        "description": cached_description,
+                        "detail_status": "complete",
+                        "detail_error": None,
                     },
-                    detail_fetched_at=detail_fetched_at,
+                    detail_fetched_at=cached.detail_fetched_at,
                 )
-                yielded += 1
-                if yielded >= self._max_items:
-                    self.mark_limit_reached()
-                    return
+            else:
+                priority = 0 if cached_description is None else 1
+                detail_queue.append(
+                    (priority, index, card, discovery_payload, cached, cached_description)
+                )
+
+        detail_queue.sort(key=lambda item: (item[0], item[1]))
+        for _, index, card, discovery_payload, cached, cached_description in detail_queue:
+            detail_status = "complete"
+            detail_error: str | None = None
+            description: str | None
+            detail_fetched_at: datetime | None = None
+            try:
+                self._raise_if_stopped()
+                if self._detail_request_delay_seconds >= self._run_deadline - monotonic():
+                    self._stop_run(
+                        WorkUaSourceError(
+                            "Work.ua detail pacing exceeds the remaining run window.",
+                            reason="deadline",
+                        ),
+                        reason="deadline",
+                    )
+                    self._raise_if_stopped()
+                await polite_delay(self._detail_request_delay_seconds)
+                description = await self._fetch_description(card.url)
+            except WorkUaSourceError as error:
+                logger.warning(
+                    "workua_detail_fallback",
+                    vacancy_url=card.url,
+                    error=str(error),
+                    status_code=error.status_code,
+                )
+                self.record_detail_failure()
+                detail_error = _failure_reason(error)
+                description = cached_description or card.description
+                detail_status = "cached" if cached_description is not None else "summary"
+                if cached_description is not None and cached is not None:
+                    detail_fetched_at = cached.detail_fetched_at
+            else:
+                if description is None:
+                    logger.warning(
+                        "workua_detail_fallback",
+                        vacancy_url=card.url,
+                        reason="missing_description",
+                    )
+                    self.record_detail_failure()
+                    detail_error = "missing_description"
+                    description = cached_description or card.description
+                    detail_status = "cached" if cached_description is not None else "summary"
+                    if cached_description is not None and cached is not None:
+                        detail_fetched_at = cached.detail_fetched_at
+                else:
+                    detail_fetched_at = datetime.now(UTC)
+            if detail_error is not None:
+                retained = "cached description" if detail_status == "cached" else "summary"
+                pending_warnings[index] = (
+                    f"Work.ua detail unavailable ({detail_error}): "
+                    f"{redact_sensitive_text(card.url)[:300]}; "
+                    f"retained {retained}."
+                )
+            prepared_listings[index] = RawListing(
+                external_id=card.external_id,
+                source_url=card.url,
+                payload={
+                    **discovery_payload,
+                    "description": description,
+                    "detail_status": detail_status,
+                    "detail_error": detail_error,
+                },
+                detail_fetched_at=detail_fetched_at,
+            )
+
+        for index, listing in enumerate(prepared_listings):
+            warning = pending_warnings[index]
+            if warning is not None:
+                self.report_warning(warning)
+            if listing is not None:
+                yield listing
 
     async def _fetch_search_cards(self, search_url: str) -> list[WorkUaCard]:
         cards: list[WorkUaCard] = []
@@ -329,19 +387,26 @@ class WorkUaSource(BaseSource):
             if cards:
                 return cards
 
-        markdown = await self._fetch_page(
-            search_url,
-            response_format="markdown",
-            no_cache=True,
-        )
-        cards = parse_workua_markdown_cards(markdown)
-        trusted_count = sum(
-            is_trusted_source_link(card.url, self.allowed_listing_hosts) for card in cards
-        )
-        if self._response_is_challenge(markdown, "search", "markdown", trusted_count):
-            raise WorkUaSourceError(
-                "Work.ua returned a security challenge through the reader.", reason="challenge"
+        for attempt in range(self._retry_attempts):
+            markdown = await self._fetch_page(
+                search_url,
+                response_format="markdown",
+                no_cache=True,
             )
+            cards = parse_workua_markdown_cards(markdown)
+            trusted_count = sum(
+                is_trusted_source_link(card.url, self.allowed_listing_hosts) for card in cards
+            )
+            if not self._response_is_challenge(markdown, "search", "markdown", trusted_count):
+                return cards
+            if (
+                attempt + 1 >= self._retry_attempts
+                or "target url returned error 403" not in markdown.casefold()
+            ):
+                raise WorkUaSourceError(
+                    "Work.ua returned a security challenge through the reader.",
+                    reason="challenge",
+                )
         return cards
 
     async def _fetch_description(self, vacancy_url: str) -> str | None:
@@ -351,18 +416,24 @@ class WorkUaSource(BaseSource):
             if description is not None:
                 return description
 
-        markdown = await self._fetch_page(
-            vacancy_url,
-            response_format="markdown",
-            no_cache=True,
-        )
-        description = parse_workua_markdown_description(markdown)
-        if self._response_is_challenge(
-            markdown, "detail", "markdown", int(description is not None)
-        ):
-            raise WorkUaSourceError(
-                "Work.ua vacancy returned a security challenge.", reason="challenge"
+        for attempt in range(self._retry_attempts):
+            markdown = await self._fetch_page(
+                vacancy_url,
+                response_format="markdown",
+                no_cache=True,
             )
+            description = parse_workua_markdown_description(markdown)
+            if not self._response_is_challenge(
+                markdown, "detail", "markdown", int(description is not None)
+            ):
+                return description
+            if (
+                attempt + 1 >= self._retry_attempts
+                or "target url returned error 403" not in markdown.casefold()
+            ):
+                raise WorkUaSourceError(
+                    "Work.ua vacancy returned a security challenge.", reason="challenge"
+                )
         return description
 
     @staticmethod
@@ -635,10 +706,8 @@ def _discovery_payload(payload: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "title",
             "company",
-            "summary",
             "salary_text",
             "location_text",
-            "published_at",
         )
     }
 
@@ -707,10 +776,12 @@ class _WorkUaCardParser(_WorkUaTextParser):
                 self._capture_title = True
         elif tag.casefold() == "span":
             title = (attributes.get("title") or "").casefold()
-            if title == "company information":
+            if title in {"company information", "дані про компанію"}:
                 self._expect_company = True
-            elif title == "salary":
+                self._expect_salary = False
+            elif title in {"salary", "зарплата"}:
                 self._expect_salary = True
+                self._expect_company = False
             if "strong-600" in classes:
                 if self._expect_salary and not self._salary_parts:
                     self._capture_salary = True
@@ -787,7 +858,14 @@ class _WorkUaCardParser(_WorkUaTextParser):
         source_url = urljoin("https://www.work.ua", href)
         location = (
             "Remote"
-            if any(re.search(r"\bremote\b", part, flags=re.IGNORECASE) for part in self._all_parts)
+            if any(
+                re.search(
+                    r"\bremote\b|дистанційн\w+\s+робот\w+|віддален\w+\s+робот\w+",
+                    part,
+                    flags=re.IGNORECASE,
+                )
+                for part in self._all_parts
+            )
             else None
         )
         self.cards.append(
@@ -860,28 +938,31 @@ def parse_workua_markdown_cards(markdown: str) -> list[WorkUaCard]:
             for line in lines
             if line
             and not line.startswith("To save a job")
-            and line not in {"Already saved", "Save"}
+            and not line.startswith("Щоб зберегти вакансію")
+            and line not in {"Already saved", "Save", "Вже збережено", "Зберегти"}
         ]
         salary_text = next(
             (line for line in content_lines if _salary_currency(line) is not None),
             None,
         )
-        location_text = next(
-            (line for line in content_lines if line.casefold() == "remote"),
-            None,
-        )
-        ignored = {line for line in (salary_text, location_text) if line is not None}
+        location_text = "Remote" if any(_is_remote(line) for line in content_lines) else None
+        ignored = {line for line in content_lines if line == salary_text or _is_remote(line)}
         company_line = next(
             (
                 line
                 for line in content_lines
                 if line not in ignored
                 and not line.casefold().startswith("experience ")
+                and not line.casefold().startswith("досвід ")
                 and not line.casefold().endswith(" ago")
             ),
             None,
         )
-        company = company_line.removesuffix(", Agency") if company_line else None
+        company = (
+            company_line.removesuffix(", Agency").removesuffix(", Агенція")
+            if company_line
+            else None
+        )
         description = next(
             (
                 line
@@ -889,6 +970,7 @@ def parse_workua_markdown_cards(markdown: str) -> list[WorkUaCard]:
                 if line not in ignored
                 and line != company_line
                 and not line.casefold().startswith("experience ")
+                and not line.casefold().startswith("досвід ")
                 and not line.casefold().endswith(" ago")
             ),
             None,
@@ -909,11 +991,14 @@ def parse_workua_markdown_cards(markdown: str) -> list[WorkUaCard]:
 
 
 def parse_workua_markdown_description(markdown: str) -> str | None:
-    marker = "## About the job"
-    if marker not in markdown:
+    section: str | None = None
+    for marker in MARKDOWN_DESCRIPTION_START_MARKERS:
+        if marker in markdown:
+            section = markdown.split(marker, 1)[1]
+            break
+    if section is None:
         return None
-    section = markdown.split(marker, 1)[1]
-    for end_marker in ("### Key requirements and skills", "## Similar jobs", "Apply now"):
+    for end_marker in MARKDOWN_DESCRIPTION_END_MARKERS:
         if end_marker in section:
             section = section.split(end_marker, 1)[0]
     parts = [text for line in section.splitlines() if (text := _markdown_text(line))]
@@ -1008,7 +1093,16 @@ def _page_url(search_url: str, page_number: int) -> str:
 
 
 def _is_remote(value: str | None) -> bool:
-    return value is not None and value.casefold() == "remote"
+    if value is None:
+        return False
+    normalized = value.casefold()
+    return normalized in {
+        "remote",
+        "remote work",
+        "remote jobs",
+        "дистанційна робота",
+        "віддалена робота",
+    }
 
 
 def _required_string(value: Any, field_name: str) -> str:
