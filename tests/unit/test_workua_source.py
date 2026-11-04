@@ -1156,3 +1156,166 @@ async def test_workua_source_paginates_and_reports_coverage_metrics() -> None:
     assert metrics.filtered_count == 1
     assert metrics.detail_failure_count == 0
     assert metrics.limit_reached is True
+
+
+def test_workua_ukrainian_markdown_and_html_card_parsers() -> None:
+    ukrainian_markdown_detail = """
+# Junior Python Developer
+
+## Про вакансію
+
+Писати код на **Python** та **Django**, створювати інтеграції з API.
+
+### Ключові вимоги і навички
+
+Python, Django
+"""
+    description = parse_workua_markdown_description(ukrainian_markdown_detail)
+    assert description == "Писати код на Python та Django, створювати інтеграції з API."
+
+    html_without_salary_strong = """
+    <div class="card card-hover wordwrap job-link">
+      <div><h2><a href="/jobs/7710618/">Senior Full-Stack Developer</a></h2></div>
+      <div><span title="Salary">За домовленістю</span></div>
+      <div><span title="Дані про компанію"></span><span>
+        <span class="strong-600">Туровська О.М., ФОП</span></span>
+        <span>, Дистанційна робота</span></div>
+      <p class="ellipsis ellipsis-line">Розробка платформи на Python та React.</p>
+    </div>
+    """
+    cards = parse_workua_cards(html_without_salary_strong)
+    assert len(cards) == 1
+    assert cards[0].external_id == "7710618"
+    assert cards[0].company == "Туровська О.М., ФОП"
+    assert cards[0].salary_text is None
+    assert cards[0].location_text == "Remote"
+
+
+@pytest.mark.asyncio
+async def test_workua_reuses_cached_detail_across_query_snippet_and_date_format_changes() -> None:
+    detail_requests = 0
+    second_query_page = SEARCH_PAGE.replace(
+        "Full-time. We are also ready to hire a student. Build Django APIs.",
+        "Higher education. Full-time. Build Django APIs and backend services.",
+    ).replace("2026-08-21 15:27:47", "2026-08-21T00:00:00+00:00")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal detail_requests
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.url.path == "/en/jobs-remote-django/":
+            return httpx.Response(200, text=second_query_page)
+        if request.url.path == "/en/jobs/8441545/":
+            detail_requests += 1
+            return httpx.Response(200, text=DETAIL_PAGE)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        first_source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        first = [listing async for listing in first_source.fetch()]
+
+        second_source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-django/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            client=client,
+        )
+        second_source.prime_listing_cache(
+            {
+                first[0].external_id: CachedListing(
+                    payload=first[0].payload,
+                    detail_fetched_at=first[0].detail_fetched_at,
+                )
+            }
+        )
+        second = [listing async for listing in second_source.fetch()]
+
+    assert detail_requests == 1
+    assert second[0].payload["detail_status"] == "complete"
+    assert second[0].payload["description"] == first[0].payload["description"]
+
+
+@pytest.mark.asyncio
+async def test_workua_prioritizes_unseen_card_details_before_stale_cached_refreshes() -> None:
+    detail_order: list[str] = []
+    two_remote_cards_page = (
+        SEARCH_PAGE.replace("8441546", "8441550")
+        .replace("Office Developer", "New Remote Python Engineer")
+        .replace("Office Corp", "New Remote Labs")
+        .replace(", Kyiv", ", Remote")
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=two_remote_cards_page)
+        detail_order.append(request.url.path)
+        if request.url.path == "/en/jobs/8441550/":
+            return httpx.Response(200, text=DETAIL_PAGE)
+        return httpx.Response(429, headers={"Retry-After": "60"})
+
+    stale_time = datetime.now(UTC) - timedelta(days=2)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            retry_attempts=1,
+            client=client,
+        )
+        source.prime_listing_cache(
+            {
+                "8441545": CachedListing(
+                    payload={"description": "Existing full cached description"},
+                    detail_fetched_at=stale_time,
+                )
+            }
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert detail_order == ["/en/jobs/8441550/", "/en/jobs/8441545/"]
+    assert [listing.external_id for listing in listings] == ["8441545", "8441550"]
+    assert listings[0].payload["detail_status"] == "cached"
+    assert listings[0].payload["description"] == "Existing full cached description"
+    assert listings[1].payload["detail_status"] == "complete"
+    assert "Build production Django APIs" in listings[1].payload["description"]
+
+
+@pytest.mark.asyncio
+async def test_workua_retries_uncached_markdown_after_jina_wrapped_403() -> None:
+    markdown_attempts = 0
+    wrapped_403 = (
+        "Title: Work.ua\n\n"
+        "Warning: Target URL returned error 403: Forbidden\n\n"
+        "Cloudflare Ray ID: a556894bad57b58e\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal markdown_attempts
+        if request.url.path == "/en/jobs-remote-python/":
+            return httpx.Response(200, text=SEARCH_PAGE)
+        if request.headers.get("X-Return-Format") == "html":
+            return httpx.Response(200, text=CHALLENGE_PAGE)
+        markdown_attempts += 1
+        if markdown_attempts == 1:
+            return httpx.Response(200, text=wrapped_403)
+        return httpx.Response(200, text=MARKDOWN_DETAIL_PAGE)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = WorkUaSource(
+            search_urls=("https://www.work.ua/en/jobs-remote-python/",),
+            reader_base_url="https://reader.test",
+            max_pages_per_search=1,
+            retry_attempts=2,
+            client=client,
+        )
+        listings = [listing async for listing in source.fetch()]
+
+    assert markdown_attempts == 2
+    assert len(listings) == 1
+    assert listings[0].payload["detail_status"] == "complete"
+    assert "Build production Django APIs" in listings[0].payload["description"]
