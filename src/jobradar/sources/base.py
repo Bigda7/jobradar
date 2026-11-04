@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
@@ -46,6 +46,16 @@ class BaseSource(ABC):
     def begin_run(self) -> None:
         self._run_warnings: list[str] = []
         self._run_metrics = SourceRunMetrics()
+        self._snapshot_external_ids: frozenset[str] | None = None
+
+    def record_snapshot_external_ids(self, external_ids: Iterable[str]) -> None:
+        cleaned = frozenset(item.strip() for item in external_ids if item and item.strip())
+        self._snapshot_external_ids = cleaned or None
+
+    def consume_snapshot_external_ids(self) -> frozenset[str] | None:
+        snapshot = getattr(self, "_snapshot_external_ids", None)
+        self._snapshot_external_ids = None
+        return snapshot
 
     def prime_listing_cache(self, listings: dict[str, CachedListing]) -> None:
         self._cached_listings = dict(listings)

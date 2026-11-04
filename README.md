@@ -72,7 +72,7 @@ The production registry intentionally enables only four sources used in the curr
 | --- | --- | --- |
 | Djinni | official filtered RSS with bounded public-page metadata enrichment | employment |
 | Work.ua | public pages through a read-only text reader | employment |
-| Robota.ua | public pages through a read-only text reader | employment |
+| Robota.ua | hybrid streaming partner JSON export, direct API details, and remote search | employment |
 | DOU Jobs | RSS | employment |
 
 The source registry contains only these adapters.
@@ -116,7 +116,7 @@ Missing, unrecognized, pending or bump-stale metadata is reported as uncertain, 
 eligibility. This does not establish citizenship, work authorization or contract compatibility.
 `DJINNI_ADDITIONAL_JOBS_URLS` adds the Czech-office RSS feed to remote discovery under the same
 whole-run budgets. Other source search filters and polling intervals remain unchanged.
-The matching rule version is v15; sent-delivery protection and guaranteed queued retries are
+The matching rule version is v17; sent-delivery protection and guaranteed queued retries are
 unchanged. Existing queued messages retain their original accepted snapshot across rule changes.
 See [`docs/djinni-rss-review.md`](docs/djinni-rss-review.md) for verification and limitations.
 See [`docs/source-throughput-and-recovery.md`](docs/source-throughput-and-recovery.md) for request

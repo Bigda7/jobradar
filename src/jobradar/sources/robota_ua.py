@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import json
 import re
 from collections.abc import AsyncIterator
@@ -13,7 +14,15 @@ import httpx
 
 from jobradar.domain.enums import OpportunityKind, WorkMode
 from jobradar.domain.models import NormalizedOpportunity, RawListing
-from jobradar.http_download import MAX_RUN_SECONDS, DownloadBudget, DownloadLimitError
+from jobradar.http_download import (
+    MAX_REDIRECTS,
+    MAX_RUN_SECONDS,
+    DownloadBudget,
+    DownloadLimitError,
+    _Decoder,
+    _redirect_allowed,
+    bounded_get,
+)
 from jobradar.sources.base import BaseSource
 from jobradar.sources.detail_cache import (
     can_reuse_detail,
@@ -21,13 +30,17 @@ from jobradar.sources.detail_cache import (
     get_with_backoff,
     polite_delay,
 )
-from jobradar.sources.discovery import ROBOTA_SEARCH_URLS, search_batch
+from jobradar.sources.discovery import PORTFOLIO_QUERIES, ROBOTA_SEARCH_URLS, search_batch
 from jobradar.sources.link_policy import SOURCE_LISTING_HOSTS
 from jobradar.sources.reader_pacing import ReaderRequestPacer
 from jobradar.sources.structured_data import html_to_text
 
 DEFAULT_READER_BASE_URL = "https://r.jina.ai/http://robota.ua"
 DEFAULT_API_READER_BASE_URL = "https://r.jina.ai/http://api.robota.ua"
+DEFAULT_DIRECT_API_BASE_URL = "https://api.robota.ua"
+DEFAULT_EXPORT_URL = (
+    "https://ministry-education-export.robota.ua/ministry-education-export/vacancies_dodomu.json"
+)
 DEFAULT_SEARCH_URLS = ROBOTA_SEARCH_URLS
 USER_AGENT = "JobRadar/0.5 (personal job aggregator)"
 VACANCY_URL_PATTERN = re.compile(
@@ -66,6 +79,27 @@ PART_TIME_LABELS = {"Неповна зайнятість", "Часткова з�
 RESUME_PROMPT = "Створіть резюме, щоб оцінити свої шанси на вакансію"
 SEARCH_CONCURRENCY = 3
 API_EMPLOYMENT_TYPES = {1: "full_time", 2: "part_time"}
+EXPORT_EMPLOYMENT_TYPES = {
+    "повна": "full_time",
+    "часткова": "part_time",
+    "неповна": "part_time",
+}
+REMOTE_CLUSTER_GROUP_ID = 2004
+IT_RUBRIC_ID = 1
+IT_BRANCH_ID = 2
+CZECHIA_CITY_ID = 1001
+MAX_EXPORT_WIRE_BYTES = 120_000_000
+MAX_EXPORT_DECODED_BYTES = 400_000_000
+MAX_EXPORT_ITEM_CHARS = 2_000_000
+EXPORT_TIMEOUT_SECONDS = 180.0
+REMOTE_TEXT_MARKERS = (
+    "віддален",
+    "удален",
+    "дистанційн",
+    "дистанцион",
+    "remote",
+    "work from home",
+)
 
 
 class RobotaUaSourceError(RuntimeError):
@@ -116,10 +150,15 @@ class RobotaUaSource(BaseSource):
         client: httpx.AsyncClient | None = None,
         max_searches_per_run: int | None = None,
         reader_pacer: ReaderRequestPacer | None = None,
+        *,
+        direct_api_base_url: str | None = None,
+        export_url: str | None = None,
     ) -> None:
         self._search_urls = search_urls
         self._reader_base_url = reader_base_url.rstrip("/")
         self._api_reader_base_url = api_reader_base_url.rstrip("/")
+        self._direct_api_base_url = direct_api_base_url.rstrip("/") if direct_api_base_url else None
+        self._export_url = export_url.strip() if export_url and export_url.strip() else None
         self._request_timeout_seconds = request_timeout_seconds
         self._max_pages_per_search = max_pages_per_search
         self._max_items = max_items
@@ -136,6 +175,9 @@ class RobotaUaSource(BaseSource):
         seen: set[str] = set()
         yielded = 0
         card_batches: list[list[RobotaUaCard]] = []
+
+        export_cards, export_details = await self._sync_partner_export()
+
         semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
         selected_urls = search_batch(
             self._search_urls,
@@ -149,6 +191,10 @@ class RobotaUaSource(BaseSource):
         successful_search_pages = sum(result[0] for result in search_results)
         for _, batches, _ in search_results:
             card_batches.extend(batches)
+
+        if export_cards:
+            self.record_candidates(len(export_cards))
+            card_batches.append(export_cards)
 
         if not card_batches:
             if successful_search_pages:
@@ -173,8 +219,29 @@ class RobotaUaSource(BaseSource):
                 discovery_payload = {"is_remote": card.is_remote}
                 fingerprint = discovery_fingerprint(discovery_payload)
                 cached = self.cached_listing(card.external_id)
+                export_detail = export_details.get(card.external_id)
                 now = datetime.now(UTC)
-                if cached is not None and can_reuse_detail(
+                detail_fetched_at: datetime | None
+                if (
+                    cached is not None
+                    and export_detail is not None
+                    and cached.payload.get("company")
+                ):
+                    refreshed_payload = _detail_payload(export_detail)
+                    if (
+                        refreshed_payload.get("title") == cached.payload.get("title")
+                        and refreshed_payload.get("description")
+                        == cached.payload.get("description")
+                        and refreshed_payload.get("salary_text")
+                        == cached.payload.get("salary_text")
+                        and cached.detail_fetched_at is not None
+                    ):
+                        payload = dict(cached.payload)
+                        detail_fetched_at = cached.detail_fetched_at
+                    else:
+                        payload = refreshed_payload
+                        detail_fetched_at = now
+                elif cached is not None and can_reuse_detail(
                     cached,
                     fingerprint=fingerprint,
                     cached_fingerprint=discovery_fingerprint(
@@ -189,7 +256,7 @@ class RobotaUaSource(BaseSource):
                 else:
                     await polite_delay(self._detail_request_delay_seconds)
                     try:
-                        detail = await self._fetch_detail(card)
+                        detail = await self._fetch_detail(card, export_fallback=export_detail)
                     except RobotaUaSourceError as error:
                         self.report_warning(str(error))
                         self.record_detail_failure()
@@ -213,6 +280,218 @@ class RobotaUaSource(BaseSource):
                 if yielded >= self._max_items:
                     self.mark_limit_reached()
                     return
+
+    async def _sync_partner_export(
+        self,
+    ) -> tuple[list[RobotaUaCard], dict[str, RobotaUaDetail]]:
+        if self._export_url is None:
+            return [], {}
+        try:
+            export_ids, export_cards, export_details = await self._stream_partner_export(
+                self._export_url
+            )
+        except RobotaUaSourceError as error:
+            self.report_warning(str(error))
+            return [], {}
+        self.record_snapshot_external_ids(export_ids)
+        return export_cards, export_details
+
+    async def _stream_partner_export(
+        self, export_url: str
+    ) -> tuple[set[str], list[RobotaUaCard], dict[str, RobotaUaDetail]]:
+        if self._client is not None:
+            return await self._read_partner_export_stream(self._client, export_url)
+        timeout = httpx.Timeout(min(EXPORT_TIMEOUT_SECONDS, MAX_RUN_SECONDS))
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=timeout,
+        ) as client:
+            return await self._read_partner_export_stream(client, export_url)
+
+    async def _read_partner_export_stream(
+        self, client: httpx.AsyncClient, export_url: str
+    ) -> tuple[set[str], list[RobotaUaCard], dict[str, RobotaUaDetail]]:
+        budget = getattr(self, "_download_budget", None)
+        deadline = monotonic() + EXPORT_TIMEOUT_SECONDS
+        if budget is not None:
+            deadline = min(deadline, budget.deadline)
+
+        export_ids: set[str] = set()
+        export_cards: list[RobotaUaCard] = []
+        export_details: dict[str, RobotaUaDetail] = {}
+        seen_export_cards: set[str] = set()
+
+        original = httpx.URL(export_url)
+        current = original
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        }
+        try:
+            async with asyncio.timeout_at(deadline):
+                for redirect in range(MAX_REDIRECTS + 1):
+                    if monotonic() >= deadline:
+                        raise TimeoutError
+                    async with client.stream(
+                        "GET",
+                        current,
+                        headers=headers,
+                        follow_redirects=False,
+                        timeout=max(0.001, deadline - monotonic()),
+                    ) as response:
+                        if response.has_redirect_location:
+                            target = response.url.join(response.headers["location"])
+                            if (
+                                redirect == MAX_REDIRECTS
+                                or not _redirect_allowed(original, target)
+                                or not _redirect_allowed(response.url, target)
+                            ):
+                                raise RobotaUaSourceError(
+                                    "Robota.ua partner export redirect exceeded allowed origin."
+                                )
+                            current = target
+                            continue
+                        if response.status_code in {401, 403, 429}:
+                            raise RobotaUaAccessError(
+                                f"Robota.ua partner export returned HTTP {response.status_code}."
+                            )
+                        if response.status_code >= 400:
+                            raise RobotaUaSourceError(
+                                f"Robota.ua partner export returned HTTP {response.status_code}."
+                            )
+
+                        if response.is_stream_consumed:
+                            raw_chunks: AsyncIterator[bytes] = _single_chunk(response.content)
+                            decoder = _Decoder("identity", MAX_EXPORT_DECODED_BYTES)
+                        else:
+                            raw_chunks = response.aiter_raw()
+                            encoding = response.headers.get("content-encoding", "").strip().lower()
+                            decoder = _Decoder(encoding, MAX_EXPORT_DECODED_BYTES)
+
+                        text_decoder = codecs.getincrementaldecoder("utf-8")()
+                        json_decoder = json.JSONDecoder()
+                        buffer = ""
+                        started_array = False
+                        completed_array = False
+                        wire_bytes = 0
+
+                        async for raw in raw_chunks:
+                            if monotonic() >= deadline:
+                                raise TimeoutError
+                            wire_bytes += len(raw)
+                            if wire_bytes > MAX_EXPORT_WIRE_BYTES:
+                                raise RobotaUaSourceError(
+                                    "Robota.ua partner export exceeded wire byte limit."
+                                )
+                            decoded_bytes = decoder.decode(raw)
+                            buffer += text_decoder.decode(decoded_bytes, final=False)
+                            buffer, started_array, completed_array = _consume_export_buffer(
+                                buffer,
+                                json_decoder=json_decoder,
+                                started_array=started_array,
+                                completed_array=completed_array,
+                                eof=False,
+                                on_item=lambda item: self._handle_export_item(
+                                    item,
+                                    export_ids=export_ids,
+                                    export_cards=export_cards,
+                                    export_details=export_details,
+                                    seen_export_cards=seen_export_cards,
+                                ),
+                            )
+
+                        decoder.finish()
+                        buffer += text_decoder.decode(b"", final=True)
+                        buffer, started_array, completed_array = _consume_export_buffer(
+                            buffer,
+                            json_decoder=json_decoder,
+                            started_array=started_array,
+                            completed_array=completed_array,
+                            eof=True,
+                            on_item=lambda item: self._handle_export_item(
+                                item,
+                                export_ids=export_ids,
+                                export_cards=export_cards,
+                                export_details=export_details,
+                                seen_export_cards=seen_export_cards,
+                            ),
+                        )
+                        if not completed_array or not export_ids:
+                            raise RobotaUaSourceError(
+                                "Robota.ua partner export did not contain a complete snapshot."
+                            )
+                        return export_ids, export_cards, export_details
+        except TimeoutError as error:
+            raise RobotaUaSourceError(
+                "Robota.ua partner export timed out before completion."
+            ) from error
+        except DownloadLimitError as error:
+            raise RobotaUaSourceError(f"Robota.ua partner export stopped: {error}") from error
+        except (httpx.HTTPError, UnicodeDecodeError) as error:
+            raise RobotaUaSourceError(
+                f"Robota.ua partner export request failed ({type(error).__name__})."
+            ) from error
+        raise RobotaUaSourceError("Robota.ua partner export exceeded redirect limit.")
+
+    def _handle_export_item(
+        self,
+        item: dict[str, Any],
+        *,
+        export_ids: set[str],
+        export_cards: list[RobotaUaCard],
+        export_details: dict[str, RobotaUaDetail],
+        seen_export_cards: set[str],
+    ) -> None:
+        raw_url = item.get("Url")
+        if not isinstance(raw_url, str):
+            return
+        match = VACANCY_URL_PATTERN.search(raw_url)
+        if match is None:
+            return
+        external_id = match.group("id")
+        export_ids.add(external_id)
+        canonical_url = _canonical_vacancy_url(match.group(0))
+
+        cached = self.cached_listing(external_id)
+        detail = parse_robota_ua_export_detail(
+            item,
+            company=_optional_string(cached.payload.get("company")) if cached else None,
+            location_text=(
+                _optional_string(cached.payload.get("location_text")) if cached else None
+            ),
+            is_remote=(
+                bool(cached.payload.get("is_remote"))
+                if cached is not None
+                else bool(self._remote_only)
+            ),
+        )
+        if detail is None:
+            return
+        if cached is not None:
+            export_details[external_id] = detail
+
+        is_candidate = _is_export_discovery_candidate(item, remote_only=self._remote_only)
+        has_cached_update = cached is not None and (
+            detail.title != cached.payload.get("title")
+            or detail.description != cached.payload.get("description")
+            or detail.salary_text != cached.payload.get("salary_text")
+        )
+        if (
+            external_id not in seen_export_cards
+            and len(export_cards) < self._max_items
+            and (is_candidate or has_cached_update)
+        ):
+            seen_export_cards.add(external_id)
+            export_cards.append(
+                RobotaUaCard(
+                    external_id=external_id,
+                    url=canonical_url,
+                    is_remote=detail.is_remote,
+                )
+            )
+            export_details[external_id] = detail
 
     async def _collect_search(
         self, search_url: str, semaphore: asyncio.Semaphore
@@ -255,7 +534,12 @@ class RobotaUaSource(BaseSource):
             "Vacancy availability could not be determined."
         )
 
-    async def _fetch_detail(self, card: RobotaUaCard) -> RobotaUaDetail | None:
+    async def _fetch_detail(
+        self,
+        card: RobotaUaCard,
+        *,
+        export_fallback: RobotaUaDetail | None = None,
+    ) -> RobotaUaDetail | None:
         try:
             api_response = await self._fetch_api_detail(card.external_id)
             return parse_robota_ua_api_detail(
@@ -266,6 +550,8 @@ class RobotaUaSource(BaseSource):
         except RobotaUaAccessError:
             raise
         except RobotaUaSourceError as error:
+            if export_fallback is not None:
+                return export_fallback
             self.report_warning(f"{error} Falling back to the vacancy page.")
 
         try:
@@ -277,6 +563,17 @@ class RobotaUaSource(BaseSource):
         return parse_robota_ua_detail(markdown)
 
     async def _fetch_api_detail(self, external_id: str) -> str:
+        if self._direct_api_base_url is not None:
+            direct_url = f"{self._direct_api_base_url}/vacancy?id={external_id}"
+            try:
+                return await self._fetch_direct_api(direct_url)
+            except RobotaUaAccessError:
+                raise
+            except RobotaUaSourceError as error:
+                if not self._api_reader_base_url:
+                    raise
+                self.report_warning(f"{error} Trying API reader fallback.")
+
         request_url = f"{self._api_reader_base_url}/vacancy?id={external_id}"
         if self._client is not None:
             return await self._request(self._client, request_url)
@@ -288,6 +585,39 @@ class RobotaUaSource(BaseSource):
             timeout=timeout,
         ) as client:
             return await self._request(client, request_url)
+
+    async def _fetch_direct_api(self, request_url: str) -> str:
+        if self._client is not None:
+            return await self._request_direct(self._client, request_url)
+        timeout = httpx.Timeout(self._request_timeout_seconds)
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=timeout,
+        ) as client:
+            return await self._request_direct(client, request_url)
+
+    async def _request_direct(self, client: httpx.AsyncClient, request_url: str) -> str:
+        try:
+            response = await bounded_get(
+                client,
+                request_url,
+                timeout_seconds=self._request_timeout_seconds,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                budget=getattr(self, "_download_budget", None),
+            )
+            response.raise_for_status()
+        except DownloadLimitError as error:
+            raise RobotaUaSourceError(f"Robota.ua download stopped: {error}") from error
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            error_type = RobotaUaAccessError if status in {401, 403, 429} else RobotaUaSourceError
+            raise error_type(f"Robota.ua direct API returned HTTP {status}.") from error
+        except httpx.HTTPError as error:
+            raise RobotaUaSourceError(
+                f"Robota.ua direct API request failed ({type(error).__name__})."
+            ) from error
+        return response.text
 
     def normalize(self, raw_listing: RawListing) -> NormalizedOpportunity:
         payload = raw_listing.payload
@@ -365,6 +695,171 @@ class RobotaUaSource(BaseSource):
         ):
             raise RobotaUaAccessError("Robota.ua reader returned an access restriction.")
         return content
+
+
+async def _single_chunk(content: bytes) -> AsyncIterator[bytes]:
+    yield content
+
+
+def _consume_export_buffer(
+    buffer: str,
+    *,
+    json_decoder: json.JSONDecoder,
+    started_array: bool,
+    completed_array: bool,
+    eof: bool,
+    on_item: Any,
+) -> tuple[str, bool, bool]:
+    if not started_array:
+        stripped = buffer.lstrip(" \t\r\n\ufeff")
+        if not stripped:
+            if eof:
+                raise RobotaUaSourceError("Robota.ua partner export returned an empty body.")
+            return "", False, False
+        if stripped[0] != "[":
+            raise RobotaUaSourceError("Robota.ua partner export did not start with a JSON array.")
+        started_array = True
+        buffer = stripped[1:]
+
+    pos = 0
+    length = len(buffer)
+    while pos < length:
+        while pos < length and buffer[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= length:
+            break
+        if completed_array:
+            raise RobotaUaSourceError(
+                "Robota.ua partner export contained trailing data after array end."
+            )
+        if buffer[pos] == "]":
+            completed_array = True
+            pos += 1
+            continue
+        if buffer[pos] != "{":
+            raise RobotaUaSourceError(
+                "Robota.ua partner export contained an unexpected non-object item."
+            )
+        try:
+            item, next_pos = json_decoder.raw_decode(buffer, pos)
+        except json.JSONDecodeError as error:
+            if eof:
+                raise RobotaUaSourceError(
+                    "Robota.ua partner export JSON was truncated or invalid."
+                ) from error
+            break
+        if not isinstance(item, dict):
+            raise RobotaUaSourceError("Robota.ua partner export item was not a JSON object.")
+        on_item(item)
+        pos = next_pos
+
+    remaining = buffer[pos:] if pos > 0 else buffer
+    if len(remaining) > MAX_EXPORT_ITEM_CHARS:
+        raise RobotaUaSourceError("Robota.ua partner export item exceeded size limit.")
+    if eof and not completed_array:
+        raise RobotaUaSourceError("Robota.ua partner export JSON array was not closed.")
+    return remaining, started_array, completed_array
+
+
+def parse_robota_ua_export_detail(
+    item: dict[str, Any],
+    *,
+    company: str | None = None,
+    location_text: str | None = None,
+    is_remote: bool = False,
+) -> RobotaUaDetail | None:
+    title = _optional_string(item.get("DescriptionShort"))
+    description_html = _optional_string(item.get("Description"))
+    if title is None or description_html is None:
+        return None
+    description = _clean_text(html_to_text(description_html))
+    if not description:
+        return None
+    city_id = item.get("CityId")
+    resolved_location = location_text or ("Чехія" if city_id == CZECHIA_CITY_ID else None)
+    text_remote = _has_remote_text(title, description)
+    return RobotaUaDetail(
+        title=title,
+        company=company,
+        description=description,
+        salary_text=_export_salary_text(item),
+        location_text=resolved_location,
+        employment_type=_export_employment_type(item.get("WorkType")),
+        published_at=_datetime(item.get("LastUpdate")),
+        is_remote=is_remote or text_remote,
+    )
+
+
+def _is_export_discovery_candidate(item: dict[str, Any], *, remote_only: bool) -> bool:
+    rubric_id = item.get("RubricId")
+    branch_id = item.get("BranchId")
+    city_id = item.get("CityId")
+    if rubric_id != IT_RUBRIC_ID and branch_id != IT_BRANCH_ID and city_id != CZECHIA_CITY_ID:
+        return False
+    title = _optional_string(item.get("DescriptionShort"))
+    description_html = _optional_string(item.get("Description"))
+    if title is None or description_html is None:
+        return False
+    title_lower = title.casefold()
+    if city_id != CZECHIA_CITY_ID and not any(
+        term.casefold() in title_lower for term in PORTFOLIO_QUERIES
+    ):
+        return False
+    if not remote_only:
+        return True
+    return _has_remote_text(title, description_html)
+
+
+def _has_remote_text(title: str, description: str) -> bool:
+    combined = f"{title} {description}".casefold()
+    return any(marker in combined for marker in REMOTE_TEXT_MARKERS)
+
+
+def _export_salary_text(item: dict[str, Any]) -> str | None:
+    comment = _optional_string(item.get("SalaryTxt"))
+    if comment is not None and _salary_currency(comment) is not None:
+        return comment
+    minimum = _positive_decimal(item.get("SalaryFrom"))
+    maximum = _positive_decimal(item.get("SalaryTo"))
+    exact = _positive_decimal(item.get("Salary"))
+    if minimum is not None and maximum is not None and minimum != maximum:
+        return f"{_format_decimal(minimum)} — {_format_decimal(maximum)} ₴"
+    amount = minimum or maximum or exact
+    if amount is None:
+        return None
+    return f"{_format_decimal(amount)} ₴"
+
+
+def _export_employment_type(value: Any) -> str | None:
+    text = _optional_string(value)
+    if text is None:
+        return None
+    lowered = text.casefold()
+    for key, mapped in EXPORT_EMPLOYMENT_TYPES.items():
+        if key in lowered:
+            return mapped
+    return None
+
+
+def _api_clusters_remote(payload: dict[str, Any]) -> bool:
+    clusters = payload.get("clusters")
+    if not isinstance(clusters, list):
+        return False
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        groups = cluster.get("groups")
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            if group.get("id") == REMOTE_CLUSTER_GROUP_ID:
+                return True
+            name = _optional_string(group.get("name"))
+            if name is not None and _has_remote_text(name, ""):
+                return True
+    return False
 
 
 def _reader_content(markdown: str) -> str:
@@ -461,7 +956,7 @@ def parse_robota_ua_api_detail(
         location_text=_optional_string(payload.get("cityName")),
         employment_type=_api_employment_type(payload.get("scheduleId")),
         published_at=_datetime(payload.get("date")),
-        is_remote=is_remote,
+        is_remote=is_remote or _api_clusters_remote(payload),
     )
 
 

@@ -1287,3 +1287,84 @@ async def test_duplicate_audit_reports_broader_candidates_without_mutation(
     assert audit.groups[0].normalized_title == "junior python developer"
     async with sqlite_session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(Opportunity)) == 2
+
+
+@pytest.mark.asyncio
+async def test_robota_partner_export_snapshot_closes_absent_vacancies_and_survives_expiration(
+    sqlite_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from jobradar.opportunities.expiration import StaleExpirationService
+
+    export_active_ids = ["111", "222"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://export.test/vacancies_dodomu.json":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "Sitename": "robota.ua",
+                        "CityId": 1,
+                        "RubricId": 1,
+                        "BranchId": 2,
+                        "DescriptionShort": f"Remote Python Developer {vid}",
+                        "Description": "<p>Remote Python FastAPI role.</p>",
+                        "WorkType": "Повна",
+                        "Salary": 50000,
+                        "Url": f"https://robota.ua/company1/vacancy{vid}",
+                        "LastUpdate": "2026-10-20T08:50:00",
+                    }
+                    for vid in export_active_ids
+                ],
+            )
+        if request.url.host == "api.robota.ua" and request.url.path == "/vacancy":
+            vid = request.url.params["id"]
+            return httpx.Response(
+                200,
+                json={
+                    "id": int(vid),
+                    "name": f"Remote Python Developer {vid}",
+                    "companyName": f"Company {vid}",
+                    "description": f"<p>Remote Python FastAPI role {vid}.</p>",
+                    "cityName": "Київ",
+                    "date": "2026-10-20T08:50:00",
+                    "salary": 50000,
+                    "scheduleId": 1,
+                    "isActive": True,
+                },
+            )
+        return httpx.Response(200, text="Markdown Content:\nNo vacancies found.")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = RobotaUaSource(
+            search_urls=("https://robota.ua/zapros/python-remote/ukraine",),
+            reader_base_url="https://reader.test",
+            api_reader_base_url="https://api-reader.test",
+            direct_api_base_url="https://api.robota.ua",
+            export_url="https://export.test/vacancies_dodomu.json",
+            max_pages_per_search=1,
+            client=client,
+        )
+        service = IngestionService(sqlite_session_factory)
+        first = await service.run_source(source)
+        assert first.status is RunStatus.SUCCEEDED
+        assert first.created == 2
+
+        export_active_ids = ["111"]
+        second = await service.run_source(source)
+        assert second.status is RunStatus.SUCCEEDED
+        assert second.deactivated == 1
+
+    expiration = await StaleExpirationService(sqlite_session_factory).expire_stale(
+        employment_days=30,
+        freelance_days=30,
+    )
+    assert expiration.restored_recent == 0
+
+    async with sqlite_session_factory() as session:
+        closed_listing = await session.scalar(select(Listing).where(Listing.external_id == "222"))
+        open_listing = await session.scalar(select(Listing).where(Listing.external_id == "111"))
+        assert closed_listing is not None and open_listing is not None
+        assert closed_listing.is_active is False
+        assert closed_listing.archive_reason == "source_closed"
+        assert open_listing.is_active is True
